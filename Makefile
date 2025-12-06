@@ -8,8 +8,12 @@ TARGET  = echo
 
 # Source files (will be populated as implementation progresses)
 SRCS    = src/main.c \
-          src/platform/posix.c
+          src/platform/posix.c \
+          src/crypto/sha256.c
 OBJS    = $(SRCS:.c=.o)
+
+# Test files
+TEST_SHA256 = test/unit/test_sha256
 
 .PHONY: all clean test
 
@@ -21,9 +25,14 @@ $(TARGET): $(OBJS)
 %.o: %.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-clean:
-	rm -f $(TARGET) $(OBJS)
-	find src -name '*.o' -delete
+# Test targets
+$(TEST_SHA256): test/unit/test_sha256.c src/crypto/sha256.c
+	$(CC) $(CFLAGS) -o $@ $^
 
-test:
-	@echo "No tests yet"
+test: $(TEST_SHA256)
+	@echo "Running SHA-256 tests..."
+	@./$(TEST_SHA256)
+
+clean:
+	rm -f $(TARGET) $(OBJS) $(TEST_SHA256)
+	find src -name '*.o' -delete

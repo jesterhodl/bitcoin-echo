@@ -4,6 +4,10 @@ echo.exe
 *.o
 *.obj
 
+# Test binaries
+test/unit/test_*
+!test/unit/test_*.c
+
 # Editor files
 *.swp
 *~
