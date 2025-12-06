@@ -2,8 +2,8 @@
 # Build once. Build right. Stop.
 
 CC      = cc
-CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -O2 -Iinclude
-LDFLAGS =
+CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -O2 -Iinclude -pthread
+LDFLAGS = -pthread
 TARGET  = echo
 
 # Source files (will be populated as implementation progresses)

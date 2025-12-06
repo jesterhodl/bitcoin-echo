@@ -31,6 +31,10 @@
 #include <netdb.h>
 #include <fcntl.h>
 
+/* Threading */
+#include <pthread.h>
+#include <time.h>
+
 /*
  * ============================================================================
  * Opaque Type Definitions
@@ -49,27 +53,27 @@ struct plat_socket {
 };
 
 /*
- * Thread structure (Session 1.3).
+ * Thread structure.
+ * Wraps pthread_t handle.
  */
 struct plat_thread {
-    /* Will contain pthread_t */
-    int placeholder;
+    pthread_t handle;
 };
 
 /*
- * Mutex structure (Session 1.3).
+ * Mutex structure.
+ * Wraps pthread_mutex_t.
  */
 struct plat_mutex {
-    /* Will contain pthread_mutex_t */
-    int placeholder;
+    pthread_mutex_t handle;
 };
 
 /*
- * Condition variable structure (Session 1.3).
+ * Condition variable structure.
+ * Wraps pthread_cond_t.
  */
 struct plat_cond {
-    /* Will contain pthread_cond_t */
-    int placeholder;
+    pthread_cond_t handle;
 };
 
 /*
@@ -279,80 +283,152 @@ int plat_dns_resolve(const char *host, char *ip_out, size_t ip_len)
 
 /*
  * ============================================================================
- * Threading Implementation (Session 1.3 - placeholder stubs)
+ * Threading Implementation
  * ============================================================================
  */
 
 int plat_thread_create(plat_thread_t *thread, void *(*fn)(void *), void *arg)
 {
-    (void)thread; (void)fn; (void)arg;
-    return PLAT_ERR; /* Not yet implemented */
+    int ret;
+
+    if (thread == NULL || fn == NULL) {
+        return PLAT_ERR;
+    }
+
+    ret = pthread_create(&thread->handle, NULL, fn, arg);
+    if (ret != 0) {
+        return PLAT_ERR;
+    }
+
+    return PLAT_OK;
 }
 
 int plat_thread_join(plat_thread_t *thread)
 {
-    (void)thread;
-    return PLAT_ERR; /* Not yet implemented */
+    int ret;
+
+    if (thread == NULL) {
+        return PLAT_ERR;
+    }
+
+    ret = pthread_join(thread->handle, NULL);
+    if (ret != 0) {
+        return PLAT_ERR;
+    }
+
+    return PLAT_OK;
 }
 
 void plat_mutex_init(plat_mutex_t *mutex)
 {
-    (void)mutex;
-    /* Not yet implemented */
+    if (mutex == NULL) {
+        return;
+    }
+
+    pthread_mutex_init(&mutex->handle, NULL);
 }
 
 void plat_mutex_destroy(plat_mutex_t *mutex)
 {
-    (void)mutex;
-    /* Not yet implemented */
+    if (mutex == NULL) {
+        return;
+    }
+
+    pthread_mutex_destroy(&mutex->handle);
 }
 
 void plat_mutex_lock(plat_mutex_t *mutex)
 {
-    (void)mutex;
-    /* Not yet implemented */
+    if (mutex == NULL) {
+        return;
+    }
+
+    pthread_mutex_lock(&mutex->handle);
 }
 
 void plat_mutex_unlock(plat_mutex_t *mutex)
 {
-    (void)mutex;
-    /* Not yet implemented */
+    if (mutex == NULL) {
+        return;
+    }
+
+    pthread_mutex_unlock(&mutex->handle);
 }
 
 void plat_cond_init(plat_cond_t *cond)
 {
-    (void)cond;
-    /* Not yet implemented */
+    if (cond == NULL) {
+        return;
+    }
+
+    pthread_cond_init(&cond->handle, NULL);
 }
 
 void plat_cond_destroy(plat_cond_t *cond)
 {
-    (void)cond;
-    /* Not yet implemented */
+    if (cond == NULL) {
+        return;
+    }
+
+    pthread_cond_destroy(&cond->handle);
 }
 
 void plat_cond_wait(plat_cond_t *cond, plat_mutex_t *mutex)
 {
-    (void)cond; (void)mutex;
-    /* Not yet implemented */
+    if (cond == NULL || mutex == NULL) {
+        return;
+    }
+
+    pthread_cond_wait(&cond->handle, &mutex->handle);
 }
 
 int plat_cond_timedwait(plat_cond_t *cond, plat_mutex_t *mutex, uint32_t ms)
 {
-    (void)cond; (void)mutex; (void)ms;
-    return PLAT_ERR; /* Not yet implemented */
+    struct timespec ts;
+    int ret;
+
+    if (cond == NULL || mutex == NULL) {
+        return PLAT_ERR;
+    }
+
+    /* Get current time and add timeout */
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_sec += ms / 1000;
+    ts.tv_nsec += (ms % 1000) * 1000000;
+
+    /* Handle nanosecond overflow */
+    if (ts.tv_nsec >= 1000000000) {
+        ts.tv_sec += 1;
+        ts.tv_nsec -= 1000000000;
+    }
+
+    ret = pthread_cond_timedwait(&cond->handle, &mutex->handle, &ts);
+    if (ret == ETIMEDOUT) {
+        return PLAT_ERR_TIMEOUT;
+    }
+    if (ret != 0) {
+        return PLAT_ERR;
+    }
+
+    return PLAT_OK;
 }
 
 void plat_cond_signal(plat_cond_t *cond)
 {
-    (void)cond;
-    /* Not yet implemented */
+    if (cond == NULL) {
+        return;
+    }
+
+    pthread_cond_signal(&cond->handle);
 }
 
 void plat_cond_broadcast(plat_cond_t *cond)
 {
-    (void)cond;
-    /* Not yet implemented */
+    if (cond == NULL) {
+        return;
+    }
+
+    pthread_cond_broadcast(&cond->handle);
 }
 
 /*
