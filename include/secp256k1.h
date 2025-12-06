@@ -262,4 +262,84 @@ int secp256k1_pubkey_parse(secp256k1_point_t *p, const uint8_t *data, size_t len
  */
 void secp256k1_pubkey_serialize(uint8_t *out, const secp256k1_point_t *p, int compressed);
 
+/*
+ * ============================================================================
+ * Additional Scalar Operations (for ECDSA)
+ * ============================================================================
+ */
+
+/*
+ * Multiply two scalars: r = a * b (mod n).
+ */
+void secp256k1_scalar_mul(secp256k1_scalar_t *r,
+                          const secp256k1_scalar_t *a,
+                          const secp256k1_scalar_t *b);
+
+/*
+ * Add two scalars: r = a + b (mod n).
+ */
+void secp256k1_scalar_add(secp256k1_scalar_t *r,
+                          const secp256k1_scalar_t *a,
+                          const secp256k1_scalar_t *b);
+
+/*
+ * Invert scalar: r = a^(-1) (mod n).
+ * Uses Fermat's little theorem: a^(-1) = a^(n-2) (mod n).
+ * Undefined if a == 0.
+ */
+void secp256k1_scalar_inv(secp256k1_scalar_t *r, const secp256k1_scalar_t *a);
+
+/*
+ * ============================================================================
+ * ECDSA Signatures (Session 2.5)
+ * ============================================================================
+ */
+
+/*
+ * ECDSA signature: (r, s) pair.
+ * Both r and s are 256-bit scalars in range [1, n-1].
+ */
+typedef struct {
+    secp256k1_scalar_t r;
+    secp256k1_scalar_t s;
+} secp256k1_ecdsa_sig_t;
+
+/*
+ * Parse DER-encoded ECDSA signature.
+ *
+ * Implements strict BIP-66 validation:
+ *   - Signature must be strict DER with no extra bytes
+ *   - r and s must be positive integers
+ *   - No leading zero bytes unless required for sign
+ *   - r and s must be in range [1, n-1]
+ *
+ * Returns 1 on success, 0 on failure.
+ */
+int secp256k1_ecdsa_sig_parse_der(secp256k1_ecdsa_sig_t *sig,
+                                  const uint8_t *data,
+                                  size_t len);
+
+/*
+ * Verify ECDSA signature.
+ *
+ * Algorithm:
+ *   1. Check r, s in range [1, n-1]
+ *   2. w = s^(-1) mod n
+ *   3. u1 = e * w mod n (e is message hash)
+ *   4. u2 = r * w mod n
+ *   5. R = u1*G + u2*P
+ *   6. If R = infinity, reject
+ *   7. Accept if R.x mod n == r
+ *
+ * Parameters:
+ *   sig: The signature (r, s)
+ *   msg_hash: 32-byte SHA256d hash of the message
+ *   pubkey: The public key point
+ *
+ * Returns 1 if valid, 0 if invalid.
+ */
+int secp256k1_ecdsa_verify(const secp256k1_ecdsa_sig_t *sig,
+                           const uint8_t msg_hash[32],
+                           const secp256k1_point_t *pubkey);
+
 #endif /* ECHO_SECP256K1_H */

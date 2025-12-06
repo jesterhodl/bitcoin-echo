@@ -1044,3 +1044,392 @@ void secp256k1_pubkey_serialize(uint8_t *out, const secp256k1_point_t *p, int co
         secp256k1_fe_get_bytes(out + 33, &y);
     }
 }
+
+/*
+ * ============================================================================
+ * Additional Scalar Operations (Session 2.5)
+ * ============================================================================
+ */
+
+/*
+ * Scalar addition: r = a + b (mod n)
+ */
+void secp256k1_scalar_add(secp256k1_scalar_t *r,
+                          const secp256k1_scalar_t *a,
+                          const secp256k1_scalar_t *b)
+{
+    uint64_t carry = 0;
+    int i;
+
+    /* Add limbs with carry */
+    for (i = 0; i < 8; i++) {
+        carry += (uint64_t)a->limbs[i] + b->limbs[i];
+        r->limbs[i] = (uint32_t)carry;
+        carry >>= 32;
+    }
+
+    /* If carry or result >= n, subtract n */
+    if (carry || scalar_cmp_n(r) >= 0) {
+        uint64_t borrow = 0;
+        for (i = 0; i < 8; i++) {
+            uint64_t diff = (uint64_t)r->limbs[i] - SECP256K1_N[i] - borrow;
+            r->limbs[i] = (uint32_t)diff;
+            borrow = (diff >> 63) & 1;
+        }
+    }
+}
+
+/*
+ * Scalar multiplication: r = a * b (mod n)
+ *
+ * Uses schoolbook multiplication followed by reduction using
+ * the identity: 2^256 ≡ (2^256 - n) (mod n)
+ *
+ * 2^256 - n = 0x14551231950B75FC4402DA1732FC9BEBF
+ */
+void secp256k1_scalar_mul(secp256k1_scalar_t *r,
+                          const secp256k1_scalar_t *a,
+                          const secp256k1_scalar_t *b)
+{
+    uint32_t t[16];  /* 512-bit product */
+    uint64_t carry;
+    int i, j;
+
+    /*
+     * 2^256 - n in little-endian 32-bit limbs:
+     * n     = FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFE BAAEDCE6 AF48A03B BFD25E8C D0364141
+     * 2^256 - n = 00000000 00000000 00000000 00000001 45512319 50B75FC4 402DA173 2FC9BEBF
+     */
+    static const uint32_t K[8] = {
+        0x2FC9BEBF, 0x402DA173, 0x50B75FC4, 0x45512319,
+        0x00000001, 0x00000000, 0x00000000, 0x00000000
+    };
+
+    /* Initialize product to zero */
+    for (i = 0; i < 16; i++) {
+        t[i] = 0;
+    }
+
+    /* Schoolbook multiplication with immediate carry propagation */
+    for (i = 0; i < 8; i++) {
+        carry = 0;
+        for (j = 0; j < 8; j++) {
+            uint64_t prod = (uint64_t)a->limbs[i] * b->limbs[j];
+            uint64_t sum = (uint64_t)t[i + j] + (prod & 0xFFFFFFFF) + carry;
+            t[i + j] = (uint32_t)sum;
+            carry = (sum >> 32) + (prod >> 32);
+        }
+        /* Propagate remaining carry */
+        for (j = i + 8; j < 16 && carry; j++) {
+            uint64_t sum = (uint64_t)t[j] + carry;
+            t[j] = (uint32_t)sum;
+            carry = sum >> 32;
+        }
+    }
+
+    /*
+     * Reduce: t = t_low + t_high * 2^256
+     *           ≡ t_low + t_high * K (mod n)
+     *
+     * We iterate until high part is zero.
+     */
+    while (t[8] || t[9] || t[10] || t[11] || t[12] || t[13] || t[14] || t[15]) {
+        uint32_t high[8];
+        uint64_t acc;
+
+        /* Save high part */
+        for (i = 0; i < 8; i++) {
+            high[i] = t[i + 8];
+            t[i + 8] = 0;
+        }
+
+        /* t_low += high * K */
+        for (i = 0; i < 8; i++) {
+            if (high[i] == 0) continue;
+            carry = 0;
+            for (j = 0; j < 5; j++) {  /* K only has 5 non-zero limbs (0-4) */
+                if (i + j < 16) {
+                    acc = (uint64_t)t[i + j] + (uint64_t)high[i] * K[j] + carry;
+                    t[i + j] = (uint32_t)acc;
+                    carry = acc >> 32;
+                }
+            }
+            /* Propagate carry */
+            for (j = i + 5; j < 16 && carry; j++) {
+                acc = (uint64_t)t[j] + carry;
+                t[j] = (uint32_t)acc;
+                carry = acc >> 32;
+            }
+        }
+    }
+
+    /* Copy low 256 bits to result */
+    for (i = 0; i < 8; i++) {
+        r->limbs[i] = t[i];
+    }
+
+    /* Final reduction: subtract n if >= n */
+    scalar_reduce(r);
+}
+
+/*
+ * Scalar inversion: r = a^(-1) (mod n)
+ *
+ * Uses Fermat's little theorem: a^(-1) = a^(n-2) (mod n)
+ */
+void secp256k1_scalar_inv(secp256k1_scalar_t *r, const secp256k1_scalar_t *a)
+{
+    /*
+     * n - 2 = FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFE BAAEDCE6 AF48A03B BFD25E8C D036413F
+     */
+    static const uint32_t N_MINUS_2[8] = {
+        0xD036413F, 0xBFD25E8C, 0xAF48A03B, 0xBAAEDCE6,
+        0xFFFFFFFE, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF
+    };
+
+    secp256k1_scalar_t base, result, tmp;
+    int i, j, k;
+
+    /* Copy input */
+    for (i = 0; i < 8; i++) {
+        base.limbs[i] = a->limbs[i];
+    }
+
+    /* result = 1 */
+    result.limbs[0] = 1;
+    for (i = 1; i < 8; i++) {
+        result.limbs[i] = 0;
+    }
+
+    /* Square-and-multiply */
+    for (i = 0; i < 8; i++) {
+        uint32_t word = N_MINUS_2[i];
+        for (j = 0; j < 32; j++) {
+            if (word & 1) {
+                secp256k1_scalar_mul(&tmp, &result, &base);
+                for (k = 0; k < 8; k++) {
+                    result.limbs[k] = tmp.limbs[k];
+                }
+            }
+            secp256k1_scalar_mul(&tmp, &base, &base);
+            for (k = 0; k < 8; k++) {
+                base.limbs[k] = tmp.limbs[k];
+            }
+            word >>= 1;
+        }
+    }
+
+    for (i = 0; i < 8; i++) {
+        r->limbs[i] = result.limbs[i];
+    }
+}
+
+/*
+ * ============================================================================
+ * ECDSA Signature Operations (Session 2.5)
+ * ============================================================================
+ */
+
+/*
+ * Parse DER-encoded ECDSA signature with strict BIP-66 validation.
+ *
+ * DER format:
+ *   0x30 [total-length] 0x02 [r-length] [r] 0x02 [s-length] [s]
+ *
+ * BIP-66 rules:
+ *   1. Total length must match actual content
+ *   2. r and s must be valid positive integers
+ *   3. No unnecessary leading zero bytes
+ *   4. r and s must be in range [1, n-1]
+ */
+int secp256k1_ecdsa_sig_parse_der(secp256k1_ecdsa_sig_t *sig,
+                                  const uint8_t *data,
+                                  size_t len)
+{
+    size_t pos = 0;
+    size_t r_len, s_len;
+    uint8_t r_bytes[33], s_bytes[33];
+    uint8_t padded[32];
+    int i;
+
+    /* Minimum valid signature: 30 06 02 01 XX 02 01 XX = 8 bytes */
+    if (len < 8 || len > 73) {
+        return 0;
+    }
+
+    /* Check SEQUENCE tag */
+    if (data[pos++] != 0x30) {
+        return 0;
+    }
+
+    /* Check length byte */
+    if (data[pos] != len - 2) {
+        return 0;
+    }
+    pos++;
+
+    /* Parse r INTEGER */
+    if (data[pos++] != 0x02) {
+        return 0;
+    }
+
+    r_len = data[pos++];
+    if (r_len == 0 || r_len > 33) {
+        return 0;
+    }
+    if (pos + r_len > len) {
+        return 0;
+    }
+
+    /* Check for negative (high bit set without leading zero) */
+    if (data[pos] & 0x80) {
+        return 0;  /* Negative integer not allowed */
+    }
+
+    /* Check for unnecessary leading zero */
+    if (r_len > 1 && data[pos] == 0x00 && !(data[pos + 1] & 0x80)) {
+        return 0;  /* Unnecessary leading zero */
+    }
+
+    /* Copy r bytes */
+    for (i = 0; i < (int)r_len && i < 33; i++) {
+        r_bytes[i] = data[pos + i];
+    }
+    pos += r_len;
+
+    /* Parse s INTEGER */
+    if (pos >= len || data[pos++] != 0x02) {
+        return 0;
+    }
+
+    s_len = data[pos++];
+    if (s_len == 0 || s_len > 33) {
+        return 0;
+    }
+    if (pos + s_len != len) {
+        return 0;  /* Must consume exactly all bytes */
+    }
+
+    /* Check for negative */
+    if (data[pos] & 0x80) {
+        return 0;
+    }
+
+    /* Check for unnecessary leading zero */
+    if (s_len > 1 && data[pos] == 0x00 && !(data[pos + 1] & 0x80)) {
+        return 0;
+    }
+
+    /* Copy s bytes */
+    for (i = 0; i < (int)s_len && i < 33; i++) {
+        s_bytes[i] = data[pos + i];
+    }
+
+    /* Convert r to scalar (pad to 32 bytes) */
+    memset(padded, 0, 32);
+    if (r_len <= 32) {
+        memcpy(padded + (32 - r_len), r_bytes, r_len);
+    } else {
+        /* 33 bytes with leading zero - skip the zero */
+        memcpy(padded, r_bytes + 1, 32);
+    }
+    secp256k1_scalar_set_bytes(&sig->r, padded);
+
+    /* Check r != 0 */
+    if (secp256k1_scalar_is_zero(&sig->r)) {
+        return 0;
+    }
+
+    /* Convert s to scalar */
+    memset(padded, 0, 32);
+    if (s_len <= 32) {
+        memcpy(padded + (32 - s_len), s_bytes, s_len);
+    } else {
+        memcpy(padded, s_bytes + 1, 32);
+    }
+    secp256k1_scalar_set_bytes(&sig->s, padded);
+
+    /* Check s != 0 */
+    if (secp256k1_scalar_is_zero(&sig->s)) {
+        return 0;
+    }
+
+    return 1;
+}
+
+/*
+ * ECDSA verification.
+ *
+ * Algorithm:
+ *   1. Check r, s in [1, n-1] (already done in parse)
+ *   2. e = message hash as scalar
+ *   3. w = s^(-1) mod n
+ *   4. u1 = e * w mod n
+ *   5. u2 = r * w mod n
+ *   6. R = u1 * G + u2 * P
+ *   7. If R = infinity, reject
+ *   8. Accept if R.x mod n == r
+ */
+int secp256k1_ecdsa_verify(const secp256k1_ecdsa_sig_t *sig,
+                           const uint8_t msg_hash[32],
+                           const secp256k1_point_t *pubkey)
+{
+    secp256k1_scalar_t e, w, u1, u2;
+    secp256k1_point_t R1, R2, R;
+    secp256k1_fe_t rx;
+    uint8_t rx_bytes[32];
+    secp256k1_scalar_t rx_scalar;
+    int i;
+
+    /* Check pubkey is not infinity */
+    if (secp256k1_point_is_infinity(pubkey)) {
+        return 0;
+    }
+
+    /* Check pubkey is on curve */
+    if (!secp256k1_point_is_valid(pubkey)) {
+        return 0;
+    }
+
+    /* e = message hash as scalar (reduced mod n) */
+    secp256k1_scalar_set_bytes(&e, msg_hash);
+
+    /* w = s^(-1) mod n */
+    secp256k1_scalar_inv(&w, &sig->s);
+
+    /* u1 = e * w mod n */
+    secp256k1_scalar_mul(&u1, &e, &w);
+
+    /* u2 = r * w mod n */
+    secp256k1_scalar_mul(&u2, &sig->r, &w);
+
+    /* R1 = u1 * G */
+    secp256k1_point_mul_gen(&R1, &u1);
+
+    /* R2 = u2 * P */
+    secp256k1_point_mul(&R2, pubkey, &u2);
+
+    /* R = R1 + R2 */
+    secp256k1_point_add(&R, &R1, &R2);
+
+    /* If R = infinity, reject */
+    if (secp256k1_point_is_infinity(&R)) {
+        return 0;
+    }
+
+    /* Get R.x in affine coordinates */
+    secp256k1_point_get_xy(&rx, NULL, &R);
+
+    /* Convert to bytes, then to scalar (to reduce mod n) */
+    secp256k1_fe_get_bytes(rx_bytes, &rx);
+    secp256k1_scalar_set_bytes(&rx_scalar, rx_bytes);
+
+    /* Accept if rx_scalar == r */
+    for (i = 0; i < 8; i++) {
+        if (rx_scalar.limbs[i] != sig->r.limbs[i]) {
+            return 0;
+        }
+    }
+
+    return 1;
+}

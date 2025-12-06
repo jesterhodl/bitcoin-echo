@@ -19,6 +19,7 @@ TEST_SHA256          = test/unit/test_sha256
 TEST_RIPEMD160       = test/unit/test_ripemd160
 TEST_SECP256K1_FE    = test/unit/test_secp256k1_fe
 TEST_SECP256K1_GROUP = test/unit/test_secp256k1_group
+TEST_ECDSA           = test/unit/test_ecdsa
 
 .PHONY: all clean test
 
@@ -43,7 +44,10 @@ $(TEST_SECP256K1_FE): test/unit/test_secp256k1_fe.c src/crypto/secp256k1.c
 $(TEST_SECP256K1_GROUP): test/unit/test_secp256k1_group.c src/crypto/secp256k1.c
 	$(CC) $(CFLAGS) -o $@ $^
 
-test: $(TEST_SHA256) $(TEST_RIPEMD160) $(TEST_SECP256K1_FE) $(TEST_SECP256K1_GROUP)
+$(TEST_ECDSA): test/unit/test_ecdsa.c src/crypto/secp256k1.c
+	$(CC) $(CFLAGS) -o $@ $^
+
+test: $(TEST_SHA256) $(TEST_RIPEMD160) $(TEST_SECP256K1_FE) $(TEST_SECP256K1_GROUP) $(TEST_ECDSA)
 	@echo "Running SHA-256 tests..."
 	@./$(TEST_SHA256)
 	@echo ""
@@ -55,7 +59,10 @@ test: $(TEST_SHA256) $(TEST_RIPEMD160) $(TEST_SECP256K1_FE) $(TEST_SECP256K1_GRO
 	@echo ""
 	@echo "Running secp256k1 group tests..."
 	@./$(TEST_SECP256K1_GROUP)
+	@echo ""
+	@echo "Running ECDSA tests..."
+	@./$(TEST_ECDSA)
 
 clean:
-	rm -f $(TARGET) $(OBJS) $(TEST_SHA256) $(TEST_RIPEMD160) $(TEST_SECP256K1_FE) $(TEST_SECP256K1_GROUP)
+	rm -f $(TARGET) $(OBJS) $(TEST_SHA256) $(TEST_RIPEMD160) $(TEST_SECP256K1_FE) $(TEST_SECP256K1_GROUP) $(TEST_ECDSA)
 	find src -name '*.o' -delete
