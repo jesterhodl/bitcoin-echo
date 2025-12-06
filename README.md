@@ -51,8 +51,11 @@ Runs all unit tests for cryptographic primitives.
 
 ## Documentation
 
-- [Whitepaper](https://bitcoinecho.org) — Technical specification
-- [Manifesto](https://bitcoinecho.org) — Philosophical foundation
+Documentation lives in the [`bitcoinecho-org`](https://github.com/bitcoinecho/bitcoinecho-org) repository:
+
+- [Whitepaper](https://github.com/bitcoinecho/bitcoinecho-org/blob/main/bitcoin-echo-whitepaper.md) — Technical specification
+- [Manifesto](https://github.com/bitcoinecho/bitcoinecho-org/blob/main/bitcoin-echo-manifesto.md) — Philosophical foundation
+- [Roadmap](https://github.com/bitcoinecho/bitcoinecho-org/blob/main/ROADMAP.md) — Implementation progress
 
 ## License
 
