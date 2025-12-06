@@ -35,6 +35,21 @@
 #include <pthread.h>
 #include <time.h>
 
+/* File System */
+#include <sys/stat.h>
+
+/* Time */
+#include <sys/time.h>
+
+/* Entropy - prefer getentropy on modern systems, fallback to /dev/urandom */
+#if defined(__APPLE__) && defined(__MACH__)
+    #include <sys/random.h>  /* getentropy on macOS 10.12+ */
+    #define HAVE_GETENTROPY 1
+#elif defined(__linux__)
+    #include <sys/random.h>  /* getrandom on Linux 3.17+ */
+    #define HAVE_GETRANDOM 1
+#endif
+
 /*
  * ============================================================================
  * Opaque Type Definitions
@@ -433,82 +448,332 @@ void plat_cond_broadcast(plat_cond_t *cond)
 
 /*
  * ============================================================================
- * File System Implementation (Session 1.4 - placeholder stubs)
+ * File System Implementation
  * ============================================================================
  */
 
 int plat_file_read(const char *path, uint8_t **data, size_t *len)
 {
-    (void)path; (void)data; (void)len;
-    return PLAT_ERR; /* Not yet implemented */
+    FILE *fp;
+    long size;
+    uint8_t *buf;
+    size_t read_len;
+
+    if (path == NULL || data == NULL || len == NULL) {
+        return PLAT_ERR;
+    }
+
+    *data = NULL;
+    *len = 0;
+
+    fp = fopen(path, "rb");
+    if (fp == NULL) {
+        return PLAT_ERR;
+    }
+
+    /* Get file size */
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        fclose(fp);
+        return PLAT_ERR;
+    }
+
+    size = ftell(fp);
+    if (size < 0) {
+        fclose(fp);
+        return PLAT_ERR;
+    }
+
+    if (fseek(fp, 0, SEEK_SET) != 0) {
+        fclose(fp);
+        return PLAT_ERR;
+    }
+
+    /* Allocate buffer */
+    buf = malloc((size_t)size);
+    if (buf == NULL) {
+        fclose(fp);
+        return PLAT_ERR;
+    }
+
+    /* Read entire file */
+    read_len = fread(buf, 1, (size_t)size, fp);
+    fclose(fp);
+
+    if (read_len != (size_t)size) {
+        free(buf);
+        return PLAT_ERR;
+    }
+
+    *data = buf;
+    *len = (size_t)size;
+    return PLAT_OK;
 }
 
 int plat_file_write(const char *path, const uint8_t *data, size_t len)
 {
-    (void)path; (void)data; (void)len;
-    return PLAT_ERR; /* Not yet implemented */
+    FILE *fp;
+    size_t written;
+
+    if (path == NULL || (data == NULL && len > 0)) {
+        return PLAT_ERR;
+    }
+
+    fp = fopen(path, "wb");
+    if (fp == NULL) {
+        return PLAT_ERR;
+    }
+
+    if (len > 0) {
+        written = fwrite(data, 1, len, fp);
+        if (written != len) {
+            fclose(fp);
+            return PLAT_ERR;
+        }
+    }
+
+    fclose(fp);
+    return PLAT_OK;
 }
 
 int plat_file_append(const char *path, const uint8_t *data, size_t len)
 {
-    (void)path; (void)data; (void)len;
-    return PLAT_ERR; /* Not yet implemented */
+    FILE *fp;
+    size_t written;
+
+    if (path == NULL || (data == NULL && len > 0)) {
+        return PLAT_ERR;
+    }
+
+    fp = fopen(path, "ab");
+    if (fp == NULL) {
+        return PLAT_ERR;
+    }
+
+    if (len > 0) {
+        written = fwrite(data, 1, len, fp);
+        if (written != len) {
+            fclose(fp);
+            return PLAT_ERR;
+        }
+    }
+
+    fclose(fp);
+    return PLAT_OK;
 }
 
 int plat_file_rename(const char *old_path, const char *new_path)
 {
-    (void)old_path; (void)new_path;
-    return PLAT_ERR; /* Not yet implemented */
+    if (old_path == NULL || new_path == NULL) {
+        return PLAT_ERR;
+    }
+
+    /* rename() is atomic on POSIX when on same filesystem */
+    if (rename(old_path, new_path) != 0) {
+        return PLAT_ERR;
+    }
+
+    return PLAT_OK;
 }
 
 int plat_file_delete(const char *path)
 {
-    (void)path;
-    return PLAT_ERR; /* Not yet implemented */
+    if (path == NULL) {
+        return PLAT_ERR;
+    }
+
+    if (unlink(path) != 0) {
+        return PLAT_ERR;
+    }
+
+    return PLAT_OK;
 }
 
 int plat_file_exists(const char *path)
 {
-    (void)path;
-    return 0; /* Not yet implemented */
+    struct stat st;
+
+    if (path == NULL) {
+        return 0;
+    }
+
+    return (stat(path, &st) == 0) ? 1 : 0;
+}
+
+/*
+ * Helper function to create directory with parents.
+ * Similar to "mkdir -p".
+ */
+static int mkdir_recursive(const char *path)
+{
+    char tmp[4096];
+    char *p;
+    size_t len;
+
+    len = strlen(path);
+    if (len == 0 || len >= sizeof(tmp)) {
+        return PLAT_ERR;
+    }
+
+    memcpy(tmp, path, len + 1);
+
+    /* Remove trailing slash if present */
+    if (tmp[len - 1] == '/') {
+        tmp[len - 1] = '\0';
+    }
+
+    /* Create each directory component */
+    for (p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
+                return PLAT_ERR;
+            }
+            *p = '/';
+        }
+    }
+
+    /* Create final directory */
+    if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
+        return PLAT_ERR;
+    }
+
+    return PLAT_OK;
 }
 
 int plat_dir_create(const char *path)
 {
-    (void)path;
-    return PLAT_ERR; /* Not yet implemented */
+    if (path == NULL) {
+        return PLAT_ERR;
+    }
+
+    return mkdir_recursive(path);
 }
 
 /*
  * ============================================================================
- * Time Implementation (Session 1.4 - placeholder stubs)
+ * Time Implementation
  * ============================================================================
  */
 
 uint64_t plat_time_ms(void)
 {
-    return 0; /* Not yet implemented */
+    struct timeval tv;
+
+    if (gettimeofday(&tv, NULL) != 0) {
+        return 0;
+    }
+
+    return (uint64_t)tv.tv_sec * 1000 + (uint64_t)tv.tv_usec / 1000;
 }
 
 uint64_t plat_monotonic_ms(void)
 {
-    return 0; /* Not yet implemented */
+    struct timespec ts;
+
+    /*
+     * CLOCK_MONOTONIC is available on all POSIX systems we care about.
+     * It never goes backward and is not affected by NTP adjustments.
+     */
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return 0;
+    }
+
+    return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
 }
 
 void plat_sleep_ms(uint32_t ms)
 {
-    (void)ms;
-    /* Not yet implemented */
+    struct timespec req;
+    struct timespec rem;
+
+    req.tv_sec = ms / 1000;
+    req.tv_nsec = (ms % 1000) * 1000000L;
+
+    /* Handle interruptions by signal */
+    while (nanosleep(&req, &rem) != 0 && errno == EINTR) {
+        req = rem;
+    }
 }
 
 /*
  * ============================================================================
- * Entropy Implementation (Session 1.4 - placeholder stubs)
+ * Entropy Implementation
  * ============================================================================
  */
 
 int plat_random_bytes(uint8_t *buf, size_t len)
 {
-    (void)buf; (void)len;
-    return PLAT_ERR; /* Not yet implemented */
+    if (buf == NULL || len == 0) {
+        return PLAT_ERR;
+    }
+
+#if defined(HAVE_GETENTROPY)
+    /*
+     * getentropy() is available on macOS 10.12+ and some BSDs.
+     * Maximum 256 bytes per call.
+     */
+    while (len > 0) {
+        size_t chunk = (len > 256) ? 256 : len;
+        if (getentropy(buf, chunk) != 0) {
+            return PLAT_ERR;
+        }
+        buf += chunk;
+        len -= chunk;
+    }
+    return PLAT_OK;
+
+#elif defined(HAVE_GETRANDOM)
+    /*
+     * getrandom() is available on Linux 3.17+.
+     * No size limit, but may block if entropy pool not initialized.
+     */
+    while (len > 0) {
+        ssize_t ret = getrandom(buf, len, 0);
+        if (ret < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return PLAT_ERR;
+        }
+        buf += ret;
+        len -= (size_t)ret;
+    }
+    return PLAT_OK;
+
+#else
+    /*
+     * Fallback: read from /dev/urandom.
+     * Available on all Unix-like systems.
+     */
+    {
+        int fd;
+        ssize_t ret;
+
+        fd = open("/dev/urandom", O_RDONLY);
+        if (fd < 0) {
+            return PLAT_ERR;
+        }
+
+        while (len > 0) {
+            ret = read(fd, buf, len);
+            if (ret < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                close(fd);
+                return PLAT_ERR;
+            }
+            if (ret == 0) {
+                /* Unexpected EOF */
+                close(fd);
+                return PLAT_ERR;
+            }
+            buf += ret;
+            len -= (size_t)ret;
+        }
+
+        close(fd);
+        return PLAT_OK;
+    }
+#endif
 }
