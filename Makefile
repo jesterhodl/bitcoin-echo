@@ -21,6 +21,7 @@ TEST_SECP256K1_FE    = test/unit/test_secp256k1_fe
 TEST_SECP256K1_GROUP = test/unit/test_secp256k1_group
 TEST_ECDSA           = test/unit/test_ecdsa
 TEST_SCHNORR         = test/unit/test_schnorr
+TEST_SIG_VERIFY      = test/unit/test_sig_verify
 
 .PHONY: all clean test
 
@@ -51,7 +52,10 @@ $(TEST_ECDSA): test/unit/test_ecdsa.c src/crypto/secp256k1.c src/crypto/sha256.c
 $(TEST_SCHNORR): test/unit/test_schnorr.c src/crypto/secp256k1.c src/crypto/sha256.c
 	$(CC) $(CFLAGS) -o $@ $^
 
-test: $(TEST_SHA256) $(TEST_RIPEMD160) $(TEST_SECP256K1_FE) $(TEST_SECP256K1_GROUP) $(TEST_ECDSA) $(TEST_SCHNORR)
+$(TEST_SIG_VERIFY): test/unit/test_sig_verify.c src/consensus/sig_verify.c src/crypto/secp256k1.c src/crypto/sha256.c
+	$(CC) $(CFLAGS) -o $@ $^
+
+test: $(TEST_SHA256) $(TEST_RIPEMD160) $(TEST_SECP256K1_FE) $(TEST_SECP256K1_GROUP) $(TEST_ECDSA) $(TEST_SCHNORR) $(TEST_SIG_VERIFY)
 	@echo "Running SHA-256 tests..."
 	@./$(TEST_SHA256)
 	@echo ""
@@ -69,7 +73,10 @@ test: $(TEST_SHA256) $(TEST_RIPEMD160) $(TEST_SECP256K1_FE) $(TEST_SECP256K1_GRO
 	@echo ""
 	@echo "Running Schnorr tests..."
 	@./$(TEST_SCHNORR)
+	@echo ""
+	@echo "Running Signature Interface tests..."
+	@./$(TEST_SIG_VERIFY)
 
 clean:
-	rm -f $(TARGET) $(OBJS) $(TEST_SHA256) $(TEST_RIPEMD160) $(TEST_SECP256K1_FE) $(TEST_SECP256K1_GROUP) $(TEST_ECDSA) $(TEST_SCHNORR)
+	rm -f $(TARGET) $(OBJS) $(TEST_SHA256) $(TEST_RIPEMD160) $(TEST_SECP256K1_FE) $(TEST_SECP256K1_GROUP) $(TEST_ECDSA) $(TEST_SCHNORR) $(TEST_SIG_VERIFY)
 	find src -name '*.o' -delete
