@@ -342,4 +342,72 @@ int secp256k1_ecdsa_verify(const secp256k1_ecdsa_sig_t *sig,
                            const uint8_t msg_hash[32],
                            const secp256k1_point_t *pubkey);
 
+/*
+ * ============================================================================
+ * Schnorr Signatures — BIP-340 (Session 2.6)
+ * ============================================================================
+ *
+ * BIP-340 defines Schnorr signatures for Bitcoin Taproot.
+ * Key differences from ECDSA:
+ *   - x-only public keys (32 bytes instead of 33)
+ *   - 64-byte signatures (r, s) without DER encoding
+ *   - Tagged hashes for domain separation
+ */
+
+/*
+ * Lift x-only public key to curve point.
+ *
+ * Given a 32-byte x-coordinate, recovers the point with even y.
+ * This is the "lift_x" operation from BIP-340.
+ *
+ * Returns 1 on success, 0 if x is not a valid x-coordinate.
+ */
+int secp256k1_xonly_pubkey_parse(secp256k1_point_t *p, const uint8_t xonly[32]);
+
+/*
+ * Serialize point to x-only format (32 bytes).
+ * Only the x-coordinate is output.
+ */
+void secp256k1_xonly_pubkey_serialize(uint8_t xonly[32], const secp256k1_point_t *p);
+
+/*
+ * BIP-340 tagged hash: SHA256(SHA256(tag) || SHA256(tag) || msg)
+ *
+ * Parameters:
+ *   out: 32-byte output buffer
+ *   tag: UTF-8 tag string (null-terminated)
+ *   msg: message bytes
+ *   msg_len: length of message
+ */
+void secp256k1_schnorr_tagged_hash(uint8_t out[32],
+                                   const char *tag,
+                                   const uint8_t *msg,
+                                   size_t msg_len);
+
+/*
+ * Verify BIP-340 Schnorr signature.
+ *
+ * Algorithm:
+ *   1. P = lift_x(pk) — recover point from x-only pubkey
+ *   2. r = int(sig[0:32]), s = int(sig[32:64])
+ *   3. If r >= p, fail
+ *   4. If s >= n, fail
+ *   5. e = int(tagged_hash("BIP0340/challenge", r || pk || msg)) mod n
+ *   6. R = s*G - e*P
+ *   7. If R is infinity or has_even_y(R) is false or x(R) != r, fail
+ *   8. Return success
+ *
+ * Parameters:
+ *   sig: 64-byte signature (r || s)
+ *   msg: message bytes (any length)
+ *   msg_len: length of message
+ *   pubkey: 32-byte x-only public key
+ *
+ * Returns 1 if valid, 0 if invalid.
+ */
+int secp256k1_schnorr_verify(const uint8_t sig[64],
+                             const uint8_t *msg,
+                             size_t msg_len,
+                             const uint8_t pubkey[32]);
+
 #endif /* ECHO_SECP256K1_H */

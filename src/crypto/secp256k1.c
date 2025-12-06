@@ -16,6 +16,7 @@
  */
 
 #include "secp256k1.h"
+#include "sha256.h"
 #include <string.h>
 
 /*
@@ -1431,5 +1432,228 @@ int secp256k1_ecdsa_verify(const secp256k1_ecdsa_sig_t *sig,
         }
     }
 
+    return 1;
+}
+
+/*
+ * ============================================================================
+ * Schnorr Signature Operations — BIP-340 (Session 2.6)
+ * ============================================================================
+ */
+
+/*
+ * Lift x-only public key to curve point.
+ *
+ * BIP-340 "lift_x" operation:
+ *   1. Check x < p
+ *   2. Compute y² = x³ + 7 (mod p)
+ *   3. Compute y = sqrt(y²), fail if no square root
+ *   4. Return point with even y
+ */
+int secp256k1_xonly_pubkey_parse(secp256k1_point_t *p, const uint8_t xonly[32])
+{
+    secp256k1_fe_t x, y, x3, y2, seven;
+
+    /* Load x-coordinate */
+    if (!secp256k1_fe_set_bytes(&x, xonly)) {
+        return 0;  /* x >= p */
+    }
+
+    /* Compute y² = x³ + 7 */
+    secp256k1_fe_sqr(&x3, &x);
+    secp256k1_fe_mul(&x3, &x3, &x);
+    secp256k1_fe_set_int(&seven, 7);
+    secp256k1_fe_add(&y2, &x3, &seven);
+
+    /* Compute y = sqrt(y²) */
+    if (!secp256k1_fe_sqrt(&y, &y2)) {
+        return 0;  /* Not a valid x-coordinate */
+    }
+
+    /* Ensure y is even (BIP-340 convention) */
+    if (secp256k1_fe_is_odd(&y)) {
+        secp256k1_fe_neg(&y, &y);
+    }
+
+    secp256k1_point_set_xy(p, &x, &y);
+    return 1;
+}
+
+/*
+ * Serialize point to x-only format (32 bytes).
+ */
+void secp256k1_xonly_pubkey_serialize(uint8_t xonly[32], const secp256k1_point_t *p)
+{
+    secp256k1_fe_t x;
+
+    secp256k1_point_get_xy(&x, NULL, p);
+    secp256k1_fe_get_bytes(xonly, &x);
+}
+
+/*
+ * BIP-340 tagged hash: SHA256(SHA256(tag) || SHA256(tag) || msg)
+ *
+ * The double SHA256(tag) prefix provides domain separation and allows
+ * optimized implementations to precompute the midstate.
+ */
+void secp256k1_schnorr_tagged_hash(uint8_t out[32],
+                                   const char *tag,
+                                   const uint8_t *msg,
+                                   size_t msg_len)
+{
+    sha256_ctx_t ctx;
+    uint8_t tag_hash[32];
+    size_t tag_len;
+
+    /* Compute SHA256(tag) */
+    tag_len = strlen(tag);
+    sha256((const uint8_t *)tag, tag_len, tag_hash);
+
+    /* Compute SHA256(tag_hash || tag_hash || msg) */
+    sha256_init(&ctx);
+    sha256_update(&ctx, tag_hash, 32);
+    sha256_update(&ctx, tag_hash, 32);
+    sha256_update(&ctx, msg, msg_len);
+    sha256_final(&ctx, out);
+}
+
+/*
+ * Negate scalar: r = -a (mod n)
+ */
+static void scalar_negate(secp256k1_scalar_t *r, const secp256k1_scalar_t *a)
+{
+    uint64_t borrow = 0;
+    int i;
+
+    if (secp256k1_scalar_is_zero(a)) {
+        for (i = 0; i < 8; i++) {
+            r->limbs[i] = 0;
+        }
+        return;
+    }
+
+    /* r = n - a */
+    for (i = 0; i < 8; i++) {
+        uint64_t diff = (uint64_t)SECP256K1_N[i] - a->limbs[i] - borrow;
+        r->limbs[i] = (uint32_t)diff;
+        borrow = (diff >> 63) & 1;
+    }
+}
+
+/*
+ * Verify BIP-340 Schnorr signature.
+ *
+ * Algorithm:
+ *   1. P = lift_x(pk)
+ *   2. r = int(sig[0:32]), s = int(sig[32:64])
+ *   3. If r >= p, fail
+ *   4. If s >= n, fail
+ *   5. e = int(tagged_hash("BIP0340/challenge", r || pk || msg)) mod n
+ *   6. R = s*G - e*P
+ *   7. If R is infinity or has_even_y(R) is false or x(R) != r, fail
+ *   8. Return success
+ */
+int secp256k1_schnorr_verify(const uint8_t sig[64],
+                             const uint8_t *msg,
+                             size_t msg_len,
+                             const uint8_t pubkey[32])
+{
+    secp256k1_point_t P, R, sG, eP;
+    secp256k1_fe_t r_fe, Rx, Ry;
+    secp256k1_scalar_t s, e, neg_e;
+    uint8_t challenge_input[32 + 32 + 1024];  /* r || pk || msg (max 1024 for msg) */
+    uint8_t challenge_hash[32];
+    uint8_t r_bytes[32], Rx_bytes[32];
+    int i;
+
+    /* For very large messages, we need dynamic allocation or streaming.
+     * For simplicity, we limit message size here. BIP-340 allows any size. */
+    if (msg_len > 1024) {
+        /* For messages > 1024 bytes, use streaming approach */
+        sha256_ctx_t ctx;
+        uint8_t tag_hash[32];
+
+        sha256((const uint8_t *)"BIP0340/challenge", 17, tag_hash);
+        sha256_init(&ctx);
+        sha256_update(&ctx, tag_hash, 32);
+        sha256_update(&ctx, tag_hash, 32);
+        sha256_update(&ctx, sig, 32);      /* r */
+        sha256_update(&ctx, pubkey, 32);   /* pk */
+        sha256_update(&ctx, msg, msg_len); /* msg */
+        sha256_final(&ctx, challenge_hash);
+    } else {
+        /* Build challenge input: r || pk || msg */
+        memcpy(challenge_input, sig, 32);           /* r */
+        memcpy(challenge_input + 32, pubkey, 32);   /* pk */
+        memcpy(challenge_input + 64, msg, msg_len); /* msg */
+
+        /* e = tagged_hash("BIP0340/challenge", r || pk || msg) */
+        secp256k1_schnorr_tagged_hash(challenge_hash, "BIP0340/challenge",
+                                      challenge_input, 64 + msg_len);
+    }
+
+    /* 1. P = lift_x(pk) */
+    if (!secp256k1_xonly_pubkey_parse(&P, pubkey)) {
+        return 0;
+    }
+
+    /* 2. Parse r and s from signature */
+    /* r is just bytes, check later if valid x-coordinate */
+    memcpy(r_bytes, sig, 32);
+
+    /* Check r < p by trying to load as field element */
+    if (!secp256k1_fe_set_bytes(&r_fe, r_bytes)) {
+        return 0;  /* r >= p */
+    }
+
+    /* Load s as scalar (automatically reduced mod n) */
+    secp256k1_scalar_set_bytes(&s, sig + 32);
+
+    /* Check s < n by comparing original bytes with what we loaded */
+    {
+        uint8_t s_check[32];
+        secp256k1_scalar_get_bytes(s_check, &s);
+        if (memcmp(s_check, sig + 32, 32) != 0) {
+            return 0;  /* s >= n (was reduced) */
+        }
+    }
+
+    /* 5. e = int(challenge_hash) mod n */
+    secp256k1_scalar_set_bytes(&e, challenge_hash);
+
+    /* 6. R = s*G - e*P = s*G + (-e)*P */
+    scalar_negate(&neg_e, &e);
+
+    /* Compute s*G */
+    secp256k1_point_mul_gen(&sG, &s);
+
+    /* Compute (-e)*P */
+    secp256k1_point_mul(&eP, &P, &neg_e);
+
+    /* R = sG + (-e)P */
+    secp256k1_point_add(&R, &sG, &eP);
+
+    /* 7a. If R is infinity, fail */
+    if (secp256k1_point_is_infinity(&R)) {
+        return 0;
+    }
+
+    /* 7b. Get R coordinates */
+    secp256k1_point_get_xy(&Rx, &Ry, &R);
+
+    /* 7c. Check has_even_y(R) */
+    if (secp256k1_fe_is_odd(&Ry)) {
+        return 0;
+    }
+
+    /* 7d. Check x(R) == r */
+    secp256k1_fe_get_bytes(Rx_bytes, &Rx);
+    for (i = 0; i < 32; i++) {
+        if (Rx_bytes[i] != r_bytes[i]) {
+            return 0;
+        }
+    }
+
+    /* 8. Success */
     return 1;
 }
