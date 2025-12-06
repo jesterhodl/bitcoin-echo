@@ -2,7 +2,7 @@
 # Build once. Build right. Stop.
 
 CC      = cc
-CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -O2
+CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -O2 -Iinclude
 LDFLAGS =
 TARGET  = echo
 

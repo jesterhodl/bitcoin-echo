@@ -5,7 +5,7 @@ REM Build once. Build right. Stop.
 setlocal
 
 set CC=cl
-set CFLAGS=/std:c11 /W4 /O2
+set CFLAGS=/std:c11 /W4 /O2 /Iinclude
 set TARGET=echo.exe
 
 REM Source files (will be populated as implementation progresses)
