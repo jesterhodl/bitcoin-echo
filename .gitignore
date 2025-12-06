@@ -1,0 +1,14 @@
+# Build artifacts
+echo
+echo.exe
+*.o
+*.obj
+
+# Editor files
+*.swp
+*~
+.vscode/
+.idea/
+
+# macOS
+.DS_Store
