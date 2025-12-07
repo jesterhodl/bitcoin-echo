@@ -8,7 +8,7 @@ A complete, ossified implementation of the Bitcoin protocol in pure C.
 
 **Phase 4: Script Interpreter** — Complete
 
-See the full [implementation roadmap](https://bitcoinecho.org/docs/whitepaper) for detailed progress.
+See the full [implementation roadmap](https://github.com/bitcoinecho/bitcoinecho-org/blob/main/ROADMAP.md) for detailed progress.
 
 | Component | Status |
 |-----------|--------|
