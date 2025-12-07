@@ -41,8 +41,9 @@ static size_t hex_to_bytes(const char *hex, uint8_t *out, size_t max_len)
 }
 
 /*
- * Print bytes as hex.
+ * Print bytes as hex (debug helper).
  */
+__attribute__((unused))
 static void print_hex(const uint8_t *data, size_t len)
 {
     size_t i;

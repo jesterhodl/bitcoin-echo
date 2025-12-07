@@ -4127,6 +4127,9 @@ echo_result_t taproot_verify_merkle_proof(const uint8_t leaf_hash[32],
                                            const uint8_t output_key[32],
                                            uint8_t parity)
 {
+    /* Parity check is deferred - see comment at end of function */
+    (void)parity;
+
     if (leaf_hash == NULL || internal_key == NULL || output_key == NULL) {
         return ECHO_ERR_NULL_PARAM;
     }

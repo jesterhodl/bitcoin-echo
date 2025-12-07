@@ -110,6 +110,7 @@ static void test_p2sh_hash_mismatch(void)
 
     /* Redeem script: OP_1 */
     uint8_t redeem_script[] = {OP_1};
+    (void)redeem_script;  /* For documentation - scriptSig below is this script */
 
     /* scriptSig: push the redeem script */
     uint8_t script_sig[2];
