@@ -1,0 +1,456 @@
+/*
+ * Bitcoin Echo — Block Header Validation
+ *
+ * This module implements block header validation rules as specified in
+ * the Bitcoin protocol:
+ *
+ *   - Proof-of-work: block hash must be <= target derived from bits
+ *   - Timestamp: must be > median of previous 11 blocks (MTP)
+ *   - Timestamp: must be <= current time + 2 hours (MAX_FUTURE_TIME)
+ *   - Previous block: must reference a valid block
+ *   - Version: interpreted per BIP-9 version bits semantics
+ *
+ * These checks are performed without full block data—only the 80-byte
+ * header and context about the chain tip are required.
+ *
+ * Build once. Build right. Stop.
+ */
+
+#ifndef ECHO_BLOCK_VALIDATE_H
+#define ECHO_BLOCK_VALIDATE_H
+
+#include "echo_types.h"
+#include "block.h"
+
+/*
+ * Timestamp validation constants.
+ */
+
+/* Number of blocks used to compute median time past (MTP) */
+#define BLOCK_MTP_WINDOW  11
+
+/* Maximum time a block timestamp can be in the future (2 hours in seconds) */
+#define BLOCK_MAX_FUTURE_TIME  (2 * 60 * 60)
+
+/*
+ * BIP-9 version bits constants.
+ */
+
+/* Bits 29-31 must be 001 for BIP-9 version bits interpretation */
+#define BLOCK_VERSION_TOP_MASK      0xE0000000
+#define BLOCK_VERSION_TOP_BITS      0x20000000
+
+/* Individual version bit positions (0-28 available, but only 0-28 used) */
+#define BLOCK_VERSION_BIT_MASK      0x1FFFFFFF
+
+/*
+ * Difficulty adjustment constants.
+ *
+ * These match the values in echo_config.h but are duplicated here for
+ * module self-containment. Both refer to the same immutable protocol values.
+ */
+
+/* Blocks between difficulty adjustments */
+#define DIFFICULTY_INTERVAL         2016
+
+/* Target time for a difficulty period (2 weeks in seconds) */
+#define DIFFICULTY_TARGET_TIMESPAN  1209600
+
+/* Target time per block (10 minutes in seconds) */
+#define DIFFICULTY_TARGET_SPACING   600
+
+/* Minimum and maximum adjustment factors (factor of 4) */
+#define DIFFICULTY_MIN_TIMESPAN     (DIFFICULTY_TARGET_TIMESPAN / 4)  /* ~3.5 days */
+#define DIFFICULTY_MAX_TIMESPAN     (DIFFICULTY_TARGET_TIMESPAN * 4)  /* ~8 weeks */
+
+/* Proof-of-work limit (minimum difficulty target) for mainnet */
+/* This is the genesis block target: 0x00000000FFFF0000...0000 */
+#define DIFFICULTY_POWLIMIT_BITS    0x1d00ffff
+
+/*
+ * Block validation error codes.
+ * More specific than the general ECHO_ERR_* codes.
+ */
+typedef enum {
+    BLOCK_VALID = 0,
+
+    /* Header validation failures */
+    BLOCK_ERR_POW_FAILED,           /* Hash does not meet target */
+    BLOCK_ERR_TARGET_INVALID,       /* Bits field produces invalid target */
+    BLOCK_ERR_TIMESTAMP_TOO_OLD,    /* Timestamp <= median time past */
+    BLOCK_ERR_TIMESTAMP_TOO_NEW,    /* Timestamp > current time + 2 hours */
+    BLOCK_ERR_PREV_BLOCK_UNKNOWN,   /* Previous block hash not found */
+    BLOCK_ERR_PREV_BLOCK_INVALID,   /* Previous block is itself invalid */
+    BLOCK_ERR_VERSION_INVALID,      /* Version field invalid for height */
+
+    /* Used in later sessions */
+    BLOCK_ERR_DIFFICULTY_MISMATCH,  /* Bits don't match expected difficulty */
+    BLOCK_ERR_MERKLE_MISMATCH,      /* Merkle root doesn't match txs */
+    BLOCK_ERR_NO_TRANSACTIONS,      /* Block has no transactions */
+    BLOCK_ERR_NO_COINBASE,          /* First tx is not coinbase */
+    BLOCK_ERR_MULTI_COINBASE,       /* Multiple coinbase transactions */
+    BLOCK_ERR_SIZE_EXCEEDED,        /* Block size/weight exceeded */
+    BLOCK_ERR_SIGOPS_EXCEEDED,      /* Too many signature operations */
+    BLOCK_ERR_TX_INVALID,           /* A transaction failed validation */
+
+} block_validation_error_t;
+
+/*
+ * Block validation context.
+ *
+ * Provides the chain context needed to validate a block header.
+ * This is an opaque interface—the actual chain state management
+ * is implemented in later sessions.
+ */
+typedef struct {
+    /* Height of the block being validated (parent height + 1) */
+    uint32_t height;
+
+    /* Timestamps of the previous 11 blocks (for MTP calculation).
+     * timestamps[0] is the parent block, timestamps[10] is 10 blocks back.
+     * If height < 11, only (height) entries are valid. */
+    uint32_t timestamps[BLOCK_MTP_WINDOW];
+    size_t   timestamp_count;   /* Number of valid entries (min(height, 11)) */
+
+    /* Current network-adjusted time (Unix timestamp).
+     * Used for the "not too far in future" check. */
+    uint32_t current_time;
+
+    /* Expected difficulty target (bits) for this height.
+     * Set by difficulty adjustment algorithm. */
+    uint32_t expected_bits;
+
+    /* Parent block hash (for prev_hash validation) */
+    hash256_t parent_hash;
+
+    /* Whether the parent block is valid */
+    echo_bool_t parent_valid;
+
+} block_validation_ctx_t;
+
+/*
+ * Initialize a validation context to default/safe values.
+ *
+ * Parameters:
+ *   ctx - Context to initialize
+ */
+void block_validate_ctx_init(block_validation_ctx_t *ctx);
+
+/*
+ * Compute the median time past (MTP) from context.
+ *
+ * The MTP is the median of the timestamps of the previous BLOCK_MTP_WINDOW
+ * blocks. For blocks at height < 11, only available timestamps are used.
+ *
+ * Parameters:
+ *   ctx - Validation context with timestamps populated
+ *
+ * Returns:
+ *   Median timestamp, or 0 if ctx is NULL or has no timestamps
+ */
+uint32_t block_validate_mtp(const block_validation_ctx_t *ctx);
+
+/*
+ * Validate a block header's proof-of-work.
+ *
+ * Checks that the block hash (SHA256d of header) is less than or equal
+ * to the target derived from the bits field.
+ *
+ * Parameters:
+ *   header - Block header to validate
+ *   error  - Output: specific error if validation fails (may be NULL)
+ *
+ * Returns:
+ *   ECHO_TRUE if PoW is valid, ECHO_FALSE otherwise
+ */
+echo_bool_t block_validate_pow(const block_header_t *header,
+                                block_validation_error_t *error);
+
+/*
+ * Validate a block header's timestamp.
+ *
+ * Checks:
+ *   1. Timestamp > median time past (from ctx)
+ *   2. Timestamp <= current_time + MAX_FUTURE_TIME (from ctx)
+ *
+ * Parameters:
+ *   header - Block header to validate
+ *   ctx    - Validation context with timestamps and current_time
+ *   error  - Output: specific error if validation fails (may be NULL)
+ *
+ * Returns:
+ *   ECHO_TRUE if timestamp is valid, ECHO_FALSE otherwise
+ */
+echo_bool_t block_validate_timestamp(const block_header_t *header,
+                                      const block_validation_ctx_t *ctx,
+                                      block_validation_error_t *error);
+
+/*
+ * Validate a block header's previous block reference.
+ *
+ * Checks:
+ *   1. prev_hash matches ctx->parent_hash
+ *   2. Parent block is valid (ctx->parent_valid)
+ *
+ * Parameters:
+ *   header - Block header to validate
+ *   ctx    - Validation context with parent information
+ *   error  - Output: specific error if validation fails (may be NULL)
+ *
+ * Returns:
+ *   ECHO_TRUE if prev_hash is valid, ECHO_FALSE otherwise
+ */
+echo_bool_t block_validate_prev_block(const block_header_t *header,
+                                       const block_validation_ctx_t *ctx,
+                                       block_validation_error_t *error);
+
+/*
+ * Check if a block version uses BIP-9 version bits.
+ *
+ * BIP-9 version bits are indicated when the top 3 bits (29-31) are 001.
+ *
+ * Parameters:
+ *   version - Block version field
+ *
+ * Returns:
+ *   ECHO_TRUE if version uses BIP-9 semantics, ECHO_FALSE otherwise
+ */
+echo_bool_t block_version_uses_bip9(int32_t version);
+
+/*
+ * Extract a specific version bit from a BIP-9 version.
+ *
+ * Parameters:
+ *   version - Block version field
+ *   bit     - Bit position (0-28)
+ *
+ * Returns:
+ *   ECHO_TRUE if bit is set, ECHO_FALSE otherwise
+ */
+echo_bool_t block_version_bit(int32_t version, int bit);
+
+/*
+ * Validate a block header's version field.
+ *
+ * Currently performs minimal validation—versions 1-4 are always valid,
+ * and BIP-9 versions (with top bits 001) are valid at any height.
+ *
+ * Note: BIP-9 deployment-specific version requirements (e.g., mandatory
+ * signaling after lock-in) are checked separately during activation.
+ *
+ * Parameters:
+ *   header - Block header to validate
+ *   ctx    - Validation context with height
+ *   error  - Output: specific error if validation fails (may be NULL)
+ *
+ * Returns:
+ *   ECHO_TRUE if version is valid, ECHO_FALSE otherwise
+ */
+echo_bool_t block_validate_version(const block_header_t *header,
+                                    const block_validation_ctx_t *ctx,
+                                    block_validation_error_t *error);
+
+/*
+ * Perform all header validation checks.
+ *
+ * This is the main entry point for header validation. It performs:
+ *   1. Proof-of-work validation
+ *   2. Timestamp validation (MTP and future limit)
+ *   3. Previous block validation
+ *   4. Version validation
+ *
+ * Note: Difficulty target validation (bits == expected_bits) is NOT
+ * performed here—that requires the difficulty adjustment algorithm
+ * from Session 5.2.
+ *
+ * Parameters:
+ *   header - Block header to validate
+ *   ctx    - Validation context
+ *   error  - Output: specific error if validation fails (may be NULL)
+ *
+ * Returns:
+ *   ECHO_TRUE if header passes all checks, ECHO_FALSE otherwise
+ */
+echo_bool_t block_validate_header(const block_header_t *header,
+                                   const block_validation_ctx_t *ctx,
+                                   block_validation_error_t *error);
+
+/*
+ * Validate a genesis block header.
+ *
+ * The genesis block has special rules:
+ *   - prev_hash must be all zeros
+ *   - No MTP check (no previous blocks)
+ *   - Specific values for mainnet/testnet/regtest
+ *
+ * Parameters:
+ *   header - Block header to validate
+ *   error  - Output: specific error if validation fails (may be NULL)
+ *
+ * Returns:
+ *   ECHO_TRUE if this is a valid genesis block, ECHO_FALSE otherwise
+ */
+echo_bool_t block_validate_genesis(const block_header_t *header,
+                                    block_validation_error_t *error);
+
+/*
+ * Convert a block validation error to a human-readable string.
+ *
+ * Parameters:
+ *   error - Error code to convert
+ *
+ * Returns:
+ *   Static string describing the error
+ */
+const char *block_validation_error_str(block_validation_error_t error);
+
+/*
+ * ============================================================================
+ * Difficulty Adjustment (Session 5.2)
+ * ============================================================================
+ */
+
+/*
+ * Context for difficulty adjustment calculation.
+ *
+ * This structure holds the information needed to compute the expected
+ * difficulty for a block at a given height.
+ */
+typedef struct {
+    /* Height of the block we're computing difficulty for */
+    uint32_t height;
+
+    /* Timestamp of the first block in the current difficulty period.
+     * This is the block at height (height - (height % 2016)).
+     * For the first period (heights 0-2015), this is the genesis timestamp. */
+    uint32_t period_start_time;
+
+    /* Timestamp of the last block before this one (parent block).
+     * Used to compute actual time span of the period. */
+    uint32_t period_end_time;
+
+    /* The difficulty bits of the previous period.
+     * For heights 0-2015, this is the genesis difficulty.
+     * For subsequent periods, this is the bits from the last retarget block. */
+    uint32_t prev_bits;
+
+} difficulty_ctx_t;
+
+/*
+ * Initialize a difficulty context.
+ *
+ * Parameters:
+ *   ctx - Context to initialize
+ */
+void difficulty_ctx_init(difficulty_ctx_t *ctx);
+
+/*
+ * Check if a block height is at a difficulty adjustment boundary.
+ *
+ * Difficulty adjusts every 2016 blocks (heights 2016, 4032, 6048, etc.).
+ *
+ * Parameters:
+ *   height - Block height to check
+ *
+ * Returns:
+ *   ECHO_TRUE if this height triggers a difficulty adjustment
+ */
+echo_bool_t difficulty_is_retarget_height(uint32_t height);
+
+/*
+ * Compute the expected difficulty (bits) for a block at a given height.
+ *
+ * The difficulty adjustment algorithm:
+ *   1. If not at a retarget boundary, use previous block's bits
+ *   2. At retarget (every 2016 blocks):
+ *      a. Calculate actual time span of the previous 2016 blocks
+ *      b. Clamp time span to [TARGET_TIMESPAN/4, TARGET_TIMESPAN*4]
+ *      c. new_target = old_target * actual_time / TARGET_TIMESPAN
+ *      d. Ensure new_target <= proof-of-work limit (minimum difficulty)
+ *
+ * Parameters:
+ *   ctx  - Difficulty context with period information
+ *   bits - Output: computed difficulty bits
+ *
+ * Returns:
+ *   ECHO_OK on success
+ *   ECHO_ERR_NULL_PARAM if ctx or bits is NULL
+ */
+echo_result_t difficulty_compute_next(const difficulty_ctx_t *ctx,
+                                       uint32_t *bits);
+
+/*
+ * Validate that a block's difficulty bits match the expected value.
+ *
+ * Parameters:
+ *   header - Block header to validate
+ *   ctx    - Difficulty context
+ *   error  - Output: specific error if validation fails (may be NULL)
+ *
+ * Returns:
+ *   ECHO_TRUE if bits match expected, ECHO_FALSE otherwise
+ */
+echo_bool_t block_validate_difficulty(const block_header_t *header,
+                                       const difficulty_ctx_t *ctx,
+                                       block_validation_error_t *error);
+
+/*
+ * Compute the actual time span of a difficulty period.
+ *
+ * This is simply: period_end_time - period_start_time
+ *
+ * Parameters:
+ *   ctx - Difficulty context
+ *
+ * Returns:
+ *   Time span in seconds, or 0 if ctx is NULL
+ */
+uint32_t difficulty_actual_timespan(const difficulty_ctx_t *ctx);
+
+/*
+ * Clamp a time span to the allowed adjustment range.
+ *
+ * The time span is clamped to [TARGET_TIMESPAN/4, TARGET_TIMESPAN*4]
+ * to prevent extreme difficulty adjustments.
+ *
+ * Parameters:
+ *   timespan - Raw time span in seconds
+ *
+ * Returns:
+ *   Clamped time span
+ */
+uint32_t difficulty_clamp_timespan(uint32_t timespan);
+
+/*
+ * Compute a new target given the old target and time ratio.
+ *
+ * new_target = old_target * actual_timespan / TARGET_TIMESPAN
+ *
+ * The result is clamped to not exceed the proof-of-work limit.
+ *
+ * Parameters:
+ *   old_bits        - Previous difficulty bits
+ *   actual_timespan - Actual time span (already clamped)
+ *   new_bits        - Output: computed new difficulty bits
+ *
+ * Returns:
+ *   ECHO_OK on success
+ *   ECHO_ERR_NULL_PARAM if new_bits is NULL
+ */
+echo_result_t difficulty_adjust_target(uint32_t old_bits,
+                                        uint32_t actual_timespan,
+                                        uint32_t *new_bits);
+
+/*
+ * Get the proof-of-work limit (minimum difficulty) as a 256-bit target.
+ *
+ * Parameters:
+ *   target - Output: 256-bit target (32 bytes)
+ *
+ * Returns:
+ *   ECHO_OK on success
+ *   ECHO_ERR_NULL_PARAM if target is NULL
+ */
+echo_result_t difficulty_get_powlimit(hash256_t *target);
+
+#endif /* ECHO_BLOCK_VALIDATE_H */
