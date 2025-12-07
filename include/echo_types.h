@@ -105,6 +105,7 @@ typedef enum {
     ECHO_ERR_SCRIPT_STACK     = -42, /* Stack overflow/underflow */
     ECHO_ERR_SCRIPT_VERIFY    = -43, /* OP_VERIFY failed */
     ECHO_ERR_SCRIPT_SIG       = -44, /* Signature verification failed */
+    ECHO_ERR_SCRIPT_ERROR     = -45, /* General script error (check ctx->error) */
 
     /* Consensus errors */
     ECHO_ERR_CONSENSUS_UTXO   = -50, /* UTXO not found */

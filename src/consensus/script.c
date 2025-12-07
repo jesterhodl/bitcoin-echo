@@ -1400,3 +1400,896 @@ const char *script_error_string(script_error_t err)
         default: return "Unknown error";
     }
 }
+
+
+/*
+ * ============================================================================
+ * OPCODE EXECUTION (Session 4.3)
+ * ============================================================================
+ */
+
+/*
+ * Check if currently executing (not in a false branch of IF/ELSE).
+ */
+echo_bool_t script_is_executing(const script_context_t *ctx)
+{
+    if (ctx == NULL) return ECHO_FALSE;
+    return (ctx->skip_depth == 0) ? ECHO_TRUE : ECHO_FALSE;
+}
+
+/*
+ * Helper: Set context error and return appropriate result.
+ */
+static echo_result_t script_set_error(script_context_t *ctx, script_error_t err)
+{
+    ctx->error = err;
+    return ECHO_ERR_SCRIPT_ERROR;
+}
+
+/*
+ * Execute a single opcode.
+ */
+echo_result_t script_exec_op(script_context_t *ctx, const script_op_t *op)
+{
+    if (ctx == NULL || op == NULL) {
+        return ECHO_ERR_NULL_PARAM;
+    }
+
+    echo_bool_t executing = script_is_executing(ctx);
+    script_opcode_t opcode = op->op;
+
+    /*
+     * Flow control opcodes are always processed, even in non-executing branches.
+     * This is necessary to track nesting depth.
+     */
+    if (opcode == OP_IF || opcode == OP_NOTIF) {
+        if (executing) {
+            /* Pop condition and check */
+            if (stack_empty(&ctx->stack)) {
+                return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+            }
+            stack_element_t elem;
+            echo_result_t res = stack_pop(&ctx->stack, &elem);
+            if (res != ECHO_OK) {
+                return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+            }
+
+            echo_bool_t condition = script_bool(elem.data, elem.len);
+            if (elem.data) free(elem.data);
+
+            /* For NOTIF, invert the condition */
+            if (opcode == OP_NOTIF) {
+                condition = condition ? ECHO_FALSE : ECHO_TRUE;
+            }
+
+            if (condition) {
+                ctx->exec_depth++;
+            } else {
+                ctx->skip_depth++;
+            }
+        } else {
+            /* Not executing, just track nesting */
+            ctx->skip_depth++;
+        }
+        return ECHO_OK;
+    }
+
+    if (opcode == OP_ELSE) {
+        if (ctx->exec_depth == 0 && ctx->skip_depth == 0) {
+            return script_set_error(ctx, SCRIPT_ERR_UNBALANCED_CONDITIONAL);
+        }
+        if (ctx->skip_depth == 1) {
+            /* Was skipping, now execute */
+            ctx->skip_depth--;
+            ctx->exec_depth++;
+        } else if (ctx->skip_depth == 0 && ctx->exec_depth > 0) {
+            /* Was executing, now skip */
+            ctx->exec_depth--;
+            ctx->skip_depth++;
+        }
+        /* If skip_depth > 1, stay skipping */
+        return ECHO_OK;
+    }
+
+    if (opcode == OP_ENDIF) {
+        if (ctx->exec_depth == 0 && ctx->skip_depth == 0) {
+            return script_set_error(ctx, SCRIPT_ERR_UNBALANCED_CONDITIONAL);
+        }
+        if (ctx->skip_depth > 0) {
+            ctx->skip_depth--;
+        } else {
+            ctx->exec_depth--;
+        }
+        return ECHO_OK;
+    }
+
+    /* All other opcodes only execute if we're in an executing branch */
+    if (!executing) {
+        return ECHO_OK;
+    }
+
+    /* Check for disabled opcodes */
+    if (script_opcode_disabled(opcode)) {
+        return script_set_error(ctx, SCRIPT_ERR_DISABLED_OPCODE);
+    }
+
+    /* Count non-push opcodes */
+    if (opcode > OP_16) {
+        ctx->op_count++;
+        if (ctx->op_count > SCRIPT_MAX_OPS) {
+            return script_set_error(ctx, SCRIPT_ERR_OP_COUNT);
+        }
+    }
+
+    /*
+     * ============================================
+     * PUSH OPERATIONS
+     * ============================================
+     */
+
+    /* OP_0 (OP_FALSE): Push empty byte array */
+    if (opcode == OP_0) {
+        return stack_push(&ctx->stack, NULL, 0);
+    }
+
+    /* OP_1NEGATE: Push -1 */
+    if (opcode == OP_1NEGATE) {
+        return stack_push_num(&ctx->stack, -1);
+    }
+
+    /* OP_1 through OP_16: Push the number 1-16 */
+    if (opcode >= OP_1 && opcode <= OP_16) {
+        script_num_t num = (script_num_t)(opcode - OP_1 + 1);
+        return stack_push_num(&ctx->stack, num);
+    }
+
+    /* Direct push opcodes (0x01-0x4e): Push data */
+    if (opcode >= 0x01 && opcode <= OP_PUSHDATA4) {
+        if (op->len > SCRIPT_MAX_ELEMENT_SIZE) {
+            return script_set_error(ctx, SCRIPT_ERR_PUSH_SIZE);
+        }
+        return stack_push(&ctx->stack, op->data, op->len);
+    }
+
+    /*
+     * ============================================
+     * FLOW CONTROL
+     * ============================================
+     */
+
+    /* OP_NOP: Do nothing */
+    if (opcode == OP_NOP) {
+        return ECHO_OK;
+    }
+
+    /* Reserved NOPs (OP_NOP1, OP_NOP4-OP_NOP10): Succeed but may be redefined */
+    if (opcode == OP_NOP1 || (opcode >= OP_NOP4 && opcode <= OP_NOP10)) {
+        if (ctx->flags & SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_NOPS) {
+            return script_set_error(ctx, SCRIPT_ERR_RESERVED_OPCODE);
+        }
+        return ECHO_OK;
+    }
+
+    /* OP_VERIFY: Pop and fail if false */
+    if (opcode == OP_VERIFY) {
+        if (stack_empty(&ctx->stack)) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        echo_bool_t val;
+        echo_result_t res = stack_pop_bool(&ctx->stack, &val);
+        if (res != ECHO_OK) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        if (!val) {
+            return script_set_error(ctx, SCRIPT_ERR_VERIFY);
+        }
+        return ECHO_OK;
+    }
+
+    /* OP_RETURN: Immediately fail */
+    if (opcode == OP_RETURN) {
+        return script_set_error(ctx, SCRIPT_ERR_OP_RETURN);
+    }
+
+    /*
+     * ============================================
+     * ALTSTACK OPERATIONS
+     * ============================================
+     */
+
+    /* OP_TOALTSTACK: Move top of main stack to altstack */
+    if (opcode == OP_TOALTSTACK) {
+        if (stack_empty(&ctx->stack)) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        stack_element_t elem;
+        echo_result_t res = stack_pop(&ctx->stack, &elem);
+        if (res != ECHO_OK) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        res = stack_push(&ctx->altstack, elem.data, elem.len);
+        if (elem.data) free(elem.data);
+        return res;
+    }
+
+    /* OP_FROMALTSTACK: Move top of altstack to main stack */
+    if (opcode == OP_FROMALTSTACK) {
+        if (stack_empty(&ctx->altstack)) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_ALTSTACK_OPERATION);
+        }
+        stack_element_t elem;
+        echo_result_t res = stack_pop(&ctx->altstack, &elem);
+        if (res != ECHO_OK) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_ALTSTACK_OPERATION);
+        }
+        res = stack_push(&ctx->stack, elem.data, elem.len);
+        if (elem.data) free(elem.data);
+        return res;
+    }
+
+    /*
+     * ============================================
+     * STACK OPERATIONS
+     * ============================================
+     */
+
+    /* OP_IFDUP: Duplicate if nonzero */
+    if (opcode == OP_IFDUP) {
+        if (stack_empty(&ctx->stack)) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        const stack_element_t *top;
+        stack_peek(&ctx->stack, &top);
+        if (script_bool(top->data, top->len)) {
+            return stack_dup(&ctx->stack);
+        }
+        return ECHO_OK;
+    }
+
+    /* OP_DEPTH: Push stack size */
+    if (opcode == OP_DEPTH) {
+        return stack_push_num(&ctx->stack, (script_num_t)stack_size(&ctx->stack));
+    }
+
+    /* OP_DROP */
+    if (opcode == OP_DROP) {
+        if (stack_empty(&ctx->stack)) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        return stack_drop(&ctx->stack);
+    }
+
+    /* OP_DUP */
+    if (opcode == OP_DUP) {
+        if (stack_empty(&ctx->stack)) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        return stack_dup(&ctx->stack);
+    }
+
+    /* OP_NIP */
+    if (opcode == OP_NIP) {
+        if (stack_size(&ctx->stack) < 2) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        return stack_nip(&ctx->stack);
+    }
+
+    /* OP_OVER */
+    if (opcode == OP_OVER) {
+        if (stack_size(&ctx->stack) < 2) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        return stack_over(&ctx->stack);
+    }
+
+    /* OP_PICK */
+    if (opcode == OP_PICK) {
+        if (stack_empty(&ctx->stack)) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        script_num_t n;
+        echo_result_t res = stack_pop_num(&ctx->stack, &n,
+            (ctx->flags & SCRIPT_VERIFY_MINIMALDATA) ? ECHO_TRUE : ECHO_FALSE,
+            SCRIPT_NUM_MAX_SIZE);
+        if (res != ECHO_OK || n < 0 || (size_t)n >= stack_size(&ctx->stack)) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        return stack_pick(&ctx->stack, (size_t)n);
+    }
+
+    /* OP_ROLL */
+    if (opcode == OP_ROLL) {
+        if (stack_empty(&ctx->stack)) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        script_num_t n;
+        echo_result_t res = stack_pop_num(&ctx->stack, &n,
+            (ctx->flags & SCRIPT_VERIFY_MINIMALDATA) ? ECHO_TRUE : ECHO_FALSE,
+            SCRIPT_NUM_MAX_SIZE);
+        if (res != ECHO_OK || n < 0 || (size_t)n >= stack_size(&ctx->stack)) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        return stack_roll(&ctx->stack, (size_t)n);
+    }
+
+    /* OP_ROT */
+    if (opcode == OP_ROT) {
+        if (stack_size(&ctx->stack) < 3) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        return stack_rot(&ctx->stack);
+    }
+
+    /* OP_SWAP */
+    if (opcode == OP_SWAP) {
+        if (stack_size(&ctx->stack) < 2) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        return stack_swap(&ctx->stack);
+    }
+
+    /* OP_TUCK */
+    if (opcode == OP_TUCK) {
+        if (stack_size(&ctx->stack) < 2) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        return stack_tuck(&ctx->stack);
+    }
+
+    /* OP_2DROP */
+    if (opcode == OP_2DROP) {
+        if (stack_size(&ctx->stack) < 2) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        return stack_2drop(&ctx->stack);
+    }
+
+    /* OP_2DUP */
+    if (opcode == OP_2DUP) {
+        if (stack_size(&ctx->stack) < 2) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        return stack_2dup(&ctx->stack);
+    }
+
+    /* OP_3DUP */
+    if (opcode == OP_3DUP) {
+        if (stack_size(&ctx->stack) < 3) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        return stack_3dup(&ctx->stack);
+    }
+
+    /* OP_2OVER */
+    if (opcode == OP_2OVER) {
+        if (stack_size(&ctx->stack) < 4) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        return stack_2over(&ctx->stack);
+    }
+
+    /* OP_2ROT */
+    if (opcode == OP_2ROT) {
+        if (stack_size(&ctx->stack) < 6) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        return stack_2rot(&ctx->stack);
+    }
+
+    /* OP_2SWAP */
+    if (opcode == OP_2SWAP) {
+        if (stack_size(&ctx->stack) < 4) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        return stack_2swap(&ctx->stack);
+    }
+
+    /*
+     * ============================================
+     * SPLICE OPERATIONS
+     * ============================================
+     */
+
+    /* OP_SIZE: Push size of top element (without removing it) */
+    if (opcode == OP_SIZE) {
+        if (stack_empty(&ctx->stack)) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        const stack_element_t *top;
+        stack_peek(&ctx->stack, &top);
+        return stack_push_num(&ctx->stack, (script_num_t)top->len);
+    }
+
+    /*
+     * ============================================
+     * BITWISE LOGIC (only OP_EQUAL/OP_EQUALVERIFY are enabled)
+     * ============================================
+     */
+
+    /* OP_EQUAL: Push 1 if top two are equal, else 0 */
+    if (opcode == OP_EQUAL || opcode == OP_EQUALVERIFY) {
+        if (stack_size(&ctx->stack) < 2) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        stack_element_t a, b;
+        stack_pop(&ctx->stack, &b);
+        stack_pop(&ctx->stack, &a);
+
+        echo_bool_t equal = ECHO_FALSE;
+        if (a.len == b.len) {
+            if (a.len == 0) {
+                equal = ECHO_TRUE;
+            } else if (memcmp(a.data, b.data, a.len) == 0) {
+                equal = ECHO_TRUE;
+            }
+        }
+
+        if (a.data) free(a.data);
+        if (b.data) free(b.data);
+
+        if (opcode == OP_EQUALVERIFY) {
+            if (!equal) {
+                return script_set_error(ctx, SCRIPT_ERR_EQUALVERIFY);
+            }
+            return ECHO_OK;
+        } else {
+            return stack_push_bool(&ctx->stack, equal);
+        }
+    }
+
+    /*
+     * ============================================
+     * ARITHMETIC OPERATIONS
+     * ============================================
+     */
+
+    /* OP_1ADD: Add 1 to top */
+    if (opcode == OP_1ADD) {
+        if (stack_empty(&ctx->stack)) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        script_num_t a;
+        echo_result_t res = stack_pop_num(&ctx->stack, &a,
+            (ctx->flags & SCRIPT_VERIFY_MINIMALDATA) ? ECHO_TRUE : ECHO_FALSE,
+            SCRIPT_NUM_MAX_SIZE);
+        if (res != ECHO_OK) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_NUMBER_RANGE);
+        }
+        return stack_push_num(&ctx->stack, a + 1);
+    }
+
+    /* OP_1SUB: Subtract 1 from top */
+    if (opcode == OP_1SUB) {
+        if (stack_empty(&ctx->stack)) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        script_num_t a;
+        echo_result_t res = stack_pop_num(&ctx->stack, &a,
+            (ctx->flags & SCRIPT_VERIFY_MINIMALDATA) ? ECHO_TRUE : ECHO_FALSE,
+            SCRIPT_NUM_MAX_SIZE);
+        if (res != ECHO_OK) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_NUMBER_RANGE);
+        }
+        return stack_push_num(&ctx->stack, a - 1);
+    }
+
+    /* OP_NEGATE: Negate top */
+    if (opcode == OP_NEGATE) {
+        if (stack_empty(&ctx->stack)) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        script_num_t a;
+        echo_result_t res = stack_pop_num(&ctx->stack, &a,
+            (ctx->flags & SCRIPT_VERIFY_MINIMALDATA) ? ECHO_TRUE : ECHO_FALSE,
+            SCRIPT_NUM_MAX_SIZE);
+        if (res != ECHO_OK) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_NUMBER_RANGE);
+        }
+        return stack_push_num(&ctx->stack, -a);
+    }
+
+    /* OP_ABS: Absolute value of top */
+    if (opcode == OP_ABS) {
+        if (stack_empty(&ctx->stack)) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        script_num_t a;
+        echo_result_t res = stack_pop_num(&ctx->stack, &a,
+            (ctx->flags & SCRIPT_VERIFY_MINIMALDATA) ? ECHO_TRUE : ECHO_FALSE,
+            SCRIPT_NUM_MAX_SIZE);
+        if (res != ECHO_OK) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_NUMBER_RANGE);
+        }
+        return stack_push_num(&ctx->stack, a < 0 ? -a : a);
+    }
+
+    /* OP_NOT: Push 1 if top is 0, else 0 */
+    if (opcode == OP_NOT) {
+        if (stack_empty(&ctx->stack)) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        script_num_t a;
+        echo_result_t res = stack_pop_num(&ctx->stack, &a,
+            (ctx->flags & SCRIPT_VERIFY_MINIMALDATA) ? ECHO_TRUE : ECHO_FALSE,
+            SCRIPT_NUM_MAX_SIZE);
+        if (res != ECHO_OK) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_NUMBER_RANGE);
+        }
+        return stack_push_num(&ctx->stack, a == 0 ? 1 : 0);
+    }
+
+    /* OP_0NOTEQUAL: Push 1 if top is not 0, else 0 */
+    if (opcode == OP_0NOTEQUAL) {
+        if (stack_empty(&ctx->stack)) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        script_num_t a;
+        echo_result_t res = stack_pop_num(&ctx->stack, &a,
+            (ctx->flags & SCRIPT_VERIFY_MINIMALDATA) ? ECHO_TRUE : ECHO_FALSE,
+            SCRIPT_NUM_MAX_SIZE);
+        if (res != ECHO_OK) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_NUMBER_RANGE);
+        }
+        return stack_push_num(&ctx->stack, a != 0 ? 1 : 0);
+    }
+
+    /* OP_ADD: Add top two */
+    if (opcode == OP_ADD) {
+        if (stack_size(&ctx->stack) < 2) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        script_num_t a, b;
+        echo_result_t res = stack_pop_num(&ctx->stack, &b,
+            (ctx->flags & SCRIPT_VERIFY_MINIMALDATA) ? ECHO_TRUE : ECHO_FALSE,
+            SCRIPT_NUM_MAX_SIZE);
+        if (res != ECHO_OK) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_NUMBER_RANGE);
+        }
+        res = stack_pop_num(&ctx->stack, &a,
+            (ctx->flags & SCRIPT_VERIFY_MINIMALDATA) ? ECHO_TRUE : ECHO_FALSE,
+            SCRIPT_NUM_MAX_SIZE);
+        if (res != ECHO_OK) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_NUMBER_RANGE);
+        }
+        return stack_push_num(&ctx->stack, a + b);
+    }
+
+    /* OP_SUB: Subtract top from second-to-top */
+    if (opcode == OP_SUB) {
+        if (stack_size(&ctx->stack) < 2) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        script_num_t a, b;
+        echo_result_t res = stack_pop_num(&ctx->stack, &b,
+            (ctx->flags & SCRIPT_VERIFY_MINIMALDATA) ? ECHO_TRUE : ECHO_FALSE,
+            SCRIPT_NUM_MAX_SIZE);
+        if (res != ECHO_OK) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_NUMBER_RANGE);
+        }
+        res = stack_pop_num(&ctx->stack, &a,
+            (ctx->flags & SCRIPT_VERIFY_MINIMALDATA) ? ECHO_TRUE : ECHO_FALSE,
+            SCRIPT_NUM_MAX_SIZE);
+        if (res != ECHO_OK) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_NUMBER_RANGE);
+        }
+        return stack_push_num(&ctx->stack, a - b);
+    }
+
+    /* OP_BOOLAND: Push 1 if both top two are nonzero */
+    if (opcode == OP_BOOLAND) {
+        if (stack_size(&ctx->stack) < 2) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        script_num_t a, b;
+        echo_result_t res = stack_pop_num(&ctx->stack, &b,
+            (ctx->flags & SCRIPT_VERIFY_MINIMALDATA) ? ECHO_TRUE : ECHO_FALSE,
+            SCRIPT_NUM_MAX_SIZE);
+        if (res != ECHO_OK) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_NUMBER_RANGE);
+        }
+        res = stack_pop_num(&ctx->stack, &a,
+            (ctx->flags & SCRIPT_VERIFY_MINIMALDATA) ? ECHO_TRUE : ECHO_FALSE,
+            SCRIPT_NUM_MAX_SIZE);
+        if (res != ECHO_OK) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_NUMBER_RANGE);
+        }
+        return stack_push_num(&ctx->stack, (a != 0 && b != 0) ? 1 : 0);
+    }
+
+    /* OP_BOOLOR: Push 1 if either of top two is nonzero */
+    if (opcode == OP_BOOLOR) {
+        if (stack_size(&ctx->stack) < 2) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        script_num_t a, b;
+        echo_result_t res = stack_pop_num(&ctx->stack, &b,
+            (ctx->flags & SCRIPT_VERIFY_MINIMALDATA) ? ECHO_TRUE : ECHO_FALSE,
+            SCRIPT_NUM_MAX_SIZE);
+        if (res != ECHO_OK) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_NUMBER_RANGE);
+        }
+        res = stack_pop_num(&ctx->stack, &a,
+            (ctx->flags & SCRIPT_VERIFY_MINIMALDATA) ? ECHO_TRUE : ECHO_FALSE,
+            SCRIPT_NUM_MAX_SIZE);
+        if (res != ECHO_OK) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_NUMBER_RANGE);
+        }
+        return stack_push_num(&ctx->stack, (a != 0 || b != 0) ? 1 : 0);
+    }
+
+    /* OP_NUMEQUAL / OP_NUMEQUALVERIFY */
+    if (opcode == OP_NUMEQUAL || opcode == OP_NUMEQUALVERIFY) {
+        if (stack_size(&ctx->stack) < 2) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        script_num_t a, b;
+        echo_result_t res = stack_pop_num(&ctx->stack, &b,
+            (ctx->flags & SCRIPT_VERIFY_MINIMALDATA) ? ECHO_TRUE : ECHO_FALSE,
+            SCRIPT_NUM_MAX_SIZE);
+        if (res != ECHO_OK) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_NUMBER_RANGE);
+        }
+        res = stack_pop_num(&ctx->stack, &a,
+            (ctx->flags & SCRIPT_VERIFY_MINIMALDATA) ? ECHO_TRUE : ECHO_FALSE,
+            SCRIPT_NUM_MAX_SIZE);
+        if (res != ECHO_OK) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_NUMBER_RANGE);
+        }
+        echo_bool_t equal = (a == b) ? ECHO_TRUE : ECHO_FALSE;
+        if (opcode == OP_NUMEQUALVERIFY) {
+            if (!equal) {
+                return script_set_error(ctx, SCRIPT_ERR_NUMEQUALVERIFY);
+            }
+            return ECHO_OK;
+        }
+        return stack_push_num(&ctx->stack, equal ? 1 : 0);
+    }
+
+    /* OP_NUMNOTEQUAL */
+    if (opcode == OP_NUMNOTEQUAL) {
+        if (stack_size(&ctx->stack) < 2) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        script_num_t a, b;
+        echo_result_t res = stack_pop_num(&ctx->stack, &b,
+            (ctx->flags & SCRIPT_VERIFY_MINIMALDATA) ? ECHO_TRUE : ECHO_FALSE,
+            SCRIPT_NUM_MAX_SIZE);
+        if (res != ECHO_OK) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_NUMBER_RANGE);
+        }
+        res = stack_pop_num(&ctx->stack, &a,
+            (ctx->flags & SCRIPT_VERIFY_MINIMALDATA) ? ECHO_TRUE : ECHO_FALSE,
+            SCRIPT_NUM_MAX_SIZE);
+        if (res != ECHO_OK) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_NUMBER_RANGE);
+        }
+        return stack_push_num(&ctx->stack, (a != b) ? 1 : 0);
+    }
+
+    /* OP_LESSTHAN */
+    if (opcode == OP_LESSTHAN) {
+        if (stack_size(&ctx->stack) < 2) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        script_num_t a, b;
+        echo_result_t res = stack_pop_num(&ctx->stack, &b,
+            (ctx->flags & SCRIPT_VERIFY_MINIMALDATA) ? ECHO_TRUE : ECHO_FALSE,
+            SCRIPT_NUM_MAX_SIZE);
+        if (res != ECHO_OK) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_NUMBER_RANGE);
+        }
+        res = stack_pop_num(&ctx->stack, &a,
+            (ctx->flags & SCRIPT_VERIFY_MINIMALDATA) ? ECHO_TRUE : ECHO_FALSE,
+            SCRIPT_NUM_MAX_SIZE);
+        if (res != ECHO_OK) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_NUMBER_RANGE);
+        }
+        return stack_push_num(&ctx->stack, (a < b) ? 1 : 0);
+    }
+
+    /* OP_GREATERTHAN */
+    if (opcode == OP_GREATERTHAN) {
+        if (stack_size(&ctx->stack) < 2) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        script_num_t a, b;
+        echo_result_t res = stack_pop_num(&ctx->stack, &b,
+            (ctx->flags & SCRIPT_VERIFY_MINIMALDATA) ? ECHO_TRUE : ECHO_FALSE,
+            SCRIPT_NUM_MAX_SIZE);
+        if (res != ECHO_OK) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_NUMBER_RANGE);
+        }
+        res = stack_pop_num(&ctx->stack, &a,
+            (ctx->flags & SCRIPT_VERIFY_MINIMALDATA) ? ECHO_TRUE : ECHO_FALSE,
+            SCRIPT_NUM_MAX_SIZE);
+        if (res != ECHO_OK) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_NUMBER_RANGE);
+        }
+        return stack_push_num(&ctx->stack, (a > b) ? 1 : 0);
+    }
+
+    /* OP_LESSTHANOREQUAL */
+    if (opcode == OP_LESSTHANOREQUAL) {
+        if (stack_size(&ctx->stack) < 2) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        script_num_t a, b;
+        echo_result_t res = stack_pop_num(&ctx->stack, &b,
+            (ctx->flags & SCRIPT_VERIFY_MINIMALDATA) ? ECHO_TRUE : ECHO_FALSE,
+            SCRIPT_NUM_MAX_SIZE);
+        if (res != ECHO_OK) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_NUMBER_RANGE);
+        }
+        res = stack_pop_num(&ctx->stack, &a,
+            (ctx->flags & SCRIPT_VERIFY_MINIMALDATA) ? ECHO_TRUE : ECHO_FALSE,
+            SCRIPT_NUM_MAX_SIZE);
+        if (res != ECHO_OK) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_NUMBER_RANGE);
+        }
+        return stack_push_num(&ctx->stack, (a <= b) ? 1 : 0);
+    }
+
+    /* OP_GREATERTHANOREQUAL */
+    if (opcode == OP_GREATERTHANOREQUAL) {
+        if (stack_size(&ctx->stack) < 2) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        script_num_t a, b;
+        echo_result_t res = stack_pop_num(&ctx->stack, &b,
+            (ctx->flags & SCRIPT_VERIFY_MINIMALDATA) ? ECHO_TRUE : ECHO_FALSE,
+            SCRIPT_NUM_MAX_SIZE);
+        if (res != ECHO_OK) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_NUMBER_RANGE);
+        }
+        res = stack_pop_num(&ctx->stack, &a,
+            (ctx->flags & SCRIPT_VERIFY_MINIMALDATA) ? ECHO_TRUE : ECHO_FALSE,
+            SCRIPT_NUM_MAX_SIZE);
+        if (res != ECHO_OK) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_NUMBER_RANGE);
+        }
+        return stack_push_num(&ctx->stack, (a >= b) ? 1 : 0);
+    }
+
+    /* OP_MIN */
+    if (opcode == OP_MIN) {
+        if (stack_size(&ctx->stack) < 2) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        script_num_t a, b;
+        echo_result_t res = stack_pop_num(&ctx->stack, &b,
+            (ctx->flags & SCRIPT_VERIFY_MINIMALDATA) ? ECHO_TRUE : ECHO_FALSE,
+            SCRIPT_NUM_MAX_SIZE);
+        if (res != ECHO_OK) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_NUMBER_RANGE);
+        }
+        res = stack_pop_num(&ctx->stack, &a,
+            (ctx->flags & SCRIPT_VERIFY_MINIMALDATA) ? ECHO_TRUE : ECHO_FALSE,
+            SCRIPT_NUM_MAX_SIZE);
+        if (res != ECHO_OK) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_NUMBER_RANGE);
+        }
+        return stack_push_num(&ctx->stack, (a < b) ? a : b);
+    }
+
+    /* OP_MAX */
+    if (opcode == OP_MAX) {
+        if (stack_size(&ctx->stack) < 2) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        script_num_t a, b;
+        echo_result_t res = stack_pop_num(&ctx->stack, &b,
+            (ctx->flags & SCRIPT_VERIFY_MINIMALDATA) ? ECHO_TRUE : ECHO_FALSE,
+            SCRIPT_NUM_MAX_SIZE);
+        if (res != ECHO_OK) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_NUMBER_RANGE);
+        }
+        res = stack_pop_num(&ctx->stack, &a,
+            (ctx->flags & SCRIPT_VERIFY_MINIMALDATA) ? ECHO_TRUE : ECHO_FALSE,
+            SCRIPT_NUM_MAX_SIZE);
+        if (res != ECHO_OK) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_NUMBER_RANGE);
+        }
+        return stack_push_num(&ctx->stack, (a > b) ? a : b);
+    }
+
+    /* OP_WITHIN: Push 1 if min <= x < max */
+    if (opcode == OP_WITHIN) {
+        if (stack_size(&ctx->stack) < 3) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_STACK_OPERATION);
+        }
+        script_num_t max, min, x;
+        echo_result_t res = stack_pop_num(&ctx->stack, &max,
+            (ctx->flags & SCRIPT_VERIFY_MINIMALDATA) ? ECHO_TRUE : ECHO_FALSE,
+            SCRIPT_NUM_MAX_SIZE);
+        if (res != ECHO_OK) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_NUMBER_RANGE);
+        }
+        res = stack_pop_num(&ctx->stack, &min,
+            (ctx->flags & SCRIPT_VERIFY_MINIMALDATA) ? ECHO_TRUE : ECHO_FALSE,
+            SCRIPT_NUM_MAX_SIZE);
+        if (res != ECHO_OK) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_NUMBER_RANGE);
+        }
+        res = stack_pop_num(&ctx->stack, &x,
+            (ctx->flags & SCRIPT_VERIFY_MINIMALDATA) ? ECHO_TRUE : ECHO_FALSE,
+            SCRIPT_NUM_MAX_SIZE);
+        if (res != ECHO_OK) {
+            return script_set_error(ctx, SCRIPT_ERR_INVALID_NUMBER_RANGE);
+        }
+        return stack_push_num(&ctx->stack, (x >= min && x < max) ? 1 : 0);
+    }
+
+    /*
+     * ============================================
+     * CRYPTO OPERATIONS (deferred to Session 4.4)
+     * ============================================
+     */
+
+    /* For now, crypto opcodes cause script to fail */
+    if (opcode == OP_RIPEMD160 || opcode == OP_SHA1 ||
+        opcode == OP_SHA256 || opcode == OP_HASH160 ||
+        opcode == OP_HASH256 || opcode == OP_CODESEPARATOR ||
+        opcode == OP_CHECKSIG || opcode == OP_CHECKSIGVERIFY ||
+        opcode == OP_CHECKMULTISIG || opcode == OP_CHECKMULTISIGVERIFY ||
+        opcode == OP_CHECKSIGADD) {
+        /* Will be implemented in Session 4.4 */
+        return script_set_error(ctx, SCRIPT_ERR_BAD_OPCODE);
+    }
+
+    /* Unknown opcode */
+    return script_set_error(ctx, SCRIPT_ERR_INVALID_OPCODE);
+}
+
+/*
+ * Execute a complete script.
+ */
+echo_result_t script_execute(script_context_t *ctx,
+                              const uint8_t *data, size_t len)
+{
+    if (ctx == NULL) {
+        return ECHO_ERR_NULL_PARAM;
+    }
+
+    /* Check script size limit */
+    if (len > SCRIPT_MAX_SIZE) {
+        ctx->error = SCRIPT_ERR_SCRIPT_SIZE;
+        return ECHO_ERR_SCRIPT_ERROR;
+    }
+
+    /* Empty script succeeds */
+    if (data == NULL || len == 0) {
+        return ECHO_OK;
+    }
+
+    script_iter_t iter;
+    script_iter_init(&iter, data, len);
+
+    script_op_t op;
+    while (script_iter_next(&iter, &op)) {
+        echo_result_t res = script_exec_op(ctx, &op);
+        if (res != ECHO_OK) {
+            return res;
+        }
+
+        /* Check combined stack size */
+        if (stack_size(&ctx->stack) + stack_size(&ctx->altstack) > SCRIPT_MAX_STACK_SIZE) {
+            ctx->error = SCRIPT_ERR_STACK_SIZE;
+            return ECHO_ERR_SCRIPT_ERROR;
+        }
+    }
+
+    /* Check for parse errors */
+    if (script_iter_error(&iter)) {
+        ctx->error = SCRIPT_ERR_BAD_OPCODE;
+        return ECHO_ERR_SCRIPT_ERROR;
+    }
+
+    /* Check for unbalanced conditionals */
+    if (ctx->exec_depth != 0 || ctx->skip_depth != 0) {
+        ctx->error = SCRIPT_ERR_UNBALANCED_CONDITIONAL;
+        return ECHO_ERR_SCRIPT_ERROR;
+    }
+
+    return ECHO_OK;
+}

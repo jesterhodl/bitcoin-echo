@@ -1208,4 +1208,63 @@ size_t script_sigops_count(const uint8_t *data, size_t len, echo_bool_t accurate
  */
 size_t script_push_size(size_t data_len);
 
+
+/*
+ * ============================================================================
+ * OPCODE EXECUTION (Session 4.3)
+ * ============================================================================
+ */
+
+/*
+ * Execute a single opcode.
+ *
+ * Handles all opcodes implemented in Session 4.3:
+ *   - Push: OP_0, OP_1NEGATE, OP_1-OP_16, direct pushes
+ *   - Flow: OP_NOP, OP_IF, OP_NOTIF, OP_ELSE, OP_ENDIF, OP_VERIFY, OP_RETURN
+ *   - Stack: OP_TOALTSTACK, OP_FROMALTSTACK, OP_DEPTH, OP_DROP, OP_DUP, etc.
+ *   - Splice: OP_SIZE
+ *   - Comparison: OP_EQUAL, OP_EQUALVERIFY
+ *   - Arithmetic: OP_1ADD, OP_1SUB, OP_NEGATE, OP_ABS, OP_NOT, OP_0NOTEQUAL,
+ *                 OP_ADD, OP_SUB, OP_BOOLAND, OP_BOOLOR, OP_NUMEQUAL, etc.
+ *   - Crypto: Deferred to Session 4.4
+ *
+ * Parameters:
+ *   ctx      - Script execution context
+ *   op       - Opcode with any push data
+ *
+ * Returns:
+ *   ECHO_OK on success
+ *   ECHO_ERR_SCRIPT_* on script failure (sets ctx->error)
+ */
+echo_result_t script_exec_op(script_context_t *ctx, const script_op_t *op);
+
+/*
+ * Execute a complete script.
+ *
+ * Iterates through all opcodes in the script and executes them.
+ * Stops on first error or OP_RETURN.
+ *
+ * Parameters:
+ *   ctx   - Script execution context (must be initialized)
+ *   data  - Script bytes
+ *   len   - Script length
+ *
+ * Returns:
+ *   ECHO_OK if script executed successfully
+ *   Error code on failure (ctx->error has script-specific error)
+ */
+echo_result_t script_execute(script_context_t *ctx,
+                              const uint8_t *data, size_t len);
+
+/*
+ * Check if currently executing (not skipping due to IF/ELSE).
+ *
+ * Parameters:
+ *   ctx - Script context
+ *
+ * Returns:
+ *   ECHO_TRUE if executing, ECHO_FALSE if skipping
+ */
+echo_bool_t script_is_executing(const script_context_t *ctx);
+
 #endif /* ECHO_SCRIPT_H */
