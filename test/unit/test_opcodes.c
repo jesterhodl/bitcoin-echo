@@ -733,7 +733,7 @@ int main(void)
             OP_CHECKMULTISIG
         };
         test_script("CHECKMULTISIG 0-of-0", multisig_0_0,
-                    sizeof(multisig_0_0), ECHO_TRUE, 0);
+                    sizeof(multisig_0_0), ECHO_TRUE, 1);  /* 0-of-0 succeeds, pushes TRUE */
 
         /* 0-of-1 multisig: 0 required signatures, 1 key */
         uint8_t multisig_0_1[] = {
@@ -751,7 +751,7 @@ int main(void)
             OP_CHECKMULTISIG
         };
         test_script("CHECKMULTISIG 0-of-1", multisig_0_1,
-                    sizeof(multisig_0_1), ECHO_TRUE, 0);
+                    sizeof(multisig_0_1), ECHO_TRUE, 1);  /* 0-of-1 succeeds, pushes TRUE */
 
         /* Missing dummy element (off-by-one bug) */
         uint8_t multisig_no_dummy[] = {
@@ -775,14 +775,14 @@ int main(void)
 
         /* With no flags, non-empty dummy is OK */
         test_script("CHECKMULTISIG non-empty dummy allowed", multisig_bad_dummy,
-                    sizeof(multisig_bad_dummy), ECHO_TRUE, 0);
+                    sizeof(multisig_bad_dummy), ECHO_TRUE, 1);  /* Succeeds, pushes TRUE */
 
         /*
-         * OP_SHA1: Intentionally not implemented (insecure)
+         * OP_SHA1: Implemented for Bitcoin Script compatibility.
+         * SHA1("") = da39a3ee5e6b4b0d3255bfef95601890afd80709
          */
         uint8_t sha1[] = {OP_0, OP_SHA1};
-        test_script_error("OP_SHA1 not implemented", sha1, sizeof(sha1),
-                          SCRIPT_ERR_BAD_OPCODE);
+        test_script("OP_SHA1 empty", sha1, sizeof(sha1), ECHO_TRUE, 0);  /* Stack has 20-byte hash */
     }
     printf("\n");
 

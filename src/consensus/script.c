@@ -1142,6 +1142,16 @@ echo_result_t script_num_decode(const uint8_t *data, size_t len,
 
     /* Check for minimal encoding if required */
     if (require_minimal) {
+        /*
+         * Single-byte zero representations are not minimal.
+         * Zero should be represented as an empty array.
+         * - 0x00 is zero (should be empty)
+         * - 0x80 is negative zero (should be empty)
+         */
+        if (len == 1 && (data[0] == 0x00 || data[0] == 0x80)) {
+            return ECHO_ERR_INVALID_FORMAT;
+        }
+
         /* Check for unnecessary leading zero bytes.
          * The MSB of the last byte is the sign bit.
          * A leading 0x00 is only allowed if the next byte has its high bit set
@@ -1409,6 +1419,7 @@ const char *script_error_string(script_error_t err)
         case SCRIPT_ERR_IMPOSSIBLE_ENCODING: return "Impossible encoding";
         case SCRIPT_ERR_NEGATIVE_LOCKTIME: return "Negative locktime";
         case SCRIPT_ERR_UNSATISFIED_LOCKTIME: return "Unsatisfied locktime";
+        case SCRIPT_ERR_MINIMALDATA: return "Non-minimal data push";
         case SCRIPT_ERR_SIG_HASHTYPE: return "Invalid signature hash type";
         case SCRIPT_ERR_SIG_DER: return "Invalid DER signature";
         case SCRIPT_ERR_SIG_HIGH_S: return "High S value in signature";
@@ -1450,6 +1461,120 @@ echo_bool_t script_is_executing(const script_context_t *ctx)
 {
     if (ctx == NULL) return ECHO_FALSE;
     return (ctx->skip_depth == 0) ? ECHO_TRUE : ECHO_FALSE;
+}
+
+/*
+ * Validate DER signature encoding (BIP-66).
+ *
+ * DER signature format:
+ *   0x30 [total-length]
+ *     0x02 [R-length] [R]
+ *     0x02 [S-length] [S]
+ *   [sighash-type]
+ *
+ * Returns ECHO_TRUE if valid, ECHO_FALSE if invalid.
+ */
+static echo_bool_t is_valid_der_signature(const uint8_t *sig, size_t len)
+{
+    /* Empty signature is valid (but won't verify) */
+    if (len == 0) {
+        return ECHO_TRUE;
+    }
+
+    /* Minimum DER signature: 30 06 02 01 00 02 01 00 + 1 sighash = 9 bytes */
+    /* But we also need room for sighash type at end */
+    if (len < 9) {
+        return ECHO_FALSE;
+    }
+
+    /* Maximum signature length is ~73 bytes */
+    if (len > 73) {
+        return ECHO_FALSE;
+    }
+
+    /* First byte must be 0x30 (SEQUENCE) */
+    if (sig[0] != 0x30) {
+        return ECHO_FALSE;
+    }
+
+    /* Second byte is length of DER structure (excluding sighash type) */
+    size_t der_len = sig[1];
+
+    /* Length must match: total = 2 (header) + der_len + 1 (sighash) */
+    if (der_len + 3 != len) {
+        return ECHO_FALSE;
+    }
+
+    /* Minimum structure length */
+    if (der_len < 6) {
+        return ECHO_FALSE;
+    }
+
+    size_t pos = 2;
+
+    /* R component */
+    if (sig[pos] != 0x02) {  /* Must be INTEGER type */
+        return ECHO_FALSE;
+    }
+    pos++;
+
+    size_t r_len = sig[pos];
+    pos++;
+
+    if (r_len == 0) {  /* Zero-length R */
+        return ECHO_FALSE;
+    }
+
+    if (pos + r_len > len - 1) {  /* R extends past end */
+        return ECHO_FALSE;
+    }
+
+    /* Check for negative R (high bit set without leading zero) */
+    if (sig[pos] & 0x80) {
+        return ECHO_FALSE;
+    }
+
+    /* Check for unnecessary leading zeros */
+    if (r_len > 1 && sig[pos] == 0x00 && !(sig[pos + 1] & 0x80)) {
+        return ECHO_FALSE;
+    }
+
+    pos += r_len;
+
+    /* S component */
+    if (sig[pos] != 0x02) {  /* Must be INTEGER type */
+        return ECHO_FALSE;
+    }
+    pos++;
+
+    size_t s_len = sig[pos];
+    pos++;
+
+    if (s_len == 0) {  /* Zero-length S */
+        return ECHO_FALSE;
+    }
+
+    /* Check that S fits exactly (pos + s_len + 1 sighash = len) */
+    if (pos + s_len + 1 != len) {
+        return ECHO_FALSE;
+    }
+
+    /* Check for negative S (high bit set without leading zero) */
+    if (sig[pos] & 0x80) {
+        return ECHO_FALSE;
+    }
+
+    /* Check for unnecessary leading zeros */
+    if (s_len > 1 && sig[pos] == 0x00 && !(sig[pos + 1] & 0x80)) {
+        return ECHO_FALSE;
+    }
+
+    /* Verify total length matches: 2 + 2 + r_len + 2 + s_len = der_len + 2 */
+    if (4 + r_len + s_len != der_len + 2) {
+        return ECHO_FALSE;
+    }
+
+    return ECHO_TRUE;
 }
 
 /*
@@ -1538,14 +1663,27 @@ echo_result_t script_exec_op(script_context_t *ctx, const script_op_t *op)
         return ECHO_OK;
     }
 
+    /*
+     * Check for disabled opcodes BEFORE the executing check.
+     * Disabled opcodes fail even in non-executing branches (like inside false IF).
+     * This is a security measure to prevent disabled opcodes from being
+     * hidden in dead code paths.
+     */
+    if (script_opcode_disabled(opcode)) {
+        return script_set_error(ctx, SCRIPT_ERR_DISABLED_OPCODE);
+    }
+
+    /*
+     * OP_VERIF and OP_VERNOTIF are always invalid, even in non-executing branches.
+     * These are reserved opcodes that make the transaction invalid unconditionally.
+     */
+    if (opcode == OP_VERIF || opcode == OP_VERNOTIF) {
+        return script_set_error(ctx, SCRIPT_ERR_BAD_OPCODE);
+    }
+
     /* All other opcodes only execute if we're in an executing branch */
     if (!executing) {
         return ECHO_OK;
-    }
-
-    /* Check for disabled opcodes */
-    if (script_opcode_disabled(opcode)) {
-        return script_set_error(ctx, SCRIPT_ERR_DISABLED_OPCODE);
     }
 
     /* Count non-push opcodes */
@@ -1583,6 +1721,58 @@ echo_result_t script_exec_op(script_context_t *ctx, const script_op_t *op)
         if (op->len > SCRIPT_MAX_ELEMENT_SIZE) {
             return script_set_error(ctx, SCRIPT_ERR_PUSH_SIZE);
         }
+
+        /*
+         * MINIMALDATA (BIP-62 rule 3/4): Verify minimal push encoding.
+         *
+         * Requirements:
+         * 1. Empty push should use OP_0
+         * 2. Single byte 0x00 or 0x80 (zero representations) should use OP_0
+         * 3. Single byte 0x01-0x10 should use OP_1-OP_16
+         * 4. Single byte 0x81 (-1) should use OP_1NEGATE
+         * 5. OP_PUSHDATA1 should only be used for len > 75
+         * 6. OP_PUSHDATA2 should only be used for len > 255
+         * 7. OP_PUSHDATA4 should only be used for len > 65535
+         */
+        if (ctx->flags & SCRIPT_VERIFY_MINIMALDATA) {
+            /* Check if a single-byte push could use OP_1-OP_16 or OP_1NEGATE */
+            if (op->len == 1) {
+                uint8_t byte = op->data[0];
+                /* 0x01-0x10 should use OP_1-OP_16 */
+                if (byte >= 0x01 && byte <= 0x10) {
+                    return script_set_error(ctx, SCRIPT_ERR_MINIMALDATA);
+                }
+                /* 0x81 should use OP_1NEGATE */
+                if (byte == 0x81) {
+                    return script_set_error(ctx, SCRIPT_ERR_MINIMALDATA);
+                }
+                /*
+                 * Note: 0x00 and 0x80 (zero representations) are NOT checked here.
+                 * MINIMALDATA for zero only applies when the value is used as a
+                 * number in arithmetic operations (stack_pop_num checks this).
+                 * Pushing 0x00 or 0x80 as raw data (not numeric) is valid.
+                 */
+            }
+
+            /* Check minimal push opcode encoding */
+            if (opcode == OP_PUSHDATA1) {
+                /* PUSHDATA1 should only be used if len > 75 */
+                if (op->len <= 75) {
+                    return script_set_error(ctx, SCRIPT_ERR_MINIMALDATA);
+                }
+            } else if (opcode == OP_PUSHDATA2) {
+                /* PUSHDATA2 should only be used if len > 255 */
+                if (op->len <= 255) {
+                    return script_set_error(ctx, SCRIPT_ERR_MINIMALDATA);
+                }
+            } else if (opcode == OP_PUSHDATA4) {
+                /* PUSHDATA4 should only be used if len > 65535 */
+                if (op->len <= 65535) {
+                    return script_set_error(ctx, SCRIPT_ERR_MINIMALDATA);
+                }
+            }
+        }
+
         return stack_push(&ctx->stack, op->data, op->len);
     }
 
@@ -2566,6 +2756,18 @@ echo_result_t script_exec_op(script_context_t *ctx, const script_op_t *op)
         stack_element_t pubkey_elem, sig_elem;
         stack_pop(&ctx->stack, &pubkey_elem);
         stack_pop(&ctx->stack, &sig_elem);
+
+        /*
+         * BIP-66: Strict DER signature validation.
+         * When DERSIG flag is set, validate signature encoding before verification.
+         */
+        if ((ctx->flags & SCRIPT_VERIFY_DERSIG) && sig_elem.len > 0) {
+            if (!is_valid_der_signature(sig_elem.data, sig_elem.len)) {
+                if (pubkey_elem.data) free(pubkey_elem.data);
+                if (sig_elem.data) free(sig_elem.data);
+                return script_set_error(ctx, SCRIPT_ERR_SIG_DER);
+            }
+        }
 
         /*
          * Without transaction context, we cannot compute the sighash.

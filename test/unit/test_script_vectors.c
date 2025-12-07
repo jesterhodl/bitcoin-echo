@@ -13,6 +13,7 @@
 #include <ctype.h>
 #include "script.h"
 #include "tx.h"
+#include "ripemd160.h"
 
 static int tests_run = 0;
 static int tests_passed = 0;
@@ -370,8 +371,64 @@ static void run_test(const char *scriptsig_str, const char *scriptpubkey_str,
         goto check_result;
     }
 
+    /*
+     * Clear the altstack between scriptSig and scriptPubKey.
+     * The altstack is NOT shared between the two - this is consensus behavior.
+     */
+    stack_free(&ctx.altstack);
+    stack_init(&ctx.altstack);
+
+    /*
+     * Check for P2SH - we need to save the stack state before executing
+     * scriptPubKey because we'll need the serialized redeem script.
+     */
+    uint8_t redeem_script[MAX_SCRIPT_SIZE];
+    size_t redeem_len = 0;
+    echo_bool_t is_p2sh = ECHO_FALSE;
+    hash160_t p2sh_hash;
+
+    if ((flags & SCRIPT_VERIFY_P2SH) && script_is_p2sh(scriptpubkey, pubkey_len, &p2sh_hash)) {
+        is_p2sh = ECHO_TRUE;
+
+        /*
+         * BIP-16: For P2SH, scriptSig must be push-only.
+         * Check before we continue with execution.
+         */
+        if (!script_is_push_only(scriptsig, sig_len)) {
+            ctx.error = SCRIPT_ERR_SIG_PUSHONLY;
+            res = ECHO_ERR_SCRIPT_ERROR;
+            goto check_result;
+        }
+
+        /* Save the top stack element (serialized redeem script) */
+        const stack_element_t *top;
+        if (stack_peek(&ctx.stack, &top) == ECHO_OK && top->len < MAX_SCRIPT_SIZE) {
+            memcpy(redeem_script, top->data, top->len);
+            redeem_len = top->len;
+        }
+    }
+
     /* Execute scriptPubKey */
     res = script_execute(&ctx, scriptpubkey, pubkey_len);
+    if (res != ECHO_OK) {
+        goto check_result;
+    }
+
+    /* P2SH evaluation: execute the redeem script */
+    if (is_p2sh && redeem_len > 0) {
+        /* Verify the serialized script hashes correctly */
+        uint8_t script_hash[20];
+        hash160(redeem_script, redeem_len, script_hash);
+        if (memcmp(script_hash, p2sh_hash.bytes, 20) == 0) {
+            /* Pop the redeem script from stack before executing it */
+            stack_element_t elem;
+            stack_pop(&ctx.stack, &elem);
+            if (elem.data) free(elem.data);
+
+            /* Execute the redeem script */
+            res = script_execute(&ctx, redeem_script, redeem_len);
+        }
+    }
 
 check_result:
     {
