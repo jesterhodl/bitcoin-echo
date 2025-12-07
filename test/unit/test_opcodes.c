@@ -1,7 +1,8 @@
 /*
  * Bitcoin Echo — Script Opcode Execution Tests
  *
- * Test vectors for push, flow control, stack, arithmetic, and logic opcodes.
+ * Test vectors for push, flow control, stack, arithmetic, logic,
+ * and cryptographic opcodes.
  *
  * Build once. Build right. Stop.
  */
@@ -10,6 +11,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include "script.h"
+#include "sha256.h"
+#include "ripemd160.h"
 
 static int tests_run = 0;
 static int tests_passed = 0;
@@ -129,6 +132,92 @@ static void test_script_error(const char *name, const uint8_t *script,
                script_error_string(ctx.error));
         script_context_free(&ctx);
         return;
+    }
+
+    tests_passed++;
+    printf("  [PASS] %s\n", name);
+    script_context_free(&ctx);
+}
+
+/*
+ * Helper: Execute a script and check top element bytes.
+ */
+static void test_script_bytes(const char *name, const uint8_t *script, size_t len,
+                               const uint8_t *expected, size_t expected_len)
+{
+    script_context_t ctx;
+    tests_run++;
+
+    script_context_init(&ctx, SCRIPT_VERIFY_NONE);
+    echo_result_t res = script_execute(&ctx, script, len);
+
+    if (res != ECHO_OK) {
+        printf("  [FAIL] %s (execution failed: %s)\n", name,
+               script_error_string(ctx.error));
+        script_context_free(&ctx);
+        return;
+    }
+
+    if (stack_empty(&ctx.stack)) {
+        printf("  [FAIL] %s (stack empty)\n", name);
+        script_context_free(&ctx);
+        return;
+    }
+
+    const stack_element_t *top;
+    stack_peek(&ctx.stack, &top);
+
+    if (top->len != expected_len) {
+        printf("  [FAIL] %s (expected len=%zu, got=%zu)\n", name,
+               expected_len, top->len);
+        script_context_free(&ctx);
+        return;
+    }
+
+    if (memcmp(top->data, expected, expected_len) != 0) {
+        printf("  [FAIL] %s (bytes mismatch)\n", name);
+        script_context_free(&ctx);
+        return;
+    }
+
+    tests_passed++;
+    printf("  [PASS] %s\n", name);
+    script_context_free(&ctx);
+}
+
+/*
+ * Helper: Execute a script with specific flags.
+ */
+static void test_script_flags(const char *name, const uint8_t *script, size_t len,
+                               uint32_t flags, echo_bool_t should_succeed,
+                               script_error_t expected_error)
+{
+    script_context_t ctx;
+    tests_run++;
+
+    script_context_init(&ctx, flags);
+    echo_result_t res = script_execute(&ctx, script, len);
+
+    if (should_succeed) {
+        if (res != ECHO_OK) {
+            printf("  [FAIL] %s (execution failed: %s)\n", name,
+                   script_error_string(ctx.error));
+            script_context_free(&ctx);
+            return;
+        }
+    } else {
+        if (res == ECHO_OK) {
+            printf("  [FAIL] %s (expected failure, got success)\n", name);
+            script_context_free(&ctx);
+            return;
+        }
+        if (ctx.error != expected_error) {
+            printf("  [FAIL] %s (expected error=%s, got=%s)\n", name,
+                   script_error_string(expected_error),
+                   script_error_string(ctx.error));
+            script_context_free(&ctx);
+            return;
+        }
     }
 
     tests_passed++;
@@ -523,6 +612,177 @@ int main(void)
         /* Stack check after operations */
         uint8_t stack_check[] = {OP_1, OP_2, OP_3, OP_2DROP};
         test_script_stack_size("2DROP leaves 1 element", stack_check, sizeof(stack_check), 1);
+    }
+    printf("\n");
+
+    /*
+     * ==========================================
+     * CRYPTO OPCODES (Session 4.4)
+     * ==========================================
+     */
+    printf("Crypto opcode tests:\n");
+    {
+        /*
+         * OP_RIPEMD160: RIPEMD-160 hash
+         * Test vector: RIPEMD160("") = 9c1185a5c5e9fc54612808977ee8f548b2258d31
+         */
+        uint8_t ripemd_empty[] = {OP_0, OP_RIPEMD160};
+        uint8_t ripemd_empty_expected[20];
+        ripemd160(NULL, 0, ripemd_empty_expected);
+        test_script_bytes("OP_RIPEMD160 empty", ripemd_empty, sizeof(ripemd_empty),
+                          ripemd_empty_expected, 20);
+
+        /* RIPEMD160("abc") */
+        uint8_t ripemd_abc[] = {0x03, 'a', 'b', 'c', OP_RIPEMD160};
+        uint8_t ripemd_abc_expected[20];
+        ripemd160((const uint8_t *)"abc", 3, ripemd_abc_expected);
+        test_script_bytes("OP_RIPEMD160 'abc'", ripemd_abc, sizeof(ripemd_abc),
+                          ripemd_abc_expected, 20);
+
+        /*
+         * OP_SHA256: SHA-256 hash
+         * Test vector: SHA256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+         */
+        uint8_t sha256_empty[] = {OP_0, OP_SHA256};
+        uint8_t sha256_empty_expected[32];
+        sha256(NULL, 0, sha256_empty_expected);
+        test_script_bytes("OP_SHA256 empty", sha256_empty, sizeof(sha256_empty),
+                          sha256_empty_expected, 32);
+
+        /* SHA256("abc") */
+        uint8_t sha256_abc[] = {0x03, 'a', 'b', 'c', OP_SHA256};
+        uint8_t sha256_abc_expected[32];
+        sha256((const uint8_t *)"abc", 3, sha256_abc_expected);
+        test_script_bytes("OP_SHA256 'abc'", sha256_abc, sizeof(sha256_abc),
+                          sha256_abc_expected, 32);
+
+        /*
+         * OP_HASH160: RIPEMD160(SHA256(x))
+         * This is the standard Bitcoin address hash
+         */
+        uint8_t hash160_empty[] = {OP_0, OP_HASH160};
+        uint8_t hash160_empty_expected[20];
+        hash160(NULL, 0, hash160_empty_expected);
+        test_script_bytes("OP_HASH160 empty", hash160_empty, sizeof(hash160_empty),
+                          hash160_empty_expected, 20);
+
+        /* HASH160("abc") */
+        uint8_t hash160_abc[] = {0x03, 'a', 'b', 'c', OP_HASH160};
+        uint8_t hash160_abc_expected[20];
+        hash160((const uint8_t *)"abc", 3, hash160_abc_expected);
+        test_script_bytes("OP_HASH160 'abc'", hash160_abc, sizeof(hash160_abc),
+                          hash160_abc_expected, 20);
+
+        /*
+         * OP_HASH256: SHA256(SHA256(x))
+         * This is the standard Bitcoin double-hash
+         */
+        uint8_t hash256_empty[] = {OP_0, OP_HASH256};
+        uint8_t hash256_empty_expected[32];
+        sha256d(NULL, 0, hash256_empty_expected);
+        test_script_bytes("OP_HASH256 empty", hash256_empty, sizeof(hash256_empty),
+                          hash256_empty_expected, 32);
+
+        /* HASH256("abc") */
+        uint8_t hash256_abc[] = {0x03, 'a', 'b', 'c', OP_HASH256};
+        uint8_t hash256_abc_expected[32];
+        sha256d((const uint8_t *)"abc", 3, hash256_abc_expected);
+        test_script_bytes("OP_HASH256 'abc'", hash256_abc, sizeof(hash256_abc),
+                          hash256_abc_expected, 32);
+
+        /* Hash opcodes require stack element */
+        uint8_t hash_underflow[] = {OP_SHA256};
+        test_script_error("Hash underflow", hash_underflow, sizeof(hash_underflow),
+                          SCRIPT_ERR_INVALID_STACK_OPERATION);
+
+        /*
+         * OP_CODESEPARATOR: Should succeed and do nothing
+         */
+        uint8_t codesep[] = {OP_1, OP_CODESEPARATOR};
+        test_script("OP_CODESEPARATOR", codesep, sizeof(codesep), ECHO_TRUE, 1);
+
+        /*
+         * OP_CHECKSIG: Without transaction context, returns false
+         * Stack needs: <sig> <pubkey>
+         * With empty sig and empty pubkey, should return 0
+         */
+        uint8_t checksig_empty[] = {OP_0, OP_0, OP_CHECKSIG};
+        test_script("OP_CHECKSIG empty sig/pubkey", checksig_empty,
+                    sizeof(checksig_empty), ECHO_TRUE, 0);
+
+        /* CHECKSIG underflow */
+        uint8_t checksig_underflow[] = {OP_1, OP_CHECKSIG};
+        test_script_error("CHECKSIG underflow", checksig_underflow,
+                          sizeof(checksig_underflow), SCRIPT_ERR_INVALID_STACK_OPERATION);
+
+        /* CHECKSIGVERIFY with empty sig fails */
+        uint8_t checksigverify[] = {OP_0, OP_0, OP_CHECKSIGVERIFY};
+        test_script_error("CHECKSIGVERIFY fails without context", checksigverify,
+                          sizeof(checksigverify), SCRIPT_ERR_CHECKSIGVERIFY);
+
+        /*
+         * OP_CHECKMULTISIG: m-of-n multisig with off-by-one bug
+         * Stack: dummy sig... m pubkey... n
+         *
+         * 0-of-0 multisig with dummy (tests off-by-one bug)
+         */
+        uint8_t multisig_0_0[] = {
+            OP_0,   /* Dummy (off-by-one bug) */
+            OP_0,   /* n_sigs = 0 */
+            OP_0,   /* n_keys = 0 */
+            OP_CHECKMULTISIG
+        };
+        test_script("CHECKMULTISIG 0-of-0", multisig_0_0,
+                    sizeof(multisig_0_0), ECHO_TRUE, 0);
+
+        /* 0-of-1 multisig: 0 required signatures, 1 key */
+        uint8_t multisig_0_1[] = {
+            OP_0,                              /* Dummy */
+            OP_0,                              /* n_sigs = 0 */
+            0x21,                              /* Push 33 bytes (fake pubkey) */
+            0x02, 0x00, 0x00, 0x00, 0x00,      /* Fake compressed pubkey */
+            0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00,
+            OP_1,                              /* n_keys = 1 */
+            OP_CHECKMULTISIG
+        };
+        test_script("CHECKMULTISIG 0-of-1", multisig_0_1,
+                    sizeof(multisig_0_1), ECHO_TRUE, 0);
+
+        /* Missing dummy element (off-by-one bug) */
+        uint8_t multisig_no_dummy[] = {
+            OP_0,   /* This becomes n_sigs */
+            OP_0,   /* This becomes n_keys */
+            OP_CHECKMULTISIG  /* No dummy! */
+        };
+        test_script_error("CHECKMULTISIG missing dummy", multisig_no_dummy,
+                          sizeof(multisig_no_dummy), SCRIPT_ERR_INVALID_STACK_OPERATION);
+
+        /* NULLDUMMY: With non-empty dummy, fails if NULLDUMMY flag set */
+        uint8_t multisig_bad_dummy[] = {
+            OP_1,   /* Dummy is OP_1 (not empty!) */
+            OP_0,   /* n_sigs = 0 */
+            OP_0,   /* n_keys = 0 */
+            OP_CHECKMULTISIG
+        };
+        test_script_flags("CHECKMULTISIG NULLDUMMY violation", multisig_bad_dummy,
+                          sizeof(multisig_bad_dummy), SCRIPT_VERIFY_NULLDUMMY,
+                          ECHO_FALSE, SCRIPT_ERR_SIG_NULLDUMMY);
+
+        /* With no flags, non-empty dummy is OK */
+        test_script("CHECKMULTISIG non-empty dummy allowed", multisig_bad_dummy,
+                    sizeof(multisig_bad_dummy), ECHO_TRUE, 0);
+
+        /*
+         * OP_SHA1: Intentionally not implemented (insecure)
+         */
+        uint8_t sha1[] = {OP_0, OP_SHA1};
+        test_script_error("OP_SHA1 not implemented", sha1, sizeof(sha1),
+                          SCRIPT_ERR_BAD_OPCODE);
     }
     printf("\n");
 

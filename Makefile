@@ -79,13 +79,13 @@ $(TEST_BLOCK): test/unit/test_block.c src/consensus/block.c src/consensus/tx.c s
 $(TEST_MERKLE): test/unit/test_merkle.c src/consensus/merkle.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(TEST_SCRIPT): test/unit/test_script.c src/consensus/script.c
+$(TEST_SCRIPT): test/unit/test_script.c src/consensus/script.c src/crypto/sha256.c src/crypto/ripemd160.c
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(TEST_STACK): test/unit/test_stack.c src/consensus/script.c
+$(TEST_STACK): test/unit/test_stack.c src/consensus/script.c src/crypto/sha256.c src/crypto/ripemd160.c
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(TEST_OPCODES): test/unit/test_opcodes.c src/consensus/script.c
+$(TEST_OPCODES): test/unit/test_opcodes.c src/consensus/script.c src/crypto/sha256.c src/crypto/ripemd160.c
 	$(CC) $(CFLAGS) -o $@ $^
 
 test: $(TEST_SHA256) $(TEST_RIPEMD160) $(TEST_SECP256K1_FE) $(TEST_SECP256K1_GROUP) $(TEST_ECDSA) $(TEST_SCHNORR) $(TEST_SIG_VERIFY) $(TEST_SERIALIZE) $(TEST_TX) $(TEST_BLOCK) $(TEST_MERKLE) $(TEST_SCRIPT) $(TEST_STACK) $(TEST_OPCODES)
