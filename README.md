@@ -6,23 +6,37 @@ A complete, ossified implementation of the Bitcoin protocol in pure C.
 
 ## Status
 
-**Phase 3: Consensus Data Structures** — Complete (175 tests passing)
+**Phase 4: Script Interpreter** — Complete
 
-| Component | Tests |
-|-----------|-------|
-| SHA-256 | 9/9 |
-| RIPEMD-160 | 17/17 |
-| secp256k1 Field | 19/19 |
-| secp256k1 Group | 15/15 |
-| ECDSA Verification | 17/17 |
-| Schnorr (BIP-340) | 20/20 |
-| Signature Interface | 13/13 |
-| Varint Encoding | 50/50 |
-| Transactions | 15/15 |
-| Blocks | 14/14 |
-| Merkle Trees | 15/15 |
+See the full [implementation roadmap](https://bitcoinecho.org/docs/whitepaper) for detailed progress.
 
-Next: Phase 4 — Transaction Validation (Script Interpreter)
+| Component | Status |
+|-----------|--------|
+| **Cryptography** | |
+| SHA-256 | Complete |
+| RIPEMD-160 | Complete |
+| secp256k1 (Field/Group) | Complete |
+| ECDSA Verification | Complete |
+| Schnorr (BIP-340) | Complete |
+| **Data Structures** | |
+| Serialization | Complete |
+| Transactions | Complete |
+| Blocks | Complete |
+| Merkle Trees | Complete |
+| **Script Interpreter** | |
+| Stack Operations | Complete |
+| Arithmetic/Logic Opcodes | Complete |
+| Crypto Opcodes | Complete |
+| Flow Control | Complete |
+| P2SH Support | Complete |
+| Timelocks (BIP-65/68/112) | Complete |
+| Signature Verification | Complete |
+| **Transaction Validation** | |
+| Syntactic Validation | Complete |
+| Script Execution | Complete |
+| UTXO Context | Complete |
+
+Next: Phase 5 — Block Validation
 
 ## Building
 
@@ -46,7 +60,7 @@ echo.exe
 make test
 ```
 
-Runs all unit tests for cryptographic primitives.
+Runs all unit tests for cryptographic primitives, data structures, and script execution.
 
 ## Requirements
 
@@ -55,11 +69,11 @@ Runs all unit tests for cryptographic primitives.
 
 ## Documentation
 
-Documentation lives in the [`bitcoinecho-org`](https://github.com/bitcoinecho/bitcoinecho-org) repository:
-
-- [Whitepaper](https://github.com/bitcoinecho/bitcoinecho-org/blob/main/bitcoin-echo-whitepaper.md) — Technical specification
-- [Manifesto](https://github.com/bitcoinecho/bitcoinecho-org/blob/main/bitcoin-echo-manifesto.md) — Philosophical foundation
-- [Roadmap](https://github.com/bitcoinecho/bitcoinecho-org/blob/main/ROADMAP.md) — Implementation progress
+- [Whitepaper](https://bitcoinecho.org/docs/whitepaper) — Technical specification
+- [Manifesto](https://bitcoinecho.org/docs/manifesto) — Philosophical foundation
+- [Bitcoin Primer](https://bitcoinecho.org/docs/primer) — What is Bitcoin?
+- [Building Guide](https://bitcoinecho.org/docs/building) — Compilation for the future
+- [Roadmap](https://github.com/bitcoinecho/bitcoinecho-org/blob/main/ROADMAP.md) — Detailed implementation progress
 
 ## License
 
