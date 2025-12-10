@@ -4,6 +4,7 @@
 [![Tests](https://img.shields.io/badge/tests-575%20passing-brightgreen.svg)](#testing)
 [![C Standard](https://img.shields.io/badge/C-C11-blue.svg)](https://en.wikipedia.org/wiki/C11_(C_standard_revision))
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 [![Dependencies](https://img.shields.io/badge/dependencies-none-success.svg)]()
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)]()
 [![Progress](https://img.shields.io/badge/roadmap-6%2F12%20phases-orange.svg)](https://github.com/bitcoinecho/bitcoinecho-org/blob/main/ROADMAP.md)
