@@ -1,5 +1,10 @@
 # Bitcoin Echo
 
+[![Tests](https://github.com/bitcoinecho/bitcoin-echo/actions/workflows/test.yml/badge.svg)](https://github.com/bitcoinecho/bitcoin-echo/actions/workflows/test.yml)
+[![C Standard](https://img.shields.io/badge/C-C11-blue.svg)](https://en.wikipedia.org/wiki/C11_(C_standard_revision))
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Tests](https://img.shields.io/badge/tests-575%20passing-brightgreen.svg)](#testing)
+
 A complete, ossified implementation of the Bitcoin protocol in pure C.
 
 *Build once. Build right. Stop.*
