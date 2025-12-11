@@ -24,12 +24,12 @@
 /*
  * SHA-256 produces a 256-bit (32-byte) digest.
  */
-#define SHA256_DIGEST_SIZE  32
+#define SHA256_DIGEST_SIZE 32
 
 /*
  * SHA-256 processes data in 512-bit (64-byte) blocks.
  */
-#define SHA256_BLOCK_SIZE   64
+#define SHA256_BLOCK_SIZE 64
 
 /*
  * SHA-256 context for incremental hashing.
@@ -38,9 +38,9 @@
  * and sha256_final() to retrieve the digest.
  */
 typedef struct {
-    uint32_t state[8];              /* Current hash state (H0-H7) */
-    uint64_t count;                 /* Number of bytes processed */
-    uint8_t  buffer[SHA256_BLOCK_SIZE]; /* Partial block buffer */
+  uint32_t state[8];                 /* Current hash state (H0-H7) */
+  uint64_t count;                    /* Number of bytes processed */
+  uint8_t buffer[SHA256_BLOCK_SIZE]; /* Partial block buffer */
 } sha256_ctx_t;
 
 /*

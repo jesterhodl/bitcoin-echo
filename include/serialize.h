@@ -19,13 +19,14 @@
 #define ECHO_SERIALIZE_H
 
 #include "echo_types.h"
+#include <stdint.h>
 
 /*
  * CompactSize prefix bytes.
  */
-#define VARINT_PREFIX_16  0xFD  /* Followed by 2-byte value */
-#define VARINT_PREFIX_32  0xFE  /* Followed by 4-byte value */
-#define VARINT_PREFIX_64  0xFF  /* Followed by 8-byte value */
+#define VARINT_PREFIX_16 0xFD /* Followed by 2-byte value */
+#define VARINT_PREFIX_32 0xFE /* Followed by 4-byte value */
+#define VARINT_PREFIX_64 0xFF /* Followed by 8-byte value */
 
 /*
  * Maximum CompactSize value (for transaction counts, etc.)

@@ -19,12 +19,12 @@
 /*
  * RIPEMD-160 produces a 160-bit (20-byte) digest.
  */
-#define RIPEMD160_DIGEST_SIZE  20
+#define RIPEMD160_DIGEST_SIZE 20
 
 /*
  * RIPEMD-160 processes data in 512-bit (64-byte) blocks.
  */
-#define RIPEMD160_BLOCK_SIZE   64
+#define RIPEMD160_BLOCK_SIZE 64
 
 /*
  * RIPEMD-160 context for streaming interface.
@@ -32,9 +32,9 @@
  * Allows hashing data incrementally via init/update/final.
  */
 typedef struct {
-    uint32_t state[5];                    /* Current hash state */
-    uint64_t count;                       /* Total bytes processed */
-    uint8_t  buffer[RIPEMD160_BLOCK_SIZE]; /* Partial block buffer */
+  uint32_t state[5];                    /* Current hash state */
+  uint64_t count;                       /* Total bytes processed */
+  uint8_t buffer[RIPEMD160_BLOCK_SIZE]; /* Partial block buffer */
 } ripemd160_ctx_t;
 
 /*
@@ -76,7 +76,8 @@ void ripemd160_final(ripemd160_ctx_t *ctx, uint8_t out[RIPEMD160_DIGEST_SIZE]);
  * @param len   Length of data in bytes
  * @param out   Output buffer (must be at least 20 bytes)
  */
-void ripemd160(const uint8_t *data, size_t len, uint8_t out[RIPEMD160_DIGEST_SIZE]);
+void ripemd160(const uint8_t *data, size_t len,
+               uint8_t out[RIPEMD160_DIGEST_SIZE]);
 
 /*
  * Compute HASH160 = RIPEMD160(SHA256(x)).
@@ -88,6 +89,7 @@ void ripemd160(const uint8_t *data, size_t len, uint8_t out[RIPEMD160_DIGEST_SIZ
  * @param len   Length of data in bytes
  * @param out   Output buffer (must be at least 20 bytes)
  */
-void hash160(const uint8_t *data, size_t len, uint8_t out[RIPEMD160_DIGEST_SIZE]);
+void hash160(const uint8_t *data, size_t len,
+             uint8_t out[RIPEMD160_DIGEST_SIZE]);
 
 #endif /* ECHO_RIPEMD160_H */

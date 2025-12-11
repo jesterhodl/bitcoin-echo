@@ -10,15 +10,15 @@
 #ifndef ECHO_TYPES_H
 #define ECHO_TYPES_H
 
-#include <stdint.h>
 #include <stddef.h>
+#include <stdint.h>
 
 /*
  * Boolean type.
  * C11 provides _Bool and stdbool.h, but we define our own for clarity.
  */
 typedef int echo_bool_t;
-#define ECHO_TRUE  1
+#define ECHO_TRUE 1
 #define ECHO_FALSE 0
 
 /*
@@ -52,12 +52,12 @@ typedef int64_t satoshi_t;
 
 /* 256-bit hash (32 bytes) - used for block hashes, txids, merkle nodes */
 typedef struct {
-    uint8_t bytes[32];
+  uint8_t bytes[32];
 } hash256_t;
 
 /* 160-bit hash (20 bytes) - used for addresses (RIPEMD160(SHA256(x))) */
 typedef struct {
-    uint8_t bytes[20];
+  uint8_t bytes[20];
 } hash160_t;
 
 /* Null hash constant (32 zero bytes) - used for coinbase prevout */
@@ -69,79 +69,79 @@ typedef struct {
  * Zero is success; negative values indicate errors.
  */
 typedef enum {
-    ECHO_OK = 0,
-    ECHO_DONE = 1,                   /* Iterator/query has no more items */
+  ECHO_OK = 0,
+  ECHO_DONE = 1, /* Iterator/query has no more items */
 
-    /* General errors */
-    ECHO_ERR_NULL_PARAM      = -1,   /* Required parameter was NULL */
-    ECHO_ERR_BUFFER_TOO_SMALL = -2,  /* Output buffer insufficient */
-    ECHO_ERR_OUT_OF_MEMORY   = -3,   /* Memory allocation failed */
-    ECHO_ERR_OUT_OF_RANGE    = -4,   /* Index out of valid range */
-    ECHO_ERR_NOT_FOUND       = -5,   /* Item not found */
-    ECHO_ERR_INVALID         = -6,   /* Invalid operation or state */
+  /* General errors */
+  ECHO_ERR_NULL_PARAM = -1,       /* Required parameter was NULL */
+  ECHO_ERR_BUFFER_TOO_SMALL = -2, /* Output buffer insufficient */
+  ECHO_ERR_OUT_OF_MEMORY = -3,    /* Memory allocation failed */
+  ECHO_ERR_OUT_OF_RANGE = -4,     /* Index out of valid range */
+  ECHO_ERR_NOT_FOUND = -5,        /* Item not found */
+  ECHO_ERR_INVALID = -6,          /* Invalid operation or state */
 
-    /* Parsing errors */
-    ECHO_ERR_PARSE_FAILED    = -10,  /* General parse failure */
-    ECHO_ERR_TRUNCATED       = -11,  /* Unexpected end of data */
-    ECHO_ERR_INVALID_FORMAT  = -12,  /* Data format invalid */
-    ECHO_ERR_VARINT_TOO_LARGE = -13, /* CompactSize exceeds maximum */
+  /* Parsing errors */
+  ECHO_ERR_PARSE_FAILED = -10,     /* General parse failure */
+  ECHO_ERR_TRUNCATED = -11,        /* Unexpected end of data */
+  ECHO_ERR_INVALID_FORMAT = -12,   /* Data format invalid */
+  ECHO_ERR_VARINT_TOO_LARGE = -13, /* CompactSize exceeds maximum */
 
-    /* Validation errors - transactions */
-    ECHO_ERR_TX_EMPTY_INPUTS  = -20, /* Transaction has no inputs */
-    ECHO_ERR_TX_EMPTY_OUTPUTS = -21, /* Transaction has no outputs */
-    ECHO_ERR_TX_DUPLICATE_INPUT = -22, /* Same outpoint spent twice */
-    ECHO_ERR_TX_NEGATIVE_VALUE = -23, /* Output value negative */
-    ECHO_ERR_TX_VALUE_OVERFLOW = -24, /* Total output exceeds max */
-    ECHO_ERR_TX_SCRIPT_FAILED = -25, /* Script execution failed */
+  /* Validation errors - transactions */
+  ECHO_ERR_TX_EMPTY_INPUTS = -20,    /* Transaction has no inputs */
+  ECHO_ERR_TX_EMPTY_OUTPUTS = -21,   /* Transaction has no outputs */
+  ECHO_ERR_TX_DUPLICATE_INPUT = -22, /* Same outpoint spent twice */
+  ECHO_ERR_TX_NEGATIVE_VALUE = -23,  /* Output value negative */
+  ECHO_ERR_TX_VALUE_OVERFLOW = -24,  /* Total output exceeds max */
+  ECHO_ERR_TX_SCRIPT_FAILED = -25,   /* Script execution failed */
 
-    /* Validation errors - blocks */
-    ECHO_ERR_BLOCK_POW_FAILED = -30, /* Proof-of-work invalid */
-    ECHO_ERR_BLOCK_MERKLE     = -31, /* Merkle root mismatch */
-    ECHO_ERR_BLOCK_TIMESTAMP  = -32, /* Timestamp out of range */
-    ECHO_ERR_BLOCK_SIZE       = -33, /* Block exceeds size limit */
-    ECHO_ERR_BLOCK_NO_COINBASE = -34, /* First tx not coinbase */
-    ECHO_ERR_BLOCK_MULTI_COINBASE = -35, /* Multiple coinbase txs */
+  /* Validation errors - blocks */
+  ECHO_ERR_BLOCK_POW_FAILED = -30,     /* Proof-of-work invalid */
+  ECHO_ERR_BLOCK_MERKLE = -31,         /* Merkle root mismatch */
+  ECHO_ERR_BLOCK_TIMESTAMP = -32,      /* Timestamp out of range */
+  ECHO_ERR_BLOCK_SIZE = -33,           /* Block exceeds size limit */
+  ECHO_ERR_BLOCK_NO_COINBASE = -34,    /* First tx not coinbase */
+  ECHO_ERR_BLOCK_MULTI_COINBASE = -35, /* Multiple coinbase txs */
 
-    /* Validation errors - scripts */
-    ECHO_ERR_SCRIPT_SIZE      = -40, /* Script exceeds size limit */
-    ECHO_ERR_SCRIPT_OPCODE    = -41, /* Invalid or disabled opcode */
-    ECHO_ERR_SCRIPT_STACK     = -42, /* Stack overflow/underflow */
-    ECHO_ERR_SCRIPT_VERIFY    = -43, /* OP_VERIFY failed */
-    ECHO_ERR_SCRIPT_SIG       = -44, /* Signature verification failed */
-    ECHO_ERR_SCRIPT_ERROR     = -45, /* General script error (check ctx->error) */
+  /* Validation errors - scripts */
+  ECHO_ERR_SCRIPT_SIZE = -40,   /* Script exceeds size limit */
+  ECHO_ERR_SCRIPT_OPCODE = -41, /* Invalid or disabled opcode */
+  ECHO_ERR_SCRIPT_STACK = -42,  /* Stack overflow/underflow */
+  ECHO_ERR_SCRIPT_VERIFY = -43, /* OP_VERIFY failed */
+  ECHO_ERR_SCRIPT_SIG = -44,    /* Signature verification failed */
+  ECHO_ERR_SCRIPT_ERROR = -45,  /* General script error (check ctx->error) */
 
-    /* Consensus errors */
-    ECHO_ERR_CONSENSUS_UTXO   = -50, /* UTXO not found */
-    ECHO_ERR_CONSENSUS_SPENT  = -51, /* UTXO already spent */
-    ECHO_ERR_CONSENSUS_MATURITY = -52, /* Coinbase not mature */
+  /* Consensus errors */
+  ECHO_ERR_CONSENSUS_UTXO = -50,     /* UTXO not found */
+  ECHO_ERR_CONSENSUS_SPENT = -51,    /* UTXO already spent */
+  ECHO_ERR_CONSENSUS_MATURITY = -52, /* Coinbase not mature */
 
-    /* UTXO errors */
-    ECHO_ERR_EXISTS           = -55, /* Item already exists */
-    ECHO_ERR_NOMEM            = -56, /* Memory allocation failed */
+  /* UTXO errors */
+  ECHO_ERR_EXISTS = -55, /* Item already exists */
+  ECHO_ERR_NOMEM = -56,  /* Memory allocation failed */
 
-    /* Chain state errors */
-    ECHO_ERR_INVALID_BLOCK    = -60, /* Block invalid or doesn't connect */
-    ECHO_ERR_UNDERFLOW        = -61, /* Arithmetic underflow */
-    ECHO_ERR_OVERFLOW         = -62, /* Arithmetic overflow */
+  /* Chain state errors */
+  ECHO_ERR_INVALID_BLOCK = -60, /* Block invalid or doesn't connect */
+  ECHO_ERR_UNDERFLOW = -61,     /* Arithmetic underflow */
+  ECHO_ERR_OVERFLOW = -62,      /* Arithmetic overflow */
 
-    /* Platform errors */
-    ECHO_ERR_PLATFORM_IO      = -70, /* I/O operation failed */
-    ECHO_ERR_PLATFORM_NET     = -71, /* Network operation failed */
+  /* Platform errors */
+  ECHO_ERR_PLATFORM_IO = -70,  /* I/O operation failed */
+  ECHO_ERR_PLATFORM_NET = -71, /* Network operation failed */
 
-    /* Database errors */
-    ECHO_ERR_DB               = -80, /* Database operation failed */
-    ECHO_ERR_IO               = -81, /* File I/O error */
+  /* Database errors */
+  ECHO_ERR_DB = -80, /* Database operation failed */
+  ECHO_ERR_IO = -81, /* File I/O error */
 
-    /* Network/protocol errors */
-    ECHO_ERR_NETWORK          = -90, /* Network operation failed */
-    ECHO_ERR_PROTOCOL         = -91, /* Protocol violation */
-    ECHO_ERR_WOULD_BLOCK      = -92, /* Operation would block (not an error) */
-    ECHO_ERR_INVALID_STATE    = -93, /* Invalid state for operation */
-    ECHO_ERR_FULL             = -94, /* Queue or buffer full */
-    ECHO_ERR_INVALID_PARAM    = -95, /* Invalid parameter value */
+  /* Network/protocol errors */
+  ECHO_ERR_NETWORK = -90,       /* Network operation failed */
+  ECHO_ERR_PROTOCOL = -91,      /* Protocol violation */
+  ECHO_ERR_WOULD_BLOCK = -92,   /* Operation would block (not an error) */
+  ECHO_ERR_INVALID_STATE = -93, /* Invalid state for operation */
+  ECHO_ERR_FULL = -94,          /* Queue or buffer full */
+  ECHO_ERR_INVALID_PARAM = -95, /* Invalid parameter value */
 
-    /* Success codes */
-    ECHO_SUCCESS              = 0    /* Operation succeeded (alias for ECHO_OK) */
+  /* Success codes */
+  ECHO_SUCCESS = 0 /* Operation succeeded (alias for ECHO_OK) */
 
 } echo_result_t;
 
@@ -150,17 +150,17 @@ typedef enum {
  * Used for variable-length data like scripts and signatures.
  */
 typedef struct {
-    const uint8_t *data;
-    size_t         len;
+  const uint8_t *data;
+  size_t len;
 } echo_buffer_t;
 
 /*
  * Mutable byte buffer for output.
  */
 typedef struct {
-    uint8_t *data;
-    size_t   len;
-    size_t   capacity;
+  uint8_t *data;
+  size_t len;
+  size_t capacity;
 } echo_buffer_mut_t;
 
 #endif /* ECHO_TYPES_H */

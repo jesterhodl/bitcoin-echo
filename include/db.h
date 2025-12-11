@@ -1,8 +1,9 @@
 /*
  * Bitcoin Echo — Database Interface
  *
- * Thin wrapper around SQLite for persistent storage of UTXO set and block index.
- * Provides a clean interface for database operations with transaction support.
+ * Thin wrapper around SQLite for persistent storage of UTXO set and block
+ * index. Provides a clean interface for database operations with transaction
+ * support.
  *
  * This module integrates the SQLite amalgamation embedded in lib/sqlite/.
  * SQLite is public domain and aligns with the project's philosophy of minimal
@@ -35,9 +36,9 @@ typedef struct sqlite3_stmt sqlite3_stmt;
  * Represents an open SQLite database connection.
  */
 typedef struct {
-    sqlite3 *handle;      /* SQLite database handle */
-    char path[512];       /* Path to database file */
-    int in_transaction;   /* Whether a transaction is active */
+  sqlite3 *handle;    /* SQLite database handle */
+  char path[512];     /* Path to database file */
+  int in_transaction; /* Whether a transaction is active */
 } db_t;
 
 /*
@@ -45,7 +46,7 @@ typedef struct {
  * Represents a compiled SQL statement ready for execution.
  */
 typedef struct {
-    sqlite3_stmt *stmt;   /* SQLite statement handle */
+  sqlite3_stmt *stmt; /* SQLite statement handle */
 } db_stmt_t;
 
 /* ========================================================================
@@ -242,7 +243,8 @@ echo_result_t db_bind_int64(db_stmt_t *stmt, int index, int64_t value);
  * Notes:
  *   - Makes a copy of the data; caller retains ownership
  */
-echo_result_t db_bind_blob(db_stmt_t *stmt, int index, const void *data, size_t size);
+echo_result_t db_bind_blob(db_stmt_t *stmt, int index, const void *data,
+                           size_t size);
 
 /**
  * Bind a text (string) parameter to a prepared statement.

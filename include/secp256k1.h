@@ -33,7 +33,7 @@
  */
 
 typedef struct {
-    uint32_t limbs[8];
+  uint32_t limbs[8];
 } secp256k1_fe_t;
 
 /*
@@ -96,17 +96,20 @@ void secp256k1_fe_neg(secp256k1_fe_t *r, const secp256k1_fe_t *a);
 /*
  * Add field elements: r = a + b (mod p).
  */
-void secp256k1_fe_add(secp256k1_fe_t *r, const secp256k1_fe_t *a, const secp256k1_fe_t *b);
+void secp256k1_fe_add(secp256k1_fe_t *r, const secp256k1_fe_t *a,
+                      const secp256k1_fe_t *b);
 
 /*
  * Subtract field elements: r = a - b (mod p).
  */
-void secp256k1_fe_sub(secp256k1_fe_t *r, const secp256k1_fe_t *a, const secp256k1_fe_t *b);
+void secp256k1_fe_sub(secp256k1_fe_t *r, const secp256k1_fe_t *a,
+                      const secp256k1_fe_t *b);
 
 /*
  * Multiply field elements: r = a * b (mod p).
  */
-void secp256k1_fe_mul(secp256k1_fe_t *r, const secp256k1_fe_t *a, const secp256k1_fe_t *b);
+void secp256k1_fe_mul(secp256k1_fe_t *r, const secp256k1_fe_t *a,
+                      const secp256k1_fe_t *b);
 
 /*
  * Square field element: r = a² (mod p).
@@ -146,7 +149,7 @@ int secp256k1_fe_is_odd(const secp256k1_fe_t *a);
  */
 
 typedef struct {
-    uint32_t limbs[8];
+  uint32_t limbs[8];
 } secp256k1_scalar_t;
 
 /*
@@ -176,9 +179,9 @@ int secp256k1_scalar_is_zero(const secp256k1_scalar_t *a);
  */
 
 typedef struct {
-    secp256k1_fe_t x;
-    secp256k1_fe_t y;
-    secp256k1_fe_t z;
+  secp256k1_fe_t x;
+  secp256k1_fe_t y;
+  secp256k1_fe_t z;
 } secp256k1_point_t;
 
 /*
@@ -195,8 +198,7 @@ int secp256k1_point_is_infinity(const secp256k1_point_t *p);
  * Set point from affine coordinates.
  * Does NOT validate that point is on curve.
  */
-void secp256k1_point_set_xy(secp256k1_point_t *r,
-                            const secp256k1_fe_t *x,
+void secp256k1_point_set_xy(secp256k1_point_t *r, const secp256k1_fe_t *x,
                             const secp256k1_fe_t *y);
 
 /*
@@ -214,16 +216,14 @@ void secp256k1_point_double(secp256k1_point_t *r, const secp256k1_point_t *p);
 /*
  * Point addition: r = p + q.
  */
-void secp256k1_point_add(secp256k1_point_t *r,
-                         const secp256k1_point_t *p,
+void secp256k1_point_add(secp256k1_point_t *r, const secp256k1_point_t *p,
                          const secp256k1_point_t *q);
 
 /*
  * Scalar multiplication: r = k * p.
  * Constant-time with respect to the scalar k.
  */
-void secp256k1_point_mul(secp256k1_point_t *r,
-                         const secp256k1_point_t *p,
+void secp256k1_point_mul(secp256k1_point_t *r, const secp256k1_point_t *p,
                          const secp256k1_scalar_t *k);
 
 /*
@@ -250,17 +250,19 @@ void secp256k1_point_neg(secp256k1_point_t *r, const secp256k1_point_t *p);
 
 /*
  * Parse public key from bytes.
- * Supports compressed (33 bytes, prefix 02/03) and uncompressed (65 bytes, prefix 04).
- * Returns 1 on success, 0 on failure.
+ * Supports compressed (33 bytes, prefix 02/03) and uncompressed (65 bytes,
+ * prefix 04). Returns 1 on success, 0 on failure.
  */
-int secp256k1_pubkey_parse(secp256k1_point_t *p, const uint8_t *data, size_t len);
+int secp256k1_pubkey_parse(secp256k1_point_t *p, const uint8_t *data,
+                           size_t len);
 
 /*
  * Serialize public key to bytes.
  * If compressed is true, outputs 33 bytes (prefix 02/03).
  * If compressed is false, outputs 65 bytes (prefix 04).
  */
-void secp256k1_pubkey_serialize(uint8_t *out, const secp256k1_point_t *p, int compressed);
+void secp256k1_pubkey_serialize(uint8_t *out, const secp256k1_point_t *p,
+                                int compressed);
 
 /*
  * ============================================================================
@@ -271,15 +273,13 @@ void secp256k1_pubkey_serialize(uint8_t *out, const secp256k1_point_t *p, int co
 /*
  * Multiply two scalars: r = a * b (mod n).
  */
-void secp256k1_scalar_mul(secp256k1_scalar_t *r,
-                          const secp256k1_scalar_t *a,
+void secp256k1_scalar_mul(secp256k1_scalar_t *r, const secp256k1_scalar_t *a,
                           const secp256k1_scalar_t *b);
 
 /*
  * Add two scalars: r = a + b (mod n).
  */
-void secp256k1_scalar_add(secp256k1_scalar_t *r,
-                          const secp256k1_scalar_t *a,
+void secp256k1_scalar_add(secp256k1_scalar_t *r, const secp256k1_scalar_t *a,
                           const secp256k1_scalar_t *b);
 
 /*
@@ -300,8 +300,8 @@ void secp256k1_scalar_inv(secp256k1_scalar_t *r, const secp256k1_scalar_t *a);
  * Both r and s are 256-bit scalars in range [1, n-1].
  */
 typedef struct {
-    secp256k1_scalar_t r;
-    secp256k1_scalar_t s;
+  secp256k1_scalar_t r;
+  secp256k1_scalar_t s;
 } secp256k1_ecdsa_sig_t;
 
 /*
@@ -316,8 +316,7 @@ typedef struct {
  * Returns 1 on success, 0 on failure.
  */
 int secp256k1_ecdsa_sig_parse_der(secp256k1_ecdsa_sig_t *sig,
-                                  const uint8_t *data,
-                                  size_t len);
+                                  const uint8_t *data, size_t len);
 
 /*
  * Verify ECDSA signature.
@@ -368,7 +367,8 @@ int secp256k1_xonly_pubkey_parse(secp256k1_point_t *p, const uint8_t xonly[32]);
  * Serialize point to x-only format (32 bytes).
  * Only the x-coordinate is output.
  */
-void secp256k1_xonly_pubkey_serialize(uint8_t xonly[32], const secp256k1_point_t *p);
+void secp256k1_xonly_pubkey_serialize(uint8_t xonly[32],
+                                      const secp256k1_point_t *p);
 
 /*
  * BIP-340 tagged hash: SHA256(SHA256(tag) || SHA256(tag) || msg)
@@ -379,10 +379,8 @@ void secp256k1_xonly_pubkey_serialize(uint8_t xonly[32], const secp256k1_point_t
  *   msg: message bytes
  *   msg_len: length of message
  */
-void secp256k1_schnorr_tagged_hash(uint8_t out[32],
-                                   const char *tag,
-                                   const uint8_t *msg,
-                                   size_t msg_len);
+void secp256k1_schnorr_tagged_hash(uint8_t out[32], const char *tag,
+                                   const uint8_t *msg, size_t msg_len);
 
 /*
  * Verify BIP-340 Schnorr signature.
@@ -405,9 +403,7 @@ void secp256k1_schnorr_tagged_hash(uint8_t out[32],
  *
  * Returns 1 if valid, 0 if invalid.
  */
-int secp256k1_schnorr_verify(const uint8_t sig[64],
-                             const uint8_t *msg,
-                             size_t msg_len,
-                             const uint8_t pubkey[32]);
+int secp256k1_schnorr_verify(const uint8_t sig[64], const uint8_t *msg,
+                             size_t msg_len, const uint8_t pubkey[32]);
 
 #endif /* ECHO_SECP256K1_H */

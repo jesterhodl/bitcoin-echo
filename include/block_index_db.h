@@ -32,25 +32,25 @@
 #ifndef ECHO_BLOCK_INDEX_DB_H
 #define ECHO_BLOCK_INDEX_DB_H
 
-#include "echo_types.h"
-#include "db.h"
 #include "block.h"
 #include "chainstate.h"
+#include "db.h"
+#include "echo_types.h"
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdbool.h>
 
 /*
  * Block validation status flags.
  * These track the validation state of each block header.
  */
 typedef enum {
-    BLOCK_STATUS_VALID_HEADER   = 0x01,  /* Header has been validated */
-    BLOCK_STATUS_VALID_TREE     = 0x02,  /* All ancestors are valid */
-    BLOCK_STATUS_VALID_SCRIPTS  = 0x04,  /* All scripts have been validated */
-    BLOCK_STATUS_VALID_CHAIN    = 0x08,  /* Block is part of best chain */
-    BLOCK_STATUS_HAVE_DATA      = 0x10,  /* Full block data is stored */
-    BLOCK_STATUS_FAILED         = 0x20,  /* Block validation failed */
+  BLOCK_STATUS_VALID_HEADER = 0x01,  /* Header has been validated */
+  BLOCK_STATUS_VALID_TREE = 0x02,    /* All ancestors are valid */
+  BLOCK_STATUS_VALID_SCRIPTS = 0x04, /* All scripts have been validated */
+  BLOCK_STATUS_VALID_CHAIN = 0x08,   /* Block is part of best chain */
+  BLOCK_STATUS_HAVE_DATA = 0x10,     /* Full block data is stored */
+  BLOCK_STATUS_FAILED = 0x20,        /* Block validation failed */
 } block_status_flags_t;
 
 /*
@@ -58,11 +58,11 @@ typedef enum {
  * Represents all metadata for a block header stored in the database.
  */
 typedef struct {
-    hash256_t       hash;          /* Block hash (32 bytes) */
-    uint32_t        height;        /* Block height in chain */
-    block_header_t  header;        /* Full 80-byte header */
-    work256_t       chainwork;     /* Accumulated proof-of-work (32 bytes) */
-    uint32_t        status;        /* Validation status flags */
+  hash256_t hash;        /* Block hash (32 bytes) */
+  uint32_t height;       /* Block height in chain */
+  block_header_t header; /* Full 80-byte header */
+  work256_t chainwork;   /* Accumulated proof-of-work (32 bytes) */
+  uint32_t status;       /* Validation status flags */
 } block_index_entry_t;
 
 /*
@@ -70,13 +70,13 @@ typedef struct {
  * Wraps a SQLite database configured for block index storage.
  */
 typedef struct {
-    db_t db;                      /* Underlying database handle */
-    db_stmt_t lookup_hash_stmt;   /* Prepared statement for lookup by hash */
-    db_stmt_t lookup_height_stmt; /* Prepared statement for lookup by height */
-    db_stmt_t insert_stmt;        /* Prepared statement for inserts */
-    db_stmt_t update_status_stmt; /* Prepared statement for status updates */
-    db_stmt_t best_chain_stmt;    /* Prepared statement for best chain query */
-    bool stmts_prepared;          /* Whether statements are prepared */
+  db_t db;                      /* Underlying database handle */
+  db_stmt_t lookup_hash_stmt;   /* Prepared statement for lookup by hash */
+  db_stmt_t lookup_height_stmt; /* Prepared statement for lookup by height */
+  db_stmt_t insert_stmt;        /* Prepared statement for inserts */
+  db_stmt_t update_status_stmt; /* Prepared statement for status updates */
+  db_stmt_t best_chain_stmt;    /* Prepared statement for best chain query */
+  bool stmts_prepared;          /* Whether statements are prepared */
 } block_index_db_t;
 
 /* ========================================================================
@@ -133,11 +133,9 @@ void block_index_db_close(block_index_db_t *bdb);
  *   - Entry is populated with all block metadata
  *   - No dynamic memory allocation; entry is stack-allocated by caller
  */
-echo_result_t block_index_db_lookup_by_hash(
-    block_index_db_t *bdb,
-    const hash256_t *hash,
-    block_index_entry_t *entry
-);
+echo_result_t block_index_db_lookup_by_hash(block_index_db_t *bdb,
+                                            const hash256_t *hash,
+                                            block_index_entry_t *entry);
 
 /**
  * Lookup a block by its height.
@@ -154,11 +152,9 @@ echo_result_t block_index_db_lookup_by_hash(
  *   - If multiple blocks exist at this height (during reorg), returns one
  *   - For deterministic results, use the best chain query instead
  */
-echo_result_t block_index_db_lookup_by_height(
-    block_index_db_t *bdb,
-    uint32_t height,
-    block_index_entry_t *entry
-);
+echo_result_t block_index_db_lookup_by_height(block_index_db_t *bdb,
+                                              uint32_t height,
+                                              block_index_entry_t *entry);
 
 /**
  * Check if a block exists in the database.
@@ -171,11 +167,8 @@ echo_result_t block_index_db_lookup_by_height(
  * Returns:
  *   ECHO_OK on success, error code on failure
  */
-echo_result_t block_index_db_exists(
-    block_index_db_t *bdb,
-    const hash256_t *hash,
-    bool *exists
-);
+echo_result_t block_index_db_exists(block_index_db_t *bdb,
+                                    const hash256_t *hash, bool *exists);
 
 /**
  * Insert a block into the index.
@@ -191,10 +184,8 @@ echo_result_t block_index_db_exists(
  *   - Should be called within a transaction for atomicity
  *   - Will fail if block hash already exists
  */
-echo_result_t block_index_db_insert(
-    block_index_db_t *bdb,
-    const block_index_entry_t *entry
-);
+echo_result_t block_index_db_insert(block_index_db_t *bdb,
+                                    const block_index_entry_t *entry);
 
 /**
  * Update the status flags of a block.
@@ -211,11 +202,9 @@ echo_result_t block_index_db_insert(
  *   - Should be called within a transaction for atomicity
  *   - Replaces existing status flags (does not OR them)
  */
-echo_result_t block_index_db_update_status(
-    block_index_db_t *bdb,
-    const hash256_t *hash,
-    uint32_t status
-);
+echo_result_t block_index_db_update_status(block_index_db_t *bdb,
+                                           const hash256_t *hash,
+                                           uint32_t status);
 
 /* ========================================================================
  * Chain Queries
@@ -236,10 +225,8 @@ echo_result_t block_index_db_update_status(
  *   - This is the primary method for determining chain tip
  *   - Ties are broken by first-seen (database insertion order)
  */
-echo_result_t block_index_db_get_best_chain(
-    block_index_db_t *bdb,
-    block_index_entry_t *entry
-);
+echo_result_t block_index_db_get_best_chain(block_index_db_t *bdb,
+                                            block_index_entry_t *entry);
 
 /**
  * Get the block at a specific height on the best chain.
@@ -250,17 +237,16 @@ echo_result_t block_index_db_get_best_chain(
  *   entry  - Output: block index entry at this height on best chain
  *
  * Returns:
- *   ECHO_OK if found, ECHO_ERR_NOT_FOUND if height exceeds tip, error on failure
+ *   ECHO_OK if found, ECHO_ERR_NOT_FOUND if height exceeds tip, error on
+ * failure
  *
  * Notes:
  *   - Returns only blocks marked with BLOCK_STATUS_VALID_CHAIN
  *   - More reliable than lookup_by_height during reorganizations
  */
-echo_result_t block_index_db_get_chain_block(
-    block_index_db_t *bdb,
-    uint32_t height,
-    block_index_entry_t *entry
-);
+echo_result_t block_index_db_get_chain_block(block_index_db_t *bdb,
+                                             uint32_t height,
+                                             block_index_entry_t *entry);
 
 /**
  * Get the previous block (parent) of a given block.
@@ -277,11 +263,9 @@ echo_result_t block_index_db_get_chain_block(
  *   - Looks up parent by reading prev_hash from header
  *   - Useful for chain traversal and reorganization
  */
-echo_result_t block_index_db_get_prev(
-    block_index_db_t *bdb,
-    const hash256_t *hash,
-    block_index_entry_t *entry
-);
+echo_result_t block_index_db_get_prev(block_index_db_t *bdb,
+                                      const hash256_t *hash,
+                                      block_index_entry_t *entry);
 
 /**
  * Find common ancestor of two blocks.
@@ -293,18 +277,16 @@ echo_result_t block_index_db_get_prev(
  *   ancestor - Output: common ancestor block entry
  *
  * Returns:
- *   ECHO_OK if found, ECHO_ERR_NOT_FOUND if no common ancestor, error on failure
+ *   ECHO_OK if found, ECHO_ERR_NOT_FOUND if no common ancestor, error on
+ * failure
  *
  * Notes:
  *   - Critical for reorganization planning
  *   - Walks both chains backward until common block is found
  */
 echo_result_t block_index_db_find_common_ancestor(
-    block_index_db_t *bdb,
-    const hash256_t *hash_a,
-    const hash256_t *hash_b,
-    block_index_entry_t *ancestor
-);
+    block_index_db_t *bdb, const hash256_t *hash_a, const hash256_t *hash_b,
+    block_index_entry_t *ancestor);
 
 /* ========================================================================
  * Batch Operations
@@ -326,11 +308,9 @@ echo_result_t block_index_db_find_common_ancestor(
  *   - Should be called within a transaction
  *   - Typically used after reorganization to update chain flags
  */
-echo_result_t block_index_db_mark_best_chain(
-    block_index_db_t *bdb,
-    const hash256_t *hashes,
-    size_t count
-);
+echo_result_t block_index_db_mark_best_chain(block_index_db_t *bdb,
+                                             const hash256_t *hashes,
+                                             size_t count);
 
 /**
  * Unmark blocks as being on the best chain.
@@ -348,11 +328,9 @@ echo_result_t block_index_db_mark_best_chain(
  *   - Should be called within a transaction
  *   - Used during reorganization to unmark old chain
  */
-echo_result_t block_index_db_unmark_best_chain(
-    block_index_db_t *bdb,
-    const hash256_t *hashes,
-    size_t count
-);
+echo_result_t block_index_db_unmark_best_chain(block_index_db_t *bdb,
+                                               const hash256_t *hashes,
+                                               size_t count);
 
 /* ========================================================================
  * Statistics and Queries
@@ -380,7 +358,8 @@ echo_result_t block_index_db_count(block_index_db_t *bdb, size_t *count);
  * Returns:
  *   ECHO_OK on success, ECHO_ERR_NOT_FOUND if empty, error on failure
  */
-echo_result_t block_index_db_get_height(block_index_db_t *bdb, uint32_t *height);
+echo_result_t block_index_db_get_height(block_index_db_t *bdb,
+                                        uint32_t *height);
 
 /**
  * Get total accumulated work on the best chain.
@@ -392,9 +371,7 @@ echo_result_t block_index_db_get_height(block_index_db_t *bdb, uint32_t *height)
  * Returns:
  *   ECHO_OK on success, ECHO_ERR_NOT_FOUND if empty, error on failure
  */
-echo_result_t block_index_db_get_chainwork(
-    block_index_db_t *bdb,
-    work256_t *chainwork
-);
+echo_result_t block_index_db_get_chainwork(block_index_db_t *bdb,
+                                           work256_t *chainwork);
 
 #endif /* ECHO_BLOCK_INDEX_DB_H */

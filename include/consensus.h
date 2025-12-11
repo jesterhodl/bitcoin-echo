@@ -8,7 +8,8 @@
  * Key design principles:
  *   - Pure functions: validation takes bytes and context, returns validity
  *   - No system calls: consensus engine never touches disk, network, or time
- *   - No dynamic allocation during validation: memory from caller-provided arena
+ *   - No dynamic allocation during validation: memory from caller-provided
+ * arena
  *   - Deterministic: same inputs always produce same outputs
  *
  * The consensus boundary is clearly defined:
@@ -21,13 +22,16 @@
 #ifndef ECHO_CONSENSUS_H
 #define ECHO_CONSENSUS_H
 
-#include "echo_types.h"
 #include "block.h"
-#include "tx.h"
-#include "chainstate.h"
 #include "block_validate.h"
+#include "chainstate.h"
+#include "echo_types.h"
+#include "script.h"
+#include "tx.h"
 #include "tx_validate.h"
 #include "utxo.h"
+#include <stdbool.h>
+#include <stdint.h>
 
 /*
  * ============================================================================
@@ -41,25 +45,25 @@
  */
 
 /* BIP-16 (P2SH) activation height */
-#define CONSENSUS_BIP16_HEIGHT       173805
+#define CONSENSUS_BIP16_HEIGHT 173805
 
 /* BIP-34 (height in coinbase) activation height */
-#define CONSENSUS_BIP34_HEIGHT       227931
+#define CONSENSUS_BIP34_HEIGHT 227931
 
 /* BIP-65 (OP_CHECKLOCKTIMEVERIFY) activation height */
-#define CONSENSUS_BIP65_HEIGHT       388381
+#define CONSENSUS_BIP65_HEIGHT 388381
 
 /* BIP-66 (strict DER signatures) activation height */
-#define CONSENSUS_BIP66_HEIGHT       363725
+#define CONSENSUS_BIP66_HEIGHT 363725
 
 /* BIP-68/112/113 (relative locktimes) activation block */
-#define CONSENSUS_CSV_HEIGHT         419328
+#define CONSENSUS_CSV_HEIGHT 419328
 
 /* BIP-141/143/147 (SegWit) activation height */
-#define CONSENSUS_SEGWIT_HEIGHT      481824
+#define CONSENSUS_SEGWIT_HEIGHT 481824
 
 /* BIP-341 (Taproot) activation height */
-#define CONSENSUS_TAPROOT_HEIGHT     709632
+#define CONSENSUS_TAPROOT_HEIGHT 709632
 
 /*
  * ============================================================================
@@ -72,39 +76,39 @@
  * Encompasses both block and transaction validation errors.
  */
 typedef enum {
-    CONSENSUS_OK = 0,
+  CONSENSUS_OK = 0,
 
-    /* Block-level errors */
-    CONSENSUS_ERR_BLOCK_HEADER,       /* Header validation failed */
-    CONSENSUS_ERR_BLOCK_POW,          /* Proof of work failed */
-    CONSENSUS_ERR_BLOCK_TIMESTAMP,    /* Timestamp invalid */
-    CONSENSUS_ERR_BLOCK_DIFFICULTY,   /* Difficulty mismatch */
-    CONSENSUS_ERR_BLOCK_SIZE,         /* Block size/weight exceeded */
-    CONSENSUS_ERR_BLOCK_MERKLE,       /* Merkle root mismatch */
-    CONSENSUS_ERR_BLOCK_NO_COINBASE,  /* Missing coinbase */
-    CONSENSUS_ERR_BLOCK_MULTI_COINBASE, /* Multiple coinbases */
-    CONSENSUS_ERR_BLOCK_TX_ORDER,     /* Coinbase not first */
-    CONSENSUS_ERR_BLOCK_DUPLICATE_TX, /* Duplicate transaction */
-    CONSENSUS_ERR_BLOCK_WITNESS,      /* Witness commitment invalid */
-    CONSENSUS_ERR_BLOCK_COINBASE,     /* Coinbase validation failed */
+  /* Block-level errors */
+  CONSENSUS_ERR_BLOCK_HEADER,         /* Header validation failed */
+  CONSENSUS_ERR_BLOCK_POW,            /* Proof of work failed */
+  CONSENSUS_ERR_BLOCK_TIMESTAMP,      /* Timestamp invalid */
+  CONSENSUS_ERR_BLOCK_DIFFICULTY,     /* Difficulty mismatch */
+  CONSENSUS_ERR_BLOCK_SIZE,           /* Block size/weight exceeded */
+  CONSENSUS_ERR_BLOCK_MERKLE,         /* Merkle root mismatch */
+  CONSENSUS_ERR_BLOCK_NO_COINBASE,    /* Missing coinbase */
+  CONSENSUS_ERR_BLOCK_MULTI_COINBASE, /* Multiple coinbases */
+  CONSENSUS_ERR_BLOCK_TX_ORDER,       /* Coinbase not first */
+  CONSENSUS_ERR_BLOCK_DUPLICATE_TX,   /* Duplicate transaction */
+  CONSENSUS_ERR_BLOCK_WITNESS,        /* Witness commitment invalid */
+  CONSENSUS_ERR_BLOCK_COINBASE,       /* Coinbase validation failed */
 
-    /* Transaction-level errors */
-    CONSENSUS_ERR_TX_SYNTAX,          /* Transaction malformed */
-    CONSENSUS_ERR_TX_SCRIPT,          /* Script execution failed */
-    CONSENSUS_ERR_TX_MISSING_INPUT,   /* Input UTXO not found */
-    CONSENSUS_ERR_TX_SPENT_INPUT,     /* Input already spent */
-    CONSENSUS_ERR_TX_IMMATURE_COINBASE, /* Spending immature coinbase */
-    CONSENSUS_ERR_TX_VALUE_MISMATCH,  /* Output value > input value */
-    CONSENSUS_ERR_TX_LOCKTIME,        /* Locktime not satisfied */
+  /* Transaction-level errors */
+  CONSENSUS_ERR_TX_SYNTAX,            /* Transaction malformed */
+  CONSENSUS_ERR_TX_SCRIPT,            /* Script execution failed */
+  CONSENSUS_ERR_TX_MISSING_INPUT,     /* Input UTXO not found */
+  CONSENSUS_ERR_TX_SPENT_INPUT,       /* Input already spent */
+  CONSENSUS_ERR_TX_IMMATURE_COINBASE, /* Spending immature coinbase */
+  CONSENSUS_ERR_TX_VALUE_MISMATCH,    /* Output value > input value */
+  CONSENSUS_ERR_TX_LOCKTIME,          /* Locktime not satisfied */
 
-    /* Chain state errors */
-    CONSENSUS_ERR_INVALID_PREV,       /* Previous block unknown/invalid */
-    CONSENSUS_ERR_REORG_FAILED,       /* Reorganization failed */
-    CONSENSUS_ERR_UTXO_CONFLICT,      /* UTXO set inconsistency */
+  /* Chain state errors */
+  CONSENSUS_ERR_INVALID_PREV,  /* Previous block unknown/invalid */
+  CONSENSUS_ERR_REORG_FAILED,  /* Reorganization failed */
+  CONSENSUS_ERR_UTXO_CONFLICT, /* UTXO set inconsistency */
 
-    /* Internal errors */
-    CONSENSUS_ERR_INTERNAL,           /* Internal error */
-    CONSENSUS_ERR_NOMEM,              /* Out of memory */
+  /* Internal errors */
+  CONSENSUS_ERR_INTERNAL, /* Internal error */
+  CONSENSUS_ERR_NOMEM,    /* Out of memory */
 
 } consensus_error_t;
 
@@ -112,23 +116,23 @@ typedef enum {
  * Detailed consensus validation result.
  */
 typedef struct {
-    /* Overall validation result */
-    consensus_error_t error;
+  /* Overall validation result */
+  consensus_error_t error;
 
-    /* Index of failing item (transaction or input) */
-    size_t failing_index;
+  /* Index of failing item (transaction or input) */
+  size_t failing_index;
 
-    /* Sub-index for input within failing transaction */
-    size_t failing_input_index;
+  /* Sub-index for input within failing transaction */
+  size_t failing_input_index;
 
-    /* Block validation detail (if block error) */
-    block_validation_error_t block_error;
+  /* Block validation detail (if block error) */
+  block_validation_error_t block_error;
 
-    /* Transaction validation detail (if tx error) */
-    tx_validate_error_t tx_error;
+  /* Transaction validation detail (if tx error) */
+  tx_validate_error_t tx_error;
 
-    /* Script error detail (if script error) */
-    script_error_t script_error;
+  /* Script error detail (if script error) */
+  script_error_t script_error;
 
 } consensus_result_t;
 
@@ -202,7 +206,7 @@ void consensus_engine_destroy(consensus_engine_t *engine);
  *   ECHO_OK on success
  */
 echo_result_t consensus_get_chain_tip(const consensus_engine_t *engine,
-                                       chain_tip_t *tip);
+                                      chain_tip_t *tip);
 
 /*
  * Get the current chain height.
@@ -227,8 +231,7 @@ uint32_t consensus_get_height(const consensus_engine_t *engine);
  *   ECHO_OK on success, ECHO_ERR_NOT_FOUND if height > tip
  */
 echo_result_t consensus_get_block_hash(const consensus_engine_t *engine,
-                                        uint32_t height,
-                                        hash256_t *hash);
+                                       uint32_t height, hash256_t *hash);
 
 /*
  * Check if a block hash is on the main chain.
@@ -241,7 +244,7 @@ echo_result_t consensus_get_block_hash(const consensus_engine_t *engine,
  *   true if on main chain, false otherwise
  */
 bool consensus_is_main_chain(const consensus_engine_t *engine,
-                              const hash256_t *hash);
+                             const hash256_t *hash);
 
 /*
  * ============================================================================
@@ -260,7 +263,7 @@ bool consensus_is_main_chain(const consensus_engine_t *engine,
  *   Pointer to UTXO entry if found, NULL otherwise
  */
 const utxo_entry_t *consensus_lookup_utxo(const consensus_engine_t *engine,
-                                           const outpoint_t *outpoint);
+                                          const outpoint_t *outpoint);
 
 /*
  * Check if a UTXO exists.
@@ -273,7 +276,7 @@ const utxo_entry_t *consensus_lookup_utxo(const consensus_engine_t *engine,
  *   true if UTXO exists, false otherwise
  */
 bool consensus_utxo_exists(const consensus_engine_t *engine,
-                            const outpoint_t *outpoint);
+                           const outpoint_t *outpoint);
 
 /*
  * Get the number of UTXOs in the set.
@@ -302,8 +305,9 @@ size_t consensus_utxo_count(const consensus_engine_t *engine);
  * Returns:
  *   Pointer to block index if found, NULL otherwise
  */
-const block_index_t *consensus_lookup_block_index(const consensus_engine_t *engine,
-                                                   const hash256_t *hash);
+const block_index_t *
+consensus_lookup_block_index(const consensus_engine_t *engine,
+                             const hash256_t *hash);
 
 /*
  * Get the number of known block headers.
@@ -325,7 +329,8 @@ size_t consensus_block_index_count(const consensus_engine_t *engine);
  * Returns:
  *   Pointer to best block index, or NULL if none
  */
-const block_index_t *consensus_get_best_block_index(const consensus_engine_t *engine);
+const block_index_t *
+consensus_get_best_block_index(const consensus_engine_t *engine);
 
 /*
  * ============================================================================
@@ -356,8 +361,8 @@ const block_index_t *consensus_get_best_block_index(const consensus_engine_t *en
  *   true if header is valid, false otherwise
  */
 bool consensus_validate_header(const consensus_engine_t *engine,
-                                const block_header_t *header,
-                                consensus_result_t *result);
+                               const block_header_t *header,
+                               consensus_result_t *result);
 
 /*
  * Validate a complete block (pure function).
@@ -384,8 +389,7 @@ bool consensus_validate_header(const consensus_engine_t *engine,
  *   true if block is valid, false otherwise
  */
 bool consensus_validate_block(const consensus_engine_t *engine,
-                               const block_t *block,
-                               consensus_result_t *result);
+                              const block_t *block, consensus_result_t *result);
 
 /*
  * Validate a transaction against the current UTXO set.
@@ -408,11 +412,9 @@ bool consensus_validate_block(const consensus_engine_t *engine,
  * Returns:
  *   true if transaction is valid, false otherwise
  */
-bool consensus_validate_tx(const consensus_engine_t *engine,
-                            const tx_t *tx,
-                            uint32_t block_height,
-                            uint32_t block_time,
-                            consensus_result_t *result);
+bool consensus_validate_tx(const consensus_engine_t *engine, const tx_t *tx,
+                           uint32_t block_height, uint32_t block_time,
+                           consensus_result_t *result);
 
 /*
  * ============================================================================
@@ -442,8 +444,8 @@ bool consensus_validate_tx(const consensus_engine_t *engine,
  *   ECHO_OK on success, ECHO_ERR_EXISTS if already known
  */
 echo_result_t consensus_add_header(consensus_engine_t *engine,
-                                    const block_header_t *header,
-                                    block_index_t **index_out);
+                                   const block_header_t *header,
+                                   block_index_t **index_out);
 
 /*
  * Apply a validated block to the chain state.
@@ -466,8 +468,8 @@ echo_result_t consensus_add_header(consensus_engine_t *engine,
  *   ECHO_OK on success, error code on failure
  */
 echo_result_t consensus_apply_block(consensus_engine_t *engine,
-                                     const block_t *block,
-                                     consensus_result_t *result);
+                                    const block_t *block,
+                                    consensus_result_t *result);
 
 /*
  * Check if a block would trigger a chain reorganization.
@@ -483,7 +485,7 @@ echo_result_t consensus_apply_block(consensus_engine_t *engine,
  *   true if reorg needed, false if extends current tip or less work
  */
 bool consensus_would_reorg(const consensus_engine_t *engine,
-                            const block_header_t *header);
+                           const block_header_t *header);
 
 /*
  * Perform a chain reorganization.
@@ -505,17 +507,14 @@ bool consensus_would_reorg(const consensus_engine_t *engine,
  * Returns:
  *   ECHO_OK on success, error code on failure
  */
-typedef echo_result_t (*consensus_get_block_fn)(
-    const hash256_t *block_hash,
-    block_t *block_out,
-    void *user_data
-);
+typedef echo_result_t (*consensus_get_block_fn)(const hash256_t *block_hash,
+                                                block_t *block_out,
+                                                void *user_data);
 
 echo_result_t consensus_reorganize(consensus_engine_t *engine,
-                                    const hash256_t *new_tip_hash,
-                                    consensus_get_block_fn get_block,
-                                    void *user_data,
-                                    consensus_result_t *result);
+                                   const hash256_t *new_tip_hash,
+                                   consensus_get_block_fn get_block,
+                                   void *user_data, consensus_result_t *result);
 
 /*
  * ============================================================================
@@ -542,8 +541,8 @@ echo_result_t consensus_reorganize(consensus_engine_t *engine,
  *   ECHO_OK on success
  */
 echo_result_t consensus_build_validation_ctx(const consensus_engine_t *engine,
-                                              uint32_t height,
-                                              full_block_ctx_t *ctx);
+                                             uint32_t height,
+                                             full_block_ctx_t *ctx);
 
 /*
  * Build a transaction validation context.
@@ -564,10 +563,9 @@ echo_result_t consensus_build_validation_ctx(const consensus_engine_t *engine,
  *   ECHO_OK on success, ECHO_ERR_NOT_FOUND if UTXO missing
  */
 echo_result_t consensus_build_tx_ctx(const consensus_engine_t *engine,
-                                      const tx_t *tx,
-                                      uint32_t block_height,
-                                      uint32_t block_time,
-                                      tx_validate_ctx_t *ctx);
+                                     const tx_t *tx, uint32_t block_height,
+                                     uint32_t block_time,
+                                     tx_validate_ctx_t *ctx);
 
 /*
  * Free resources allocated by consensus_build_tx_ctx.
@@ -609,11 +607,11 @@ uint32_t consensus_get_script_flags(uint32_t height);
  * Consensus engine statistics.
  */
 typedef struct {
-    uint32_t height;           /* Current chain height */
-    work256_t total_work;      /* Cumulative chain work */
-    size_t utxo_count;         /* Number of UTXOs */
-    size_t block_index_count;  /* Number of known headers */
-    int64_t total_coins;       /* Total coins in existence (satoshis) */
+  uint32_t height;          /* Current chain height */
+  work256_t total_work;     /* Cumulative chain work */
+  size_t utxo_count;        /* Number of UTXOs */
+  size_t block_index_count; /* Number of known headers */
+  int64_t total_coins;      /* Total coins in existence (satoshis) */
 } consensus_stats_t;
 
 /*
@@ -624,7 +622,7 @@ typedef struct {
  *   stats  - Output: statistics
  */
 void consensus_get_stats(const consensus_engine_t *engine,
-                          consensus_stats_t *stats);
+                         consensus_stats_t *stats);
 
 /*
  * Get the underlying chain state (for advanced use).

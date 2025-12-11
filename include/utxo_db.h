@@ -1,8 +1,8 @@
 /*
  * Bitcoin Echo — UTXO Database Interface
  *
- * Persistent storage for the Unspent Transaction Output (UTXO) set using SQLite.
- * Implements the schema specified in the whitepaper §6.2.
+ * Persistent storage for the Unspent Transaction Output (UTXO) set using
+ * SQLite. Implements the schema specified in the whitepaper §6.2.
  *
  * The UTXO database stores all spendable outputs and supports:
  * - Fast lookup by outpoint (txid + vout)
@@ -28,23 +28,24 @@
 #ifndef ECHO_UTXO_DB_H
 #define ECHO_UTXO_DB_H
 
-#include "echo_types.h"
 #include "db.h"
+#include "echo_types.h"
+#include "tx.h"
 #include "utxo.h"
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdbool.h>
 
 /*
  * UTXO database handle.
  * Wraps a SQLite database configured for UTXO storage.
  */
 typedef struct {
-    db_t db;                    /* Underlying database handle */
-    db_stmt_t lookup_stmt;      /* Prepared statement for lookups */
-    db_stmt_t insert_stmt;      /* Prepared statement for inserts */
-    db_stmt_t delete_stmt;      /* Prepared statement for deletes */
-    bool stmts_prepared;        /* Whether statements are prepared */
+  db_t db;               /* Underlying database handle */
+  db_stmt_t lookup_stmt; /* Prepared statement for lookups */
+  db_stmt_t insert_stmt; /* Prepared statement for inserts */
+  db_stmt_t delete_stmt; /* Prepared statement for deletes */
+  bool stmts_prepared;   /* Whether statements are prepared */
 } utxo_db_t;
 
 /* ========================================================================
@@ -100,11 +101,8 @@ void utxo_db_close(utxo_db_t *udb);
  *   - On success, allocates and populates entry
  *   - Caller is responsible for freeing the entry
  */
-echo_result_t utxo_db_lookup(
-    utxo_db_t *udb,
-    const outpoint_t *outpoint,
-    utxo_entry_t **entry
-);
+echo_result_t utxo_db_lookup(utxo_db_t *udb, const outpoint_t *outpoint,
+                             utxo_entry_t **entry);
 
 /**
  * Check if a UTXO exists in the database.
@@ -117,11 +115,8 @@ echo_result_t utxo_db_lookup(
  * Returns:
  *   ECHO_OK on success, error code on failure
  */
-echo_result_t utxo_db_exists(
-    utxo_db_t *udb,
-    const outpoint_t *outpoint,
-    bool *exists
-);
+echo_result_t utxo_db_exists(utxo_db_t *udb, const outpoint_t *outpoint,
+                             bool *exists);
 
 /**
  * Insert a single UTXO into the database.
@@ -173,11 +168,8 @@ echo_result_t utxo_db_delete(utxo_db_t *udb, const outpoint_t *outpoint);
  *   - Should be called within a transaction for atomicity
  *   - All insertions succeed or all fail (within transaction)
  */
-echo_result_t utxo_db_insert_batch(
-    utxo_db_t *udb,
-    const utxo_entry_t **entries,
-    size_t count
-);
+echo_result_t utxo_db_insert_batch(utxo_db_t *udb, const utxo_entry_t **entries,
+                                   size_t count);
 
 /**
  * Delete multiple UTXOs in a batch.
@@ -195,11 +187,8 @@ echo_result_t utxo_db_insert_batch(
  *   - All deletions succeed or all fail (within transaction)
  *   - It's not an error if some outpoints don't exist
  */
-echo_result_t utxo_db_delete_batch(
-    utxo_db_t *udb,
-    const outpoint_t *outpoints,
-    size_t count
-);
+echo_result_t utxo_db_delete_batch(utxo_db_t *udb, const outpoint_t *outpoints,
+                                   size_t count);
 
 /* ========================================================================
  * Block Application
@@ -225,13 +214,11 @@ echo_result_t utxo_db_delete_batch(
  *   - Either all changes succeed or none do
  *   - This is the primary interface for updating UTXO state
  */
-echo_result_t utxo_db_apply_block(
-    utxo_db_t *udb,
-    const utxo_entry_t **new_utxos,
-    size_t new_count,
-    const outpoint_t *spent_utxos,
-    size_t spent_count
-);
+echo_result_t utxo_db_apply_block(utxo_db_t *udb,
+                                  const utxo_entry_t **new_utxos,
+                                  size_t new_count,
+                                  const outpoint_t *spent_utxos,
+                                  size_t spent_count);
 
 /* ========================================================================
  * Statistics and Queries
@@ -285,10 +272,7 @@ echo_result_t utxo_db_total_value(utxo_db_t *udb, int64_t *total);
  *   - Callback can return false to stop iteration early
  *   - Not recommended for large UTXO sets (full table scan)
  */
-echo_result_t utxo_db_foreach(
-    utxo_db_t *udb,
-    utxo_iterator_fn callback,
-    void *user_data
-);
+echo_result_t utxo_db_foreach(utxo_db_t *udb, utxo_iterator_fn callback,
+                              void *user_data);
 
 #endif /* ECHO_UTXO_DB_H */

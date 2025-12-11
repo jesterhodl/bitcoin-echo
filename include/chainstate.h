@@ -19,11 +19,12 @@
 #ifndef ECHO_CHAINSTATE_H
 #define ECHO_CHAINSTATE_H
 
-#include "echo_types.h"
 #include "block.h"
+#include "echo_types.h"
 #include "tx.h"
 #include "utxo.h"
 #include <stdbool.h>
+#include <stdint.h>
 
 /**
  * Work (chain difficulty) represented as 256-bit unsigned integer.
@@ -35,7 +36,7 @@
  * Cumulative work is the sum of work for all blocks in the chain.
  */
 typedef struct {
-    uint8_t bytes[32];
+  uint8_t bytes[32];
 } work256_t;
 
 /**
@@ -43,23 +44,23 @@ typedef struct {
  * Used to track the chain of headers without storing full blocks.
  */
 typedef struct block_index {
-    hash256_t hash;              /* Block hash */
-    hash256_t prev_hash;         /* Previous block hash */
-    uint32_t height;             /* Height in the chain (genesis = 0) */
-    uint32_t timestamp;          /* Block timestamp */
-    uint32_t bits;               /* Compact target */
-    work256_t chainwork;         /* Cumulative work up to and including this block */
-    bool on_main_chain;          /* True if on the active chain */
-    struct block_index *prev;    /* Pointer to previous block index (may be NULL) */
+  hash256_t hash;           /* Block hash */
+  hash256_t prev_hash;      /* Previous block hash */
+  uint32_t height;          /* Height in the chain (genesis = 0) */
+  uint32_t timestamp;       /* Block timestamp */
+  uint32_t bits;            /* Compact target */
+  work256_t chainwork;      /* Cumulative work up to and including this block */
+  bool on_main_chain;       /* True if on the active chain */
+  struct block_index *prev; /* Pointer to previous block index (may be NULL) */
 } block_index_t;
 
 /**
  * Chain tip info: current best chain head.
  */
 typedef struct {
-    hash256_t hash;              /* Block hash of the tip */
-    uint32_t height;             /* Height of the tip */
-    work256_t chainwork;         /* Cumulative work at the tip */
+  hash256_t hash;      /* Block hash of the tip */
+  uint32_t height;     /* Height of the tip */
+  work256_t chainwork; /* Cumulative work at the tip */
 } chain_tip_t;
 
 /**
@@ -67,15 +68,15 @@ typedef struct {
  * Used for atomic block application and reverting during reorganization.
  */
 typedef struct {
-    hash256_t block_hash;        /* Hash of the applied block */
-    uint32_t height;             /* Height of the applied block */
+  hash256_t block_hash; /* Hash of the applied block */
+  uint32_t height;      /* Height of the applied block */
 
-    /* UTXO changes */
-    outpoint_t *created;         /* Array of created outpoints */
-    size_t created_count;        /* Number of created UTXOs */
+  /* UTXO changes */
+  outpoint_t *created;  /* Array of created outpoints */
+  size_t created_count; /* Number of created UTXOs */
 
-    utxo_entry_t **spent;        /* Array of spent UTXO entries (for undo) */
-    size_t spent_count;          /* Number of spent UTXOs */
+  utxo_entry_t **spent; /* Array of spent UTXO entries (for undo) */
+  size_t spent_count;   /* Number of spent UTXOs */
 } block_delta_t;
 
 /**
@@ -124,7 +125,8 @@ void work256_add(const work256_t *a, const work256_t *b, work256_t *result);
  * @param result Output difference (may alias a or b)
  * @return ECHO_OK on success, ECHO_ERR_UNDERFLOW if b > a
  */
-echo_result_t work256_sub(const work256_t *a, const work256_t *b, work256_t *result);
+echo_result_t work256_sub(const work256_t *a, const work256_t *b,
+                          work256_t *result);
 
 /**
  * Calculate work from a target (compact bits representation).
@@ -147,7 +149,7 @@ echo_result_t work256_from_bits(uint32_t bits, work256_t *work);
  * @return Newly allocated block index, or NULL on failure
  */
 block_index_t *block_index_create(const block_header_t *header,
-                                   block_index_t *prev);
+                                  block_index_t *prev);
 
 /**
  * Destroy a block index entry.
@@ -180,7 +182,7 @@ void block_delta_destroy(block_delta_t *delta);
  * @return ECHO_OK on success, ECHO_ERR_NOMEM on allocation failure
  */
 echo_result_t block_delta_add_created(block_delta_t *delta,
-                                       const outpoint_t *outpoint);
+                                      const outpoint_t *outpoint);
 
 /**
  * Record a spent UTXO in the delta.
@@ -190,7 +192,7 @@ echo_result_t block_delta_add_created(block_delta_t *delta,
  * @return ECHO_OK on success, ECHO_ERR_NOMEM on allocation failure
  */
 echo_result_t block_delta_add_spent(block_delta_t *delta,
-                                     const utxo_entry_t *entry);
+                                    const utxo_entry_t *entry);
 
 /* ========================================================================
  * Chain State Operations
@@ -250,13 +252,10 @@ const utxo_set_t *chainstate_get_utxo_set(const chainstate_t *state);
  * @param delta Output: delta for reverting (caller owns, may be NULL)
  * @return ECHO_OK on success, error code on failure
  */
-echo_result_t chainstate_apply_block(
-    chainstate_t *state,
-    const block_header_t *header,
-    const tx_t *txs,
-    size_t tx_count,
-    block_delta_t **delta
-);
+echo_result_t chainstate_apply_block(chainstate_t *state,
+                                     const block_header_t *header,
+                                     const tx_t *txs, size_t tx_count,
+                                     block_delta_t **delta);
 
 /**
  * Revert a block from the chain state.
@@ -269,7 +268,7 @@ echo_result_t chainstate_apply_block(
  * @return ECHO_OK on success, error code on failure
  */
 echo_result_t chainstate_revert_block(chainstate_t *state,
-                                       const block_delta_t *delta);
+                                      const block_delta_t *delta);
 
 /**
  * Check if a block is on the main chain.
@@ -278,7 +277,7 @@ echo_result_t chainstate_revert_block(chainstate_t *state,
  * @return true if the block is on the main chain
  */
 bool chainstate_is_on_main_chain(const chainstate_t *state,
-                                  const hash256_t *hash);
+                                 const hash256_t *hash);
 
 /**
  * Get the block hash at a specific height.
@@ -288,8 +287,7 @@ bool chainstate_is_on_main_chain(const chainstate_t *state,
  * @return ECHO_OK on success, ECHO_ERR_NOT_FOUND if height > tip height
  */
 echo_result_t chainstate_get_block_at_height(const chainstate_t *state,
-                                              uint32_t height,
-                                              hash256_t *hash);
+                                             uint32_t height, hash256_t *hash);
 
 /**
  * Lookup a UTXO in the chain state.
@@ -298,7 +296,7 @@ echo_result_t chainstate_get_block_at_height(const chainstate_t *state,
  * @return Pointer to UTXO entry if found, NULL otherwise
  */
 const utxo_entry_t *chainstate_lookup_utxo(const chainstate_t *state,
-                                            const outpoint_t *outpoint);
+                                           const outpoint_t *outpoint);
 
 /**
  * Get statistics about the chain state.
@@ -306,8 +304,7 @@ const utxo_entry_t *chainstate_lookup_utxo(const chainstate_t *state,
  * @param utxo_count Output: number of UTXOs (may be NULL)
  * @param total_amount Output: total amount in UTXOs in satoshis (may be NULL)
  */
-void chainstate_get_stats(const chainstate_t *state,
-                          size_t *utxo_count,
+void chainstate_get_stats(const chainstate_t *state, size_t *utxo_count,
                           int64_t *total_amount);
 
 /* ========================================================================
@@ -341,7 +338,7 @@ void block_index_map_destroy(block_index_map_t *map);
  * @return ECHO_OK on success, ECHO_ERR_EXISTS if already present
  */
 echo_result_t block_index_map_insert(block_index_map_t *map,
-                                      block_index_t *index);
+                                     block_index_t *index);
 
 /**
  * Lookup a block index by hash.
@@ -350,7 +347,7 @@ echo_result_t block_index_map_insert(block_index_map_t *map,
  * @return Pointer to block index if found, NULL otherwise
  */
 block_index_t *block_index_map_lookup(const block_index_map_t *map,
-                                       const hash256_t *hash);
+                                      const hash256_t *hash);
 
 /**
  * Get the number of block indices in the map.
@@ -374,9 +371,9 @@ block_index_t *block_index_map_find_best(const block_index_map_t *map);
  * Result of chain comparison.
  */
 typedef enum {
-    CHAIN_COMPARE_A_BETTER = -1,   /* Chain A has more work */
-    CHAIN_COMPARE_EQUAL = 0,       /* Chains have equal work */
-    CHAIN_COMPARE_B_BETTER = 1     /* Chain B has more work */
+  CHAIN_COMPARE_A_BETTER = -1, /* Chain A has more work */
+  CHAIN_COMPARE_EQUAL = 0,     /* Chains have equal work */
+  CHAIN_COMPARE_B_BETTER = 1   /* Chain B has more work */
 } chain_compare_result_t;
 
 /**
@@ -389,7 +386,7 @@ typedef enum {
  * @return Comparison result
  */
 chain_compare_result_t chain_compare(const block_index_t *a,
-                                      const block_index_t *b);
+                                     const block_index_t *b);
 
 /**
  * Find the common ancestor of two block indices.
@@ -399,23 +396,22 @@ chain_compare_result_t chain_compare(const block_index_t *a,
  * @param b Second block index
  * @return Common ancestor block index, or NULL if unrelated
  */
-block_index_t *chain_find_common_ancestor(block_index_t *a,
-                                           block_index_t *b);
+block_index_t *chain_find_common_ancestor(block_index_t *a, block_index_t *b);
 
 /**
  * Reorganization data: describes the blocks to revert and apply.
  */
 typedef struct {
-    /* Blocks to disconnect (revert), ordered tip to ancestor */
-    block_index_t **disconnect;
-    size_t disconnect_count;
+  /* Blocks to disconnect (revert), ordered tip to ancestor */
+  block_index_t **disconnect;
+  size_t disconnect_count;
 
-    /* Blocks to connect (apply), ordered ancestor to new tip */
-    block_index_t **connect;
-    size_t connect_count;
+  /* Blocks to connect (apply), ordered ancestor to new tip */
+  block_index_t **connect;
+  size_t connect_count;
 
-    /* The common ancestor */
-    block_index_t *ancestor;
+  /* The common ancestor */
+  block_index_t *ancestor;
 } chain_reorg_t;
 
 /**
@@ -427,7 +423,7 @@ typedef struct {
  * @return Reorg plan, or NULL on failure
  */
 chain_reorg_t *chain_reorg_create(block_index_t *current,
-                                   block_index_t *new_tip);
+                                  block_index_t *new_tip);
 
 /**
  * Destroy a reorganization plan.
@@ -452,19 +448,13 @@ void chain_reorg_destroy(chain_reorg_t *reorg);
  * @param user_data User data for callback
  * @return ECHO_OK on success, error code on failure (state may be inconsistent)
  */
-typedef echo_result_t (*get_block_txs_fn)(
-    const hash256_t *block_hash,
-    const tx_t **txs_out,
-    size_t *tx_count_out,
-    void *user_data
-);
+typedef echo_result_t (*get_block_txs_fn)(const hash256_t *block_hash,
+                                          const tx_t **txs_out,
+                                          size_t *tx_count_out,
+                                          void *user_data);
 
-echo_result_t chain_reorganize(
-    chainstate_t *state,
-    chain_reorg_t *reorg,
-    get_block_txs_fn get_block_txs,
-    void *user_data
-);
+echo_result_t chain_reorganize(chainstate_t *state, chain_reorg_t *reorg,
+                               get_block_txs_fn get_block_txs, void *user_data);
 
 /**
  * Add a new block header to chain state tracking.
@@ -476,11 +466,9 @@ echo_result_t chain_reorganize(
  * @param index_out Output: the created block index (may be NULL)
  * @return ECHO_OK if added, ECHO_ERR_EXISTS if already known
  */
-echo_result_t chainstate_add_header(
-    chainstate_t *state,
-    const block_header_t *header,
-    block_index_t **index_out
-);
+echo_result_t chainstate_add_header(chainstate_t *state,
+                                    const block_header_t *header,
+                                    block_index_t **index_out);
 
 /**
  * Get the block index map from chain state.
@@ -513,6 +501,6 @@ void chainstate_set_tip_index(chainstate_t *state, block_index_t *index);
  * @return true if reorganization is needed
  */
 bool chainstate_should_reorg(const chainstate_t *state,
-                              const block_index_t *new_index);
+                             const block_index_t *new_index);
 
 #endif /* ECHO_CHAINSTATE_H */

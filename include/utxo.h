@@ -21,6 +21,7 @@
 #include "echo_types.h"
 #include "tx.h"
 #include <stdbool.h>
+#include <stdint.h>
 
 /* Note: outpoint_t is defined in tx.h */
 
@@ -29,12 +30,12 @@
  * Contains all information needed to validate a spending transaction
  */
 typedef struct {
-    outpoint_t outpoint;        /* Unique identifier (txid + vout) */
-    int64_t value;              /* Value in satoshis */
-    uint8_t *script_pubkey;     /* scriptPubKey (dynamically allocated) */
-    size_t script_len;          /* Length of scriptPubKey in bytes */
-    uint32_t height;            /* Block height when created */
-    bool is_coinbase;           /* True if from coinbase transaction */
+  outpoint_t outpoint;    /* Unique identifier (txid + vout) */
+  int64_t value;          /* Value in satoshis */
+  uint8_t *script_pubkey; /* scriptPubKey (dynamically allocated) */
+  size_t script_len;      /* Length of scriptPubKey in bytes */
+  uint32_t height;        /* Block height when created */
+  bool is_coinbase;       /* True if from coinbase transaction */
 } utxo_entry_t;
 
 /**
@@ -55,8 +56,8 @@ typedef struct utxo_set utxo_set_t;
  * Used to implement reversible UTXO updates during chain reorganization
  */
 typedef struct {
-    outpoint_t outpoint;        /* The outpoint being changed */
-    utxo_entry_t *entry;        /* The previous entry (NULL if newly created) */
+  outpoint_t outpoint; /* The outpoint being changed */
+  utxo_entry_t *entry; /* The previous entry (NULL if newly created) */
 } utxo_change_t;
 
 /**
@@ -64,9 +65,9 @@ typedef struct {
  * Used when applying or reverting blocks
  */
 typedef struct {
-    utxo_change_t *changes;     /* Array of changes */
-    size_t count;               /* Number of changes */
-    size_t capacity;            /* Allocated capacity */
+  utxo_change_t *changes; /* Array of changes */
+  size_t count;           /* Number of changes */
+  size_t capacity;        /* Allocated capacity */
 } utxo_batch_t;
 
 /* ========================================================================
@@ -113,14 +114,9 @@ size_t outpoint_deserialize(const uint8_t *data, outpoint_t *op);
  * @param is_coinbase True if from coinbase transaction
  * @return Newly allocated UTXO entry, or NULL on allocation failure
  */
-utxo_entry_t *utxo_entry_create(
-    const outpoint_t *outpoint,
-    int64_t value,
-    const uint8_t *script_pubkey,
-    size_t script_len,
-    uint32_t height,
-    bool is_coinbase
-);
+utxo_entry_t *utxo_entry_create(const outpoint_t *outpoint, int64_t value,
+                                const uint8_t *script_pubkey, size_t script_len,
+                                uint32_t height, bool is_coinbase);
 
 /**
  * Destroy a UTXO entry and free all associated memory
@@ -175,10 +171,8 @@ size_t utxo_set_size(const utxo_set_t *set);
  * @return Pointer to UTXO entry if found, NULL otherwise
  *         The returned pointer is owned by the set; do not free
  */
-const utxo_entry_t *utxo_set_lookup(
-    const utxo_set_t *set,
-    const outpoint_t *outpoint
-);
+const utxo_entry_t *utxo_set_lookup(const utxo_set_t *set,
+                                    const outpoint_t *outpoint);
 
 /**
  * Check if a UTXO exists in the set
@@ -244,11 +238,8 @@ echo_result_t utxo_batch_insert(utxo_batch_t *batch, const utxo_entry_t *entry);
  * @param old_entry The previous entry (will be cloned for undo)
  * @return ECHO_OK on success, ECHO_ERR_NOMEM on allocation failure
  */
-echo_result_t utxo_batch_remove(
-    utxo_batch_t *batch,
-    const outpoint_t *outpoint,
-    const utxo_entry_t *old_entry
-);
+echo_result_t utxo_batch_remove(utxo_batch_t *batch, const outpoint_t *outpoint,
+                                const utxo_entry_t *old_entry);
 
 /**
  * Apply a batch of changes to the UTXO set
@@ -287,10 +278,7 @@ typedef bool (*utxo_iterator_fn)(const utxo_entry_t *entry, void *user_data);
  * @param callback Function to call for each entry
  * @param user_data User data to pass to callback
  */
-void utxo_set_foreach(
-    const utxo_set_t *set,
-    utxo_iterator_fn callback,
-    void *user_data
-);
+void utxo_set_foreach(const utxo_set_t *set, utxo_iterator_fn callback,
+                      void *user_data);
 
 #endif /* ECHO_UTXO_H */

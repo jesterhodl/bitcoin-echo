@@ -20,20 +20,20 @@
 /*
  * SHA-1 produces a 160-bit (20-byte) digest.
  */
-#define SHA1_DIGEST_SIZE  20
+#define SHA1_DIGEST_SIZE 20
 
 /*
  * SHA-1 processes data in 512-bit (64-byte) blocks.
  */
-#define SHA1_BLOCK_SIZE   64
+#define SHA1_BLOCK_SIZE 64
 
 /*
  * SHA-1 context for incremental hashing.
  */
 typedef struct {
-    uint32_t state[5];              /* Current hash state (H0-H4) */
-    uint64_t count;                 /* Number of bytes processed */
-    uint8_t  buffer[SHA1_BLOCK_SIZE]; /* Partial block buffer */
+  uint32_t state[5];               /* Current hash state (H0-H4) */
+  uint64_t count;                  /* Number of bytes processed */
+  uint8_t buffer[SHA1_BLOCK_SIZE]; /* Partial block buffer */
 } sha1_ctx_t;
 
 /*

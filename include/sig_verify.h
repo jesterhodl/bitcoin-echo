@@ -39,9 +39,9 @@
  *   - SIG_DILITHIUM, SIG_SPHINCS, etc.
  */
 typedef enum {
-    SIG_ECDSA,          /* Pre-SegWit and SegWit v0 */
-    SIG_SCHNORR         /* Taproot (SegWit v1) */
-    /* Successor adds: SIG_DILITHIUM, SIG_SPHINCS, etc. */
+  SIG_ECDSA,  /* Pre-SegWit and SegWit v0 */
+  SIG_SCHNORR /* Taproot (SegWit v1) */
+              /* Successor adds: SIG_DILITHIUM, SIG_SPHINCS, etc. */
 } sig_type_t;
 
 /*
@@ -74,12 +74,8 @@ typedef enum {
  *   - sig: 64-byte signature (r || s)
  *   - pubkey: 32-byte x-only public key
  */
-int sig_verify(
-    sig_type_t      type,
-    const uint8_t  *sig,      size_t sig_len,
-    const uint8_t  *hash,
-    const uint8_t  *pubkey,   size_t pubkey_len
-);
+int sig_verify(sig_type_t type, const uint8_t *sig, size_t sig_len,
+               const uint8_t *hash, const uint8_t *pubkey, size_t pubkey_len);
 
 /*
  * Check whether a signature type is known.

@@ -19,30 +19,31 @@
 #ifndef ECHO_BLOCK_VALIDATE_H
 #define ECHO_BLOCK_VALIDATE_H
 
-#include "echo_types.h"
 #include "block.h"
+#include "echo_types.h"
 #include "tx.h"
+#include <stdint.h>
 
 /*
  * Timestamp validation constants.
  */
 
 /* Number of blocks used to compute median time past (MTP) */
-#define BLOCK_MTP_WINDOW  11
+#define BLOCK_MTP_WINDOW 11
 
 /* Maximum time a block timestamp can be in the future (2 hours in seconds) */
-#define BLOCK_MAX_FUTURE_TIME  (2 * 60 * 60)
+#define BLOCK_MAX_FUTURE_TIME (2 * 60 * 60)
 
 /*
  * BIP-9 version bits constants.
  */
 
 /* Bits 29-31 must be 001 for BIP-9 version bits interpretation */
-#define BLOCK_VERSION_TOP_MASK      0xE0000000
-#define BLOCK_VERSION_TOP_BITS      0x20000000
+#define BLOCK_VERSION_TOP_MASK 0xE0000000
+#define BLOCK_VERSION_TOP_BITS 0x20000000
 
 /* Individual version bit positions (0-28 available, but only 0-28 used) */
-#define BLOCK_VERSION_BIT_MASK      0x1FFFFFFF
+#define BLOCK_VERSION_BIT_MASK 0x1FFFFFFF
 
 /*
  * Difficulty adjustment constants.
@@ -52,53 +53,57 @@
  */
 
 /* Blocks between difficulty adjustments */
-#define DIFFICULTY_INTERVAL         2016
+#define DIFFICULTY_INTERVAL 2016
 
 /* Target time for a difficulty period (2 weeks in seconds) */
-#define DIFFICULTY_TARGET_TIMESPAN  1209600
+#define DIFFICULTY_TARGET_TIMESPAN 1209600
 
 /* Target time per block (10 minutes in seconds) */
-#define DIFFICULTY_TARGET_SPACING   600
+#define DIFFICULTY_TARGET_SPACING 600
 
 /* Minimum and maximum adjustment factors (factor of 4) */
-#define DIFFICULTY_MIN_TIMESPAN     (DIFFICULTY_TARGET_TIMESPAN / 4)  /* ~3.5 days */
-#define DIFFICULTY_MAX_TIMESPAN     (DIFFICULTY_TARGET_TIMESPAN * 4)  /* ~8 weeks */
+#define DIFFICULTY_MIN_TIMESPAN                                                \
+  (DIFFICULTY_TARGET_TIMESPAN / 4) /* ~3.5 days                                \
+                                    */
+#define DIFFICULTY_MAX_TIMESPAN                                                \
+  (DIFFICULTY_TARGET_TIMESPAN * 4) /* ~8 weeks                                 \
+                                    */
 
 /* Proof-of-work limit (minimum difficulty target) for mainnet */
 /* This is the genesis block target: 0x00000000FFFF0000...0000 */
-#define DIFFICULTY_POWLIMIT_BITS    0x1d00ffff
+#define DIFFICULTY_POWLIMIT_BITS 0x1d00ffff
 
 /*
  * Block validation error codes.
  * More specific than the general ECHO_ERR_* codes.
  */
 typedef enum {
-    BLOCK_VALID = 0,
+  BLOCK_VALID = 0,
 
-    /* Header validation failures */
-    BLOCK_ERR_POW_FAILED,           /* Hash does not meet target */
-    BLOCK_ERR_TARGET_INVALID,       /* Bits field produces invalid target */
-    BLOCK_ERR_TIMESTAMP_TOO_OLD,    /* Timestamp <= median time past */
-    BLOCK_ERR_TIMESTAMP_TOO_NEW,    /* Timestamp > current time + 2 hours */
-    BLOCK_ERR_PREV_BLOCK_UNKNOWN,   /* Previous block hash not found */
-    BLOCK_ERR_PREV_BLOCK_INVALID,   /* Previous block is itself invalid */
-    BLOCK_ERR_VERSION_INVALID,      /* Version field invalid for height */
+  /* Header validation failures */
+  BLOCK_ERR_POW_FAILED,         /* Hash does not meet target */
+  BLOCK_ERR_TARGET_INVALID,     /* Bits field produces invalid target */
+  BLOCK_ERR_TIMESTAMP_TOO_OLD,  /* Timestamp <= median time past */
+  BLOCK_ERR_TIMESTAMP_TOO_NEW,  /* Timestamp > current time + 2 hours */
+  BLOCK_ERR_PREV_BLOCK_UNKNOWN, /* Previous block hash not found */
+  BLOCK_ERR_PREV_BLOCK_INVALID, /* Previous block is itself invalid */
+  BLOCK_ERR_VERSION_INVALID,    /* Version field invalid for height */
 
-    /* Used in later sessions */
-    BLOCK_ERR_DIFFICULTY_MISMATCH,  /* Bits don't match expected difficulty */
-    BLOCK_ERR_MERKLE_MISMATCH,      /* Merkle root doesn't match txs */
-    BLOCK_ERR_NO_TRANSACTIONS,      /* Block has no transactions */
-    BLOCK_ERR_NO_COINBASE,          /* First tx is not coinbase */
-    BLOCK_ERR_MULTI_COINBASE,       /* Multiple coinbase transactions */
-    BLOCK_ERR_SIZE_EXCEEDED,        /* Block size/weight exceeded */
-    BLOCK_ERR_SIGOPS_EXCEEDED,      /* Too many signature operations */
-    BLOCK_ERR_TX_INVALID,           /* A transaction failed validation */
+  /* Used in later sessions */
+  BLOCK_ERR_DIFFICULTY_MISMATCH, /* Bits don't match expected difficulty */
+  BLOCK_ERR_MERKLE_MISMATCH,     /* Merkle root doesn't match txs */
+  BLOCK_ERR_NO_TRANSACTIONS,     /* Block has no transactions */
+  BLOCK_ERR_NO_COINBASE,         /* First tx is not coinbase */
+  BLOCK_ERR_MULTI_COINBASE,      /* Multiple coinbase transactions */
+  BLOCK_ERR_SIZE_EXCEEDED,       /* Block size/weight exceeded */
+  BLOCK_ERR_SIGOPS_EXCEEDED,     /* Too many signature operations */
+  BLOCK_ERR_TX_INVALID,          /* A transaction failed validation */
 
-    /* Coinbase-specific errors (Session 5.3) */
-    BLOCK_ERR_COINBASE_INVALID,     /* Coinbase transaction malformed */
-    BLOCK_ERR_COINBASE_HEIGHT,      /* BIP-34 height encoding invalid/mismatch */
-    BLOCK_ERR_COINBASE_SUBSIDY,     /* Coinbase output exceeds allowed subsidy */
-    BLOCK_ERR_WITNESS_COMMITMENT,   /* Witness commitment invalid/missing */
+  /* Coinbase-specific errors (Session 5.3) */
+  BLOCK_ERR_COINBASE_INVALID,   /* Coinbase transaction malformed */
+  BLOCK_ERR_COINBASE_HEIGHT,    /* BIP-34 height encoding invalid/mismatch */
+  BLOCK_ERR_COINBASE_SUBSIDY,   /* Coinbase output exceeds allowed subsidy */
+  BLOCK_ERR_WITNESS_COMMITMENT, /* Witness commitment invalid/missing */
 
 } block_validation_error_t;
 
@@ -110,28 +115,28 @@ typedef enum {
  * is implemented in later sessions.
  */
 typedef struct {
-    /* Height of the block being validated (parent height + 1) */
-    uint32_t height;
+  /* Height of the block being validated (parent height + 1) */
+  uint32_t height;
 
-    /* Timestamps of the previous 11 blocks (for MTP calculation).
-     * timestamps[0] is the parent block, timestamps[10] is 10 blocks back.
-     * If height < 11, only (height) entries are valid. */
-    uint32_t timestamps[BLOCK_MTP_WINDOW];
-    size_t   timestamp_count;   /* Number of valid entries (min(height, 11)) */
+  /* Timestamps of the previous 11 blocks (for MTP calculation).
+   * timestamps[0] is the parent block, timestamps[10] is 10 blocks back.
+   * If height < 11, only (height) entries are valid. */
+  uint32_t timestamps[BLOCK_MTP_WINDOW];
+  size_t timestamp_count; /* Number of valid entries (min(height, 11)) */
 
-    /* Current network-adjusted time (Unix timestamp).
-     * Used for the "not too far in future" check. */
-    uint32_t current_time;
+  /* Current network-adjusted time (Unix timestamp).
+   * Used for the "not too far in future" check. */
+  uint32_t current_time;
 
-    /* Expected difficulty target (bits) for this height.
-     * Set by difficulty adjustment algorithm. */
-    uint32_t expected_bits;
+  /* Expected difficulty target (bits) for this height.
+   * Set by difficulty adjustment algorithm. */
+  uint32_t expected_bits;
 
-    /* Parent block hash (for prev_hash validation) */
-    hash256_t parent_hash;
+  /* Parent block hash (for prev_hash validation) */
+  hash256_t parent_hash;
 
-    /* Whether the parent block is valid */
-    echo_bool_t parent_valid;
+  /* Whether the parent block is valid */
+  echo_bool_t parent_valid;
 
 } block_validation_ctx_t;
 
@@ -171,7 +176,7 @@ uint32_t block_validate_mtp(const block_validation_ctx_t *ctx);
  *   ECHO_TRUE if PoW is valid, ECHO_FALSE otherwise
  */
 echo_bool_t block_validate_pow(const block_header_t *header,
-                                block_validation_error_t *error);
+                               block_validation_error_t *error);
 
 /*
  * Validate a block header's timestamp.
@@ -189,8 +194,8 @@ echo_bool_t block_validate_pow(const block_header_t *header,
  *   ECHO_TRUE if timestamp is valid, ECHO_FALSE otherwise
  */
 echo_bool_t block_validate_timestamp(const block_header_t *header,
-                                      const block_validation_ctx_t *ctx,
-                                      block_validation_error_t *error);
+                                     const block_validation_ctx_t *ctx,
+                                     block_validation_error_t *error);
 
 /*
  * Validate a block header's previous block reference.
@@ -208,8 +213,8 @@ echo_bool_t block_validate_timestamp(const block_header_t *header,
  *   ECHO_TRUE if prev_hash is valid, ECHO_FALSE otherwise
  */
 echo_bool_t block_validate_prev_block(const block_header_t *header,
-                                       const block_validation_ctx_t *ctx,
-                                       block_validation_error_t *error);
+                                      const block_validation_ctx_t *ctx,
+                                      block_validation_error_t *error);
 
 /*
  * Check if a block version uses BIP-9 version bits.
@@ -254,8 +259,8 @@ echo_bool_t block_version_bit(int32_t version, int bit);
  *   ECHO_TRUE if version is valid, ECHO_FALSE otherwise
  */
 echo_bool_t block_validate_version(const block_header_t *header,
-                                    const block_validation_ctx_t *ctx,
-                                    block_validation_error_t *error);
+                                   const block_validation_ctx_t *ctx,
+                                   block_validation_error_t *error);
 
 /*
  * Perform all header validation checks.
@@ -279,8 +284,8 @@ echo_bool_t block_validate_version(const block_header_t *header,
  *   ECHO_TRUE if header passes all checks, ECHO_FALSE otherwise
  */
 echo_bool_t block_validate_header(const block_header_t *header,
-                                   const block_validation_ctx_t *ctx,
-                                   block_validation_error_t *error);
+                                  const block_validation_ctx_t *ctx,
+                                  block_validation_error_t *error);
 
 /*
  * Validate a genesis block header.
@@ -298,7 +303,7 @@ echo_bool_t block_validate_header(const block_header_t *header,
  *   ECHO_TRUE if this is a valid genesis block, ECHO_FALSE otherwise
  */
 echo_bool_t block_validate_genesis(const block_header_t *header,
-                                    block_validation_error_t *error);
+                                   block_validation_error_t *error);
 
 /*
  * Convert a block validation error to a human-readable string.
@@ -324,22 +329,22 @@ const char *block_validation_error_str(block_validation_error_t error);
  * difficulty for a block at a given height.
  */
 typedef struct {
-    /* Height of the block we're computing difficulty for */
-    uint32_t height;
+  /* Height of the block we're computing difficulty for */
+  uint32_t height;
 
-    /* Timestamp of the first block in the current difficulty period.
-     * This is the block at height (height - (height % 2016)).
-     * For the first period (heights 0-2015), this is the genesis timestamp. */
-    uint32_t period_start_time;
+  /* Timestamp of the first block in the current difficulty period.
+   * This is the block at height (height - (height % 2016)).
+   * For the first period (heights 0-2015), this is the genesis timestamp. */
+  uint32_t period_start_time;
 
-    /* Timestamp of the last block before this one (parent block).
-     * Used to compute actual time span of the period. */
-    uint32_t period_end_time;
+  /* Timestamp of the last block before this one (parent block).
+   * Used to compute actual time span of the period. */
+  uint32_t period_end_time;
 
-    /* The difficulty bits of the previous period.
-     * For heights 0-2015, this is the genesis difficulty.
-     * For subsequent periods, this is the bits from the last retarget block. */
-    uint32_t prev_bits;
+  /* The difficulty bits of the previous period.
+   * For heights 0-2015, this is the genesis difficulty.
+   * For subsequent periods, this is the bits from the last retarget block. */
+  uint32_t prev_bits;
 
 } difficulty_ctx_t;
 
@@ -384,7 +389,7 @@ echo_bool_t difficulty_is_retarget_height(uint32_t height);
  *   ECHO_ERR_NULL_PARAM if ctx or bits is NULL
  */
 echo_result_t difficulty_compute_next(const difficulty_ctx_t *ctx,
-                                       uint32_t *bits);
+                                      uint32_t *bits);
 
 /*
  * Validate that a block's difficulty bits match the expected value.
@@ -398,8 +403,8 @@ echo_result_t difficulty_compute_next(const difficulty_ctx_t *ctx,
  *   ECHO_TRUE if bits match expected, ECHO_FALSE otherwise
  */
 echo_bool_t block_validate_difficulty(const block_header_t *header,
-                                       const difficulty_ctx_t *ctx,
-                                       block_validation_error_t *error);
+                                      const difficulty_ctx_t *ctx,
+                                      block_validation_error_t *error);
 
 /*
  * Compute the actual time span of a difficulty period.
@@ -445,8 +450,8 @@ uint32_t difficulty_clamp_timespan(uint32_t timespan);
  *   ECHO_ERR_NULL_PARAM if new_bits is NULL
  */
 echo_result_t difficulty_adjust_target(uint32_t old_bits,
-                                        uint32_t actual_timespan,
-                                        uint32_t *new_bits);
+                                       uint32_t actual_timespan,
+                                       uint32_t *new_bits);
 
 /*
  * Get the proof-of-work limit (minimum difficulty) as a 256-bit target.
@@ -470,19 +475,19 @@ echo_result_t difficulty_get_powlimit(hash256_t *target);
  * Coinbase maturity constants.
  * Coinbase outputs cannot be spent until this many blocks have passed.
  */
-#define COINBASE_MATURITY  100
+#define COINBASE_MATURITY 100
 
 /*
  * BIP-34 activation height (mainnet).
  * After this height, coinbase must encode block height as first item.
  */
-#define BIP34_HEIGHT  227931
+#define BIP34_HEIGHT 227931
 
 /*
  * Witness commitment magic prefix.
  * OP_RETURN outputs containing witness commitment start with these 4 bytes.
  */
-#define WITNESS_COMMITMENT_PREFIX_LEN  4
+#define WITNESS_COMMITMENT_PREFIX_LEN 4
 extern const uint8_t WITNESS_COMMITMENT_PREFIX[4];
 
 /*
@@ -520,7 +525,7 @@ satoshi_t coinbase_subsidy(uint32_t height);
  *   ECHO_ERR_INVALID_FORMAT if scriptsig doesn't encode height properly
  */
 echo_result_t coinbase_parse_height(const uint8_t *script, size_t script_len,
-                                     uint32_t *height);
+                                    uint32_t *height);
 
 /*
  * Validate the BIP-34 height encoding in a coinbase.
@@ -537,8 +542,9 @@ echo_result_t coinbase_parse_height(const uint8_t *script, size_t script_len,
  *   ECHO_TRUE if height is valid or BIP-34 not active
  *   ECHO_FALSE if height encoding is invalid
  */
-echo_bool_t coinbase_validate_height(const tx_t *coinbase, uint32_t expected_height,
-                                      block_validation_error_t *error);
+echo_bool_t coinbase_validate_height(const tx_t *coinbase,
+                                     uint32_t expected_height,
+                                     block_validation_error_t *error);
 
 /*
  * Find the witness commitment output in a coinbase transaction.
@@ -558,7 +564,7 @@ echo_bool_t coinbase_validate_height(const tx_t *coinbase, uint32_t expected_hei
  *   ECHO_ERR_NULL_PARAM if coinbase or commitment is NULL
  */
 echo_result_t coinbase_find_witness_commitment(const tx_t *coinbase,
-                                                hash256_t *commitment);
+                                               hash256_t *commitment);
 
 /*
  * Validate the witness commitment in a block.
@@ -577,7 +583,7 @@ echo_result_t coinbase_find_witness_commitment(const tx_t *coinbase,
  *   ECHO_FALSE if commitment is invalid
  */
 echo_bool_t block_validate_witness_commitment(const block_t *block,
-                                               block_validation_error_t *error);
+                                              block_validation_error_t *error);
 
 /*
  * Validate a coinbase transaction.
@@ -599,8 +605,8 @@ echo_bool_t block_validate_witness_commitment(const block_t *block,
  *   ECHO_FALSE if validation fails
  */
 echo_bool_t coinbase_validate(const tx_t *coinbase, uint32_t height,
-                               satoshi_t max_allowed,
-                               block_validation_error_t *error);
+                              satoshi_t max_allowed,
+                              block_validation_error_t *error);
 
 /*
  * Check if a coinbase output is mature (spendable).
@@ -616,7 +622,8 @@ echo_bool_t coinbase_validate(const tx_t *coinbase, uint32_t height,
  *   ECHO_TRUE if mature (current_height - coinbase_height >= COINBASE_MATURITY)
  *   ECHO_FALSE if immature
  */
-echo_bool_t coinbase_is_mature(uint32_t coinbase_height, uint32_t current_height);
+echo_bool_t coinbase_is_mature(uint32_t coinbase_height,
+                               uint32_t current_height);
 
 /*
  * ============================================================================
@@ -631,22 +638,22 @@ echo_bool_t coinbase_is_mature(uint32_t coinbase_height, uint32_t current_height
  * needed for complete block validation.
  */
 typedef struct {
-    /* Header validation context */
-    block_validation_ctx_t header_ctx;
+  /* Header validation context */
+  block_validation_ctx_t header_ctx;
 
-    /* Difficulty context (for difficulty validation) */
-    difficulty_ctx_t difficulty_ctx;
+  /* Difficulty context (for difficulty validation) */
+  difficulty_ctx_t difficulty_ctx;
 
-    /* Block height (same as header_ctx.height, for convenience) */
-    uint32_t height;
+  /* Block height (same as header_ctx.height, for convenience) */
+  uint32_t height;
 
-    /* Total fees available from block transactions.
-     * For full validation, this is sum(inputs) - sum(outputs) for all non-coinbase txs.
-     * Set to 0 if not computing (subsidy-only validation). */
-    satoshi_t total_fees;
+  /* Total fees available from block transactions.
+   * For full validation, this is sum(inputs) - sum(outputs) for all
+   * non-coinbase txs. Set to 0 if not computing (subsidy-only validation). */
+  satoshi_t total_fees;
 
-    /* Whether this is a SegWit-active block */
-    echo_bool_t segwit_active;
+  /* Whether this is a SegWit-active block */
+  echo_bool_t segwit_active;
 
 } full_block_ctx_t;
 
@@ -654,17 +661,17 @@ typedef struct {
  * Block validation result with detailed information.
  */
 typedef struct {
-    /* Overall validation result */
-    echo_bool_t valid;
+  /* Overall validation result */
+  echo_bool_t valid;
 
-    /* Specific error code */
-    block_validation_error_t error;
+  /* Specific error code */
+  block_validation_error_t error;
 
-    /* Index of failing transaction (if error is TX_INVALID or similar) */
-    size_t failing_tx_index;
+  /* Index of failing transaction (if error is TX_INVALID or similar) */
+  size_t failing_tx_index;
 
-    /* Additional error information (for debugging) */
-    const char *error_msg;
+  /* Additional error information (for debugging) */
+  const char *error_msg;
 
 } block_validation_result_t;
 
@@ -709,7 +716,7 @@ echo_bool_t block_has_duplicate_txids(const block_t *block, size_t *dup_idx);
  *   ECHO_TRUE if merkle root matches, ECHO_FALSE otherwise
  */
 echo_bool_t block_validate_merkle_root(const block_t *block,
-                                        block_validation_error_t *error);
+                                       block_validation_error_t *error);
 
 /*
  * Validate block size and weight limits.
@@ -726,7 +733,7 @@ echo_bool_t block_validate_merkle_root(const block_t *block,
  *   ECHO_TRUE if within limits, ECHO_FALSE if exceeded
  */
 echo_bool_t block_validate_size(const block_t *block,
-                                 block_validation_error_t *error);
+                                block_validation_error_t *error);
 
 /*
  * Validate block transaction structure.
@@ -745,7 +752,7 @@ echo_bool_t block_validate_size(const block_t *block,
  *   ECHO_TRUE if structure is valid, ECHO_FALSE otherwise
  */
 echo_bool_t block_validate_tx_structure(const block_t *block,
-                                         block_validation_error_t *error);
+                                        block_validation_error_t *error);
 
 /*
  * Perform complete block validation.
@@ -770,9 +777,8 @@ echo_bool_t block_validate_tx_structure(const block_t *block,
  * Returns:
  *   ECHO_TRUE if block passes all checks, ECHO_FALSE otherwise
  */
-echo_bool_t block_validate(const block_t *block,
-                            const full_block_ctx_t *ctx,
-                            block_validation_result_t *result);
+echo_bool_t block_validate(const block_t *block, const full_block_ctx_t *ctx,
+                           block_validation_result_t *result);
 
 /*
  * Validate a block with minimal context (header-only checks).
@@ -790,6 +796,6 @@ echo_bool_t block_validate(const block_t *block,
  *   ECHO_TRUE if block passes basic checks, ECHO_FALSE otherwise
  */
 echo_bool_t block_validate_basic(const block_t *block,
-                                  block_validation_error_t *error);
+                                 block_validation_error_t *error);
 
 #endif /* ECHO_BLOCK_VALIDATE_H */

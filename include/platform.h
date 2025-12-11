@@ -36,8 +36,8 @@
 
 typedef struct plat_socket plat_socket_t;
 typedef struct plat_thread plat_thread_t;
-typedef struct plat_mutex  plat_mutex_t;
-typedef struct plat_cond   plat_cond_t;
+typedef struct plat_mutex plat_mutex_t;
+typedef struct plat_cond plat_cond_t;
 
 /*
  * ============================================================================
@@ -45,10 +45,10 @@ typedef struct plat_cond   plat_cond_t;
  * ============================================================================
  */
 
-#define PLAT_OK           0   /* Operation succeeded */
-#define PLAT_ERR         -1   /* General error */
-#define PLAT_ERR_TIMEOUT -2   /* Operation timed out */
-#define PLAT_ERR_CLOSED  -3   /* Connection closed by peer */
+#define PLAT_OK 0             /* Operation succeeded */
+#define PLAT_ERR (-1)         /* General error */
+#define PLAT_ERR_TIMEOUT (-2) /* Operation timed out */
+#define PLAT_ERR_CLOSED (-3)  /* Connection closed by peer */
 
 /*
  * ============================================================================
@@ -101,8 +101,8 @@ int plat_socket_create(plat_socket_t *sock);
  *
  * Parameters:
  *   sock  - Previously created socket
- *   host  - Hostname or IP address (e.g., "192.168.1.1" or "seed.bitcoin.sipa.be")
- *   port  - Port number (e.g., 8333 for mainnet)
+ *   host  - Hostname or IP address (e.g., "192.168.1.1" or
+ * "seed.bitcoin.sipa.be") port  - Port number (e.g., 8333 for mainnet)
  *
  * Returns:
  *   PLAT_OK on success, PLAT_ERR on failure

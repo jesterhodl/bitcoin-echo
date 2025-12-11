@@ -20,7 +20,6 @@
 #define ECHO_BLOCKS_STORAGE_H
 
 #include "echo_types.h"
-#include <stddef.h>
 #include <stdint.h>
 
 /*
@@ -28,8 +27,8 @@
  * Identifies a block's location on disk.
  */
 typedef struct {
-    uint32_t file_index;  /* File number (0 = blk00000.dat, 1 = blk00001.dat) */
-    uint32_t file_offset; /* Byte offset within file to start of magic bytes */
+  uint32_t file_index;  /* File number (0 = blk00000.dat, 1 = blk00001.dat) */
+  uint32_t file_offset; /* Byte offset within file to start of magic bytes */
 } block_file_pos_t;
 
 /*
@@ -37,9 +36,9 @@ typedef struct {
  * Manages writing and reading blocks to/from disk.
  */
 typedef struct {
-    char     data_dir[256];       /* Data directory path */
-    uint32_t current_file_index;  /* Current file being written */
-    uint32_t current_file_offset; /* Current offset in current file */
+  char data_dir[256];           /* Data directory path */
+  uint32_t current_file_index;  /* Current file being written */
+  uint32_t current_file_offset; /* Current offset in current file */
 } block_file_manager_t;
 
 /*
@@ -67,7 +66,8 @@ typedef struct {
  *   - Creates blocks/ directory if it doesn't exist
  *   - Scans existing block files to find current write position
  */
-echo_result_t block_storage_init(block_file_manager_t *mgr, const char *data_dir);
+echo_result_t block_storage_init(block_file_manager_t *mgr,
+                                 const char *data_dir);
 
 /*
  * Write a block to disk.
@@ -86,12 +86,10 @@ echo_result_t block_storage_init(block_file_manager_t *mgr, const char *data_dir
  *   - Automatically creates new file if current file would exceed max size
  *   - Position is returned for storage in block index
  */
-echo_result_t block_storage_write(
-    block_file_manager_t *mgr,
-    const uint8_t *block_data,
-    uint32_t block_size,
-    block_file_pos_t *pos_out
-);
+echo_result_t block_storage_write(block_file_manager_t *mgr,
+                                  const uint8_t *block_data,
+                                  uint32_t block_size,
+                                  block_file_pos_t *pos_out);
 
 /*
  * Read a block from disk.
@@ -110,12 +108,9 @@ echo_result_t block_storage_write(
  *   - Verifies magic bytes match network
  *   - Returns raw block data (without magic/size prefix)
  */
-echo_result_t block_storage_read(
-    block_file_manager_t *mgr,
-    block_file_pos_t pos,
-    uint8_t **block_out,
-    uint32_t *size_out
-);
+echo_result_t block_storage_read(block_file_manager_t *mgr,
+                                 block_file_pos_t pos, uint8_t **block_out,
+                                 uint32_t *size_out);
 
 /*
  * Get path to block file.
@@ -128,10 +123,7 @@ echo_result_t block_storage_read(
  * Notes:
  *   - Helper function to construct block file paths
  */
-void block_storage_get_path(
-    const block_file_manager_t *mgr,
-    uint32_t file_index,
-    char *path_out
-);
+void block_storage_get_path(const block_file_manager_t *mgr,
+                            uint32_t file_index, char *path_out);
 
 #endif /* ECHO_BLOCKS_STORAGE_H */

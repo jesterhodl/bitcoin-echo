@@ -17,46 +17,48 @@
 #include "echo_types.h"
 #include "platform.h"
 #include "protocol.h"
+#include <stdint.h>
 
 /* Maximum size of per-peer send queue (in messages) */
 #define PEER_SEND_QUEUE_SIZE 128
 
 /* Maximum size of per-peer receive buffer (in bytes) */
-#define PEER_RECV_BUFFER_SIZE (1024 * 1024)  /* 1 MB */
+#define PEER_RECV_BUFFER_SIZE (1024 * 1024) /* 1 MB */
 
 /**
  * Peer connection state
  */
 typedef enum {
-    PEER_STATE_DISCONNECTED,     /* Not connected */
-    PEER_STATE_CONNECTING,       /* TCP connection in progress */
-    PEER_STATE_CONNECTED,        /* TCP connected, handshake not started */
-    PEER_STATE_HANDSHAKE_SENT,   /* version message sent, waiting for version */
-    PEER_STATE_HANDSHAKE_RECV,   /* version received, waiting for verack */
-    PEER_STATE_READY,            /* Handshake complete, ready for messages */
-    PEER_STATE_DISCONNECTING     /* Disconnection in progress */
+  PEER_STATE_DISCONNECTED,   /* Not connected */
+  PEER_STATE_CONNECTING,     /* TCP connection in progress */
+  PEER_STATE_CONNECTED,      /* TCP connected, handshake not started */
+  PEER_STATE_HANDSHAKE_SENT, /* version message sent, waiting for version */
+  PEER_STATE_HANDSHAKE_RECV, /* version received, waiting for verack */
+  PEER_STATE_READY,          /* Handshake complete, ready for messages */
+  PEER_STATE_DISCONNECTING   /* Disconnection in progress */
 } peer_state_t;
 
 /**
  * Peer disconnect reason
  */
 typedef enum {
-    PEER_DISCONNECT_NONE = 0,
-    PEER_DISCONNECT_USER,           /* User requested disconnect */
-    PEER_DISCONNECT_PROTOCOL_ERROR, /* Protocol violation */
-    PEER_DISCONNECT_TIMEOUT,        /* Connection timeout */
-    PEER_DISCONNECT_PEER_CLOSED,    /* Peer closed connection */
-    PEER_DISCONNECT_NETWORK_ERROR,  /* Network I/O error */
-    PEER_DISCONNECT_HANDSHAKE_FAIL, /* Handshake failed */
-    PEER_DISCONNECT_MISBEHAVING     /* Peer misbehavior (DoS protection) */
+  PEER_DISCONNECT_NONE = 0,
+  PEER_DISCONNECT_USER,           /* User requested disconnect */
+  PEER_DISCONNECT_PROTOCOL_ERROR, /* Protocol violation */
+  PEER_DISCONNECT_TIMEOUT,        /* Connection timeout */
+  PEER_DISCONNECT_PEER_CLOSED,    /* Peer closed connection */
+  PEER_DISCONNECT_NETWORK_ERROR,  /* Network I/O error */
+  PEER_DISCONNECT_HANDSHAKE_FAIL, /* Handshake failed */
+  PEER_DISCONNECT_MISBEHAVING     /* Peer misbehavior (DoS protection) */
 } peer_disconnect_reason_t;
 
 /**
  * Message queue entry
  */
 typedef struct {
-    msg_t message;          /* The message to send */
-    echo_bool_t allocated;  /* Whether message contains dynamically allocated data */
+  msg_t message; /* The message to send */
+  echo_bool_t
+      allocated; /* Whether message contains dynamically allocated data */
 } peer_msg_queue_entry_t;
 
 /**
@@ -65,49 +67,49 @@ typedef struct {
  * Represents a single P2P connection to/from another Bitcoin node.
  */
 typedef struct {
-    /* Connection info */
-    plat_socket_t *socket;              /* TCP socket (allocated) */
-    peer_state_t state;                 /* Current connection state */
-    echo_bool_t inbound;                /* True if peer connected to us */
+  /* Connection info */
+  plat_socket_t *socket; /* TCP socket (allocated) */
+  peer_state_t state;    /* Current connection state */
+  echo_bool_t inbound;   /* True if peer connected to us */
 
-    /* Peer identification */
-    char address[64];                   /* IP address string */
-    uint16_t port;                      /* Port number */
-    uint64_t nonce_local;               /* Our nonce (for self-connection detection) */
-    uint64_t nonce_remote;              /* Peer's nonce */
+  /* Peer identification */
+  char address[64];      /* IP address string */
+  uint16_t port;         /* Port number */
+  uint64_t nonce_local;  /* Our nonce (for self-connection detection) */
+  uint64_t nonce_remote; /* Peer's nonce */
 
-    /* Protocol version information */
-    int32_t version;                    /* Peer's protocol version */
-    uint64_t services;                  /* Peer's service flags */
-    int32_t start_height;               /* Peer's blockchain height */
-    char user_agent[MAX_USER_AGENT_LEN]; /* Peer's user agent string */
-    size_t user_agent_len;              /* Actual length of user_agent */
-    echo_bool_t relay;                  /* Whether peer wants tx relay */
+  /* Protocol version information */
+  int32_t version;                     /* Peer's protocol version */
+  uint64_t services;                   /* Peer's service flags */
+  int32_t start_height;                /* Peer's blockchain height */
+  char user_agent[MAX_USER_AGENT_LEN]; /* Peer's user agent string */
+  size_t user_agent_len;               /* Actual length of user_agent */
+  echo_bool_t relay;                   /* Whether peer wants tx relay */
 
-    /* Connection timing */
-    uint64_t connect_time;              /* When connection established (plat_time_ms) */
-    uint64_t last_send;                 /* Last successful send time */
-    uint64_t last_recv;                 /* Last successful receive time */
+  /* Connection timing */
+  uint64_t connect_time; /* When connection established (plat_time_ms) */
+  uint64_t last_send;    /* Last successful send time */
+  uint64_t last_recv;    /* Last successful receive time */
 
-    /* Send queue */
-    peer_msg_queue_entry_t send_queue[PEER_SEND_QUEUE_SIZE];
-    size_t send_queue_head;             /* Next message to send */
-    size_t send_queue_tail;             /* Where to add new messages */
-    size_t send_queue_count;            /* Number of queued messages */
+  /* Send queue */
+  peer_msg_queue_entry_t send_queue[PEER_SEND_QUEUE_SIZE];
+  size_t send_queue_head;  /* Next message to send */
+  size_t send_queue_tail;  /* Where to add new messages */
+  size_t send_queue_count; /* Number of queued messages */
 
-    /* Receive buffer */
-    uint8_t recv_buffer[PEER_RECV_BUFFER_SIZE];
-    size_t recv_buffer_len;             /* Bytes currently in buffer */
+  /* Receive buffer */
+  uint8_t recv_buffer[PEER_RECV_BUFFER_SIZE];
+  size_t recv_buffer_len; /* Bytes currently in buffer */
 
-    /* Disconnection info */
-    peer_disconnect_reason_t disconnect_reason;
-    char disconnect_message[256];       /* Human-readable disconnect reason */
+  /* Disconnection info */
+  peer_disconnect_reason_t disconnect_reason;
+  char disconnect_message[256]; /* Human-readable disconnect reason */
 
-    /* Statistics */
-    uint64_t bytes_sent;
-    uint64_t bytes_recv;
-    uint64_t messages_sent;
-    uint64_t messages_recv;
+  /* Statistics */
+  uint64_t bytes_sent;
+  uint64_t bytes_recv;
+  uint64_t messages_sent;
+  uint64_t messages_recv;
 } peer_t;
 
 /**
@@ -133,7 +135,8 @@ void peer_init(peer_t *peer);
  *   ECHO_SUCCESS on successful connection
  *   ECHO_ERR_NETWORK on connection failure
  */
-echo_result_t peer_connect(peer_t *peer, const char *address, uint16_t port, uint64_t nonce);
+echo_result_t peer_connect(peer_t *peer, const char *address, uint16_t port,
+                           uint64_t nonce);
 
 /**
  * Accept inbound connection from listening socket.
@@ -150,7 +153,8 @@ echo_result_t peer_connect(peer_t *peer, const char *address, uint16_t port, uin
  *   ECHO_SUCCESS on successful accept
  *   ECHO_ERR_NETWORK on failure
  */
-echo_result_t peer_accept(peer_t *peer, plat_socket_t *listener, uint64_t nonce);
+echo_result_t peer_accept(peer_t *peer, plat_socket_t *listener,
+                          uint64_t nonce);
 
 /**
  * Send version message to peer.
@@ -231,7 +235,8 @@ echo_result_t peer_send_queued(peer_t *peer);
  *   reason  - Disconnect reason code
  *   message - Human-readable reason (optional, can be NULL)
  */
-void peer_disconnect(peer_t *peer, peer_disconnect_reason_t reason, const char *message);
+void peer_disconnect(peer_t *peer, peer_disconnect_reason_t reason,
+                     const char *message);
 
 /**
  * Check if peer handshake is complete.

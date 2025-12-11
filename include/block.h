@@ -25,54 +25,55 @@
 
 #include "echo_types.h"
 #include "tx.h"
+#include <stdint.h>
 
 /*
  * Block header size in bytes.
  */
-#define BLOCK_HEADER_SIZE  80
+#define BLOCK_HEADER_SIZE 80
 
 /*
  * Block size limits.
  */
-#define BLOCK_MAX_SIZE        4000000   /* Max block size in bytes (4MB) */
-#define BLOCK_MAX_WEIGHT      4000000   /* Max block weight (4M weight units) */
-#define BLOCK_MAX_SIGOPS      80000     /* Max signature operations */
+#define BLOCK_MAX_SIZE 4000000   /* Max block size in bytes (4MB) */
+#define BLOCK_MAX_WEIGHT 4000000 /* Max block weight (4M weight units) */
+#define BLOCK_MAX_SIGOPS 80000   /* Max signature operations */
 
 /*
  * Genesis block constants (mainnet).
  */
-#define GENESIS_BLOCK_VERSION      1
-#define GENESIS_BLOCK_TIMESTAMP    1231006505
-#define GENESIS_BLOCK_BITS         0x1d00ffff
-#define GENESIS_BLOCK_NONCE        2083236893
+#define GENESIS_BLOCK_VERSION 1
+#define GENESIS_BLOCK_TIMESTAMP 1231006505
+#define GENESIS_BLOCK_BITS 0x1d00ffff
+#define GENESIS_BLOCK_NONCE 2083236893
 
 /*
  * Difficulty adjustment constants.
  */
-#define DIFFICULTY_ADJUSTMENT_INTERVAL  2016    /* Blocks between adjustments */
-#define TARGET_TIMESPAN                 1209600 /* 2 weeks in seconds */
-#define TARGET_SPACING                  600     /* 10 minutes in seconds */
+#define DIFFICULTY_ADJUSTMENT_INTERVAL 2016 /* Blocks between adjustments */
+#define TARGET_TIMESPAN 1209600             /* 2 weeks in seconds */
+#define TARGET_SPACING 600                  /* 10 minutes in seconds */
 
 /*
  * Block header structure.
  * Exactly 80 bytes when serialized.
  */
 typedef struct {
-    int32_t   version;      /* Block version (signed per protocol) */
-    hash256_t prev_hash;    /* Hash of previous block header */
-    hash256_t merkle_root;  /* Merkle root of transactions */
-    uint32_t  timestamp;    /* Unix timestamp */
-    uint32_t  bits;         /* Compact difficulty target */
-    uint32_t  nonce;        /* Nonce for proof-of-work */
+  int32_t version;       /* Block version (signed per protocol) */
+  hash256_t prev_hash;   /* Hash of previous block header */
+  hash256_t merkle_root; /* Merkle root of transactions */
+  uint32_t timestamp;    /* Unix timestamp */
+  uint32_t bits;         /* Compact difficulty target */
+  uint32_t nonce;        /* Nonce for proof-of-work */
 } block_header_t;
 
 /*
  * Full block structure.
  */
 typedef struct {
-    block_header_t  header;     /* 80-byte header */
-    tx_t           *txs;        /* Array of transactions (owned) */
-    size_t          tx_count;   /* Number of transactions */
+  block_header_t header; /* 80-byte header */
+  tx_t *txs;             /* Array of transactions (owned) */
+  size_t tx_count;       /* Number of transactions */
 } block_t;
 
 /*
@@ -105,7 +106,7 @@ void block_free(block_t *block);
  *   ECHO_ERR_TRUNCATED if data_len < 80
  */
 echo_result_t block_header_parse(const uint8_t *data, size_t data_len,
-                                  block_header_t *header);
+                                 block_header_t *header);
 
 /*
  * Serialize a block header to bytes.
@@ -120,8 +121,8 @@ echo_result_t block_header_parse(const uint8_t *data, size_t data_len,
  *   ECHO_ERR_NULL_PARAM if header or buf is NULL
  *   ECHO_ERR_BUFFER_TOO_SMALL if buf_len < 80
  */
-echo_result_t block_header_serialize(const block_header_t *header,
-                                      uint8_t *buf, size_t buf_len);
+echo_result_t block_header_serialize(const block_header_t *header, uint8_t *buf,
+                                     size_t buf_len);
 
 /*
  * Compute the block hash (hash of the 80-byte header).
@@ -159,8 +160,8 @@ echo_result_t block_header_hash(const block_header_t *header, hash256_t *hash);
  *   ECHO_ERR_INVALID_FORMAT if block malformed
  *   ECHO_ERR_OUT_OF_MEMORY if allocation fails
  */
-echo_result_t block_parse(const uint8_t *data, size_t data_len,
-                          block_t *block, size_t *consumed);
+echo_result_t block_parse(const uint8_t *data, size_t data_len, block_t *block,
+                          size_t *consumed);
 
 /*
  * Compute the serialized size of a full block.
@@ -187,8 +188,8 @@ size_t block_serialize_size(const block_t *block);
  *   ECHO_ERR_NULL_PARAM if block or buf is NULL
  *   ECHO_ERR_BUFFER_TOO_SMALL if buffer insufficient
  */
-echo_result_t block_serialize(const block_t *block,
-                              uint8_t *buf, size_t buf_len, size_t *written);
+echo_result_t block_serialize(const block_t *block, uint8_t *buf,
+                              size_t buf_len, size_t *written);
 
 /*
  * Compute block weight.

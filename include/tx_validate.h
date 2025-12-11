@@ -16,8 +16,9 @@
 #define ECHO_TX_VALIDATE_H
 
 #include "echo_types.h"
-#include "tx.h"
 #include "script.h"
+#include "tx.h"
+#include <stdint.h>
 
 /*
  * ============================================================================
@@ -29,22 +30,22 @@
  * Maximum transaction weight (in weight units).
  * Block weight limit is 4,000,000 WU; a single tx can't exceed it.
  */
-#define TX_MAX_WEIGHT  4000000
+#define TX_MAX_WEIGHT 4000000
 
 /*
  * Maximum transaction virtual size.
  */
-#define TX_MAX_VSIZE   1000000
+#define TX_MAX_VSIZE 1000000
 
 /*
  * Minimum coinbase script length (BIP-34: height in coinbase).
  */
-#define COINBASE_SCRIPT_MIN_LEN  2
+#define COINBASE_SCRIPT_MIN_LEN 2
 
 /*
  * Maximum coinbase script length.
  */
-#define COINBASE_SCRIPT_MAX_LEN  100
+#define COINBASE_SCRIPT_MAX_LEN 100
 
 /*
  * ============================================================================
@@ -57,43 +58,43 @@
  * More specific than the general echo_result_t codes.
  */
 typedef enum {
-    TX_VALIDATE_OK = 0,
+  TX_VALIDATE_OK = 0,
 
-    /* Structural errors */
-    TX_VALIDATE_ERR_NULL,
-    TX_VALIDATE_ERR_EMPTY_INPUTS,
-    TX_VALIDATE_ERR_EMPTY_OUTPUTS,
-    TX_VALIDATE_ERR_TOO_MANY_INPUTS,
-    TX_VALIDATE_ERR_TOO_MANY_OUTPUTS,
-    TX_VALIDATE_ERR_SIZE_EXCEEDED,
-    TX_VALIDATE_ERR_WEIGHT_EXCEEDED,
+  /* Structural errors */
+  TX_VALIDATE_ERR_NULL,
+  TX_VALIDATE_ERR_EMPTY_INPUTS,
+  TX_VALIDATE_ERR_EMPTY_OUTPUTS,
+  TX_VALIDATE_ERR_TOO_MANY_INPUTS,
+  TX_VALIDATE_ERR_TOO_MANY_OUTPUTS,
+  TX_VALIDATE_ERR_SIZE_EXCEEDED,
+  TX_VALIDATE_ERR_WEIGHT_EXCEEDED,
 
-    /* Input errors */
-    TX_VALIDATE_ERR_DUPLICATE_INPUT,
-    TX_VALIDATE_ERR_NULL_PREVOUT,        /* Non-coinbase with null prevout */
-    TX_VALIDATE_ERR_SCRIPT_SIZE,         /* scriptSig too large */
+  /* Input errors */
+  TX_VALIDATE_ERR_DUPLICATE_INPUT,
+  TX_VALIDATE_ERR_NULL_PREVOUT, /* Non-coinbase with null prevout */
+  TX_VALIDATE_ERR_SCRIPT_SIZE,  /* scriptSig too large */
 
-    /* Output errors */
-    TX_VALIDATE_ERR_NEGATIVE_VALUE,
-    TX_VALIDATE_ERR_VALUE_TOO_LARGE,     /* Single output > 21M BTC */
-    TX_VALIDATE_ERR_TOTAL_OVERFLOW,      /* Sum of outputs overflows */
-    TX_VALIDATE_ERR_TOTAL_TOO_LARGE,     /* Sum of outputs > 21M BTC */
-    TX_VALIDATE_ERR_OUTPUT_SCRIPT_SIZE,  /* scriptPubKey too large */
+  /* Output errors */
+  TX_VALIDATE_ERR_NEGATIVE_VALUE,
+  TX_VALIDATE_ERR_VALUE_TOO_LARGE,    /* Single output > 21M BTC */
+  TX_VALIDATE_ERR_TOTAL_OVERFLOW,     /* Sum of outputs overflows */
+  TX_VALIDATE_ERR_TOTAL_TOO_LARGE,    /* Sum of outputs > 21M BTC */
+  TX_VALIDATE_ERR_OUTPUT_SCRIPT_SIZE, /* scriptPubKey too large */
 
-    /* Coinbase errors */
-    TX_VALIDATE_ERR_COINBASE_SCRIPT_SIZE,
+  /* Coinbase errors */
+  TX_VALIDATE_ERR_COINBASE_SCRIPT_SIZE,
 
-    /* Script execution errors */
-    TX_VALIDATE_ERR_SCRIPT_FAILED,
-    TX_VALIDATE_ERR_SCRIPT_VERIFY,
+  /* Script execution errors */
+  TX_VALIDATE_ERR_SCRIPT_FAILED,
+  TX_VALIDATE_ERR_SCRIPT_VERIFY,
 
-    /* Locktime errors */
-    TX_VALIDATE_ERR_LOCKTIME,
+  /* Locktime errors */
+  TX_VALIDATE_ERR_LOCKTIME,
 
-    /* Context errors (need additional info) */
-    TX_VALIDATE_ERR_MISSING_UTXO,
-    TX_VALIDATE_ERR_INPUT_VALUE_OVERFLOW,
-    TX_VALIDATE_ERR_INSUFFICIENT_FUNDS,
+  /* Context errors (need additional info) */
+  TX_VALIDATE_ERR_MISSING_UTXO,
+  TX_VALIDATE_ERR_INPUT_VALUE_OVERFLOW,
+  TX_VALIDATE_ERR_INSUFFICIENT_FUNDS,
 
 } tx_validate_error_t;
 
@@ -102,9 +103,9 @@ typedef enum {
  * Contains the specific error code and location of the error.
  */
 typedef struct {
-    tx_validate_error_t error;  /* Specific error code */
-    size_t              index;  /* Input/output index where error occurred */
-    script_error_t      script_error;  /* Script-specific error (if applicable) */
+  tx_validate_error_t error;   /* Specific error code */
+  size_t index;                /* Input/output index where error occurred */
+  script_error_t script_error; /* Script-specific error (if applicable) */
 } tx_validate_result_t;
 
 /*
@@ -112,11 +113,11 @@ typedef struct {
  * Caller must provide this for each input being validated.
  */
 typedef struct {
-    satoshi_t   value;          /* Value of the UTXO */
-    uint8_t    *script_pubkey;  /* The scriptPubKey of the UTXO */
-    size_t      script_pubkey_len;
-    uint32_t    height;         /* Block height where UTXO was created */
-    echo_bool_t is_coinbase;    /* Whether this UTXO came from a coinbase */
+  satoshi_t value;        /* Value of the UTXO */
+  uint8_t *script_pubkey; /* The scriptPubKey of the UTXO */
+  size_t script_pubkey_len;
+  uint32_t height;         /* Block height where UTXO was created */
+  echo_bool_t is_coinbase; /* Whether this UTXO came from a coinbase */
 } utxo_info_t;
 
 /*
@@ -124,17 +125,17 @@ typedef struct {
  * Provides additional information needed for full validation.
  */
 typedef struct {
-    /* Block context (for locktime validation) */
-    uint32_t block_height;      /* Current block height */
-    uint32_t block_time;        /* Current block timestamp */
-    uint32_t median_time_past;  /* Median time past (BIP-113) */
+  /* Block context (for locktime validation) */
+  uint32_t block_height;     /* Current block height */
+  uint32_t block_time;       /* Current block timestamp */
+  uint32_t median_time_past; /* Median time past (BIP-113) */
 
-    /* UTXO information for inputs */
-    const utxo_info_t *utxos;   /* Array of UTXO info, one per input */
-    size_t utxo_count;
+  /* UTXO information for inputs */
+  const utxo_info_t *utxos; /* Array of UTXO info, one per input */
+  size_t utxo_count;
 
-    /* Script verification flags */
-    uint32_t script_flags;      /* SCRIPT_VERIFY_* flags */
+  /* Script verification flags */
+  uint32_t script_flags; /* SCRIPT_VERIFY_* flags */
 
 } tx_validate_ctx_t;
 
@@ -202,8 +203,7 @@ echo_result_t tx_validate_syntax(const tx_t *tx, tx_validate_result_t *result);
  *   ECHO_OK if transaction is valid
  *   ECHO_ERR_* otherwise (result contains details)
  */
-echo_result_t tx_validate(const tx_t *tx,
-                          const tx_validate_ctx_t *ctx,
+echo_result_t tx_validate(const tx_t *tx, const tx_validate_ctx_t *ctx,
                           tx_validate_result_t *result);
 
 /*
@@ -220,10 +220,8 @@ echo_result_t tx_validate(const tx_t *tx,
  *   ECHO_OK if input is valid
  *   ECHO_ERR_SCRIPT_* otherwise
  */
-echo_result_t tx_validate_input(const tx_t *tx,
-                                size_t input_index,
-                                const utxo_info_t *utxo,
-                                uint32_t flags,
+echo_result_t tx_validate_input(const tx_t *tx, size_t input_index,
+                                const utxo_info_t *utxo, uint32_t flags,
                                 tx_validate_result_t *result);
 
 /*
@@ -237,9 +235,8 @@ echo_result_t tx_validate_input(const tx_t *tx,
  * Returns:
  *   ECHO_TRUE if locktime satisfied, ECHO_FALSE otherwise
  */
-echo_bool_t tx_locktime_satisfied(const tx_t *tx,
-                                   uint32_t block_height,
-                                   uint32_t block_time);
+echo_bool_t tx_locktime_satisfied(const tx_t *tx, uint32_t block_height,
+                                  uint32_t block_time);
 
 /*
  * Check if an input's relative locktime (BIP-68) is satisfied.
@@ -255,12 +252,9 @@ echo_bool_t tx_locktime_satisfied(const tx_t *tx,
  * Returns:
  *   ECHO_TRUE if relative locktime satisfied, ECHO_FALSE otherwise
  */
-echo_bool_t tx_sequence_satisfied(const tx_t *tx,
-                                   size_t input_index,
-                                   uint32_t utxo_height,
-                                   uint32_t utxo_time,
-                                   uint32_t block_height,
-                                   uint32_t block_time);
+echo_bool_t tx_sequence_satisfied(const tx_t *tx, size_t input_index,
+                                  uint32_t utxo_height, uint32_t utxo_time,
+                                  uint32_t block_height, uint32_t block_time);
 
 /*
  * Compute the fee of a transaction.
@@ -275,9 +269,7 @@ echo_bool_t tx_sequence_satisfied(const tx_t *tx,
  *   ECHO_OK on success
  *   ECHO_ERR_* if inputs don't match or values overflow
  */
-echo_result_t tx_compute_fee(const tx_t *tx,
-                             const utxo_info_t *utxos,
-                             size_t utxo_count,
-                             satoshi_t *fee);
+echo_result_t tx_compute_fee(const tx_t *tx, const utxo_info_t *utxos,
+                             size_t utxo_count, satoshi_t *fee);
 
 #endif /* ECHO_TX_VALIDATE_H */

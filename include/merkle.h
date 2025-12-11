@@ -59,8 +59,7 @@ echo_result_t merkle_root(const hash256_t *hashes, size_t count,
  *   ECHO_ERR_NULL_PARAM if txs (when count > 0) or root is NULL
  *   ECHO_ERR_OUT_OF_MEMORY if allocation fails
  */
-echo_result_t merkle_root_txids(const tx_t *txs, size_t count,
-                                hash256_t *root);
+echo_result_t merkle_root_txids(const tx_t *txs, size_t count, hash256_t *root);
 
 /*
  * Compute witness commitment Merkle root (using wtxids).
@@ -122,9 +121,9 @@ echo_result_t witness_commitment(const hash256_t *witness_root,
  *   ECHO_ERR_BUFFER_TOO_SMALL if proof buffer too small
  *   ECHO_ERR_OUT_OF_MEMORY if allocation fails
  */
-echo_result_t merkle_proof(const hash256_t *hashes, size_t count,
-                           size_t index, hash256_t *proof,
-                           size_t *proof_len, size_t max_proof);
+echo_result_t merkle_proof(const hash256_t *hashes, size_t count, size_t index,
+                           hash256_t *proof, size_t *proof_len,
+                           size_t max_proof);
 
 /*
  * Verify a Merkle proof.
@@ -144,8 +143,8 @@ echo_result_t merkle_proof(const hash256_t *hashes, size_t count,
  *   ECHO_TRUE if proof is valid
  *   ECHO_FALSE if proof is invalid or parameters are NULL
  */
-echo_bool_t merkle_verify(const hash256_t *leaf, size_t index,
-                          size_t count, const hash256_t *proof,
-                          size_t proof_len, const hash256_t *root);
+echo_bool_t merkle_verify(const hash256_t *leaf, size_t index, size_t count,
+                          const hash256_t *proof, size_t proof_len,
+                          const hash256_t *root);
 
 #endif /* ECHO_MERKLE_H */

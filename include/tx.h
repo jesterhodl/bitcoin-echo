@@ -30,20 +30,20 @@
 #define ECHO_TX_H
 
 #include "echo_types.h"
-#include "sha256.h"
+#include <stdint.h>
 
 /*
  * Transaction version constants.
  */
-#define TX_VERSION_1  1
-#define TX_VERSION_2  2  /* BIP-68 relative locktime */
+#define TX_VERSION_1 1
+#define TX_VERSION_2 2 /* BIP-68 relative locktime */
 
 /*
  * Sequence number constants.
  */
-#define TX_SEQUENCE_FINAL           0xFFFFFFFF
+#define TX_SEQUENCE_FINAL 0xFFFFFFFF
 #define TX_SEQUENCE_DISABLE_LOCKTIME 0xFFFFFFFF
-#define TX_SEQUENCE_DISABLE_RBF     0xFFFFFFFE
+#define TX_SEQUENCE_DISABLE_RBF 0xFFFFFFFE
 
 /*
  * BIP-68 relative locktime sequence constants.
@@ -51,73 +51,75 @@
  *   - Transaction version >= 2
  *   - Bit 31 (SEQUENCE_LOCKTIME_DISABLE_FLAG) is NOT set
  */
-#define SEQUENCE_LOCKTIME_DISABLE_FLAG  (1U << 31)  /* Bit 31: disable relative locktime */
-#define SEQUENCE_LOCKTIME_TYPE_FLAG     (1U << 22)  /* Bit 22: 0=blocks, 1=time (512s units) */
-#define SEQUENCE_LOCKTIME_MASK          0x0000FFFF  /* Bits 0-15: locktime value */
+#define SEQUENCE_LOCKTIME_DISABLE_FLAG                                         \
+  (1U << 31) /* Bit 31: disable relative locktime */
+#define SEQUENCE_LOCKTIME_TYPE_FLAG                                            \
+  (1U << 22) /* Bit 22: 0=blocks, 1=time (512s units) */
+#define SEQUENCE_LOCKTIME_MASK 0x0000FFFF /* Bits 0-15: locktime value */
 
 /*
  * Locktime threshold.
  * Values below this are block heights, values >= are Unix timestamps.
  */
-#define LOCKTIME_THRESHOLD  500000000
+#define LOCKTIME_THRESHOLD 500000000
 
 /*
  * Coinbase constants.
  */
-#define TX_COINBASE_VOUT  0xFFFFFFFF  /* Previous output index for coinbase */
+#define TX_COINBASE_VOUT 0xFFFFFFFF /* Previous output index for coinbase */
 
 /*
  * Size limits (consensus).
  */
-#define TX_MAX_SIZE           4000000  /* Max transaction size in bytes */
-#define TX_MAX_INPUTS         100000   /* Practical limit */
-#define TX_MAX_OUTPUTS        100000   /* Practical limit */
-#define TX_MAX_SCRIPT_SIZE    10000    /* Max script size */
-#define TX_MAX_WITNESS_SIZE   4000000  /* Max witness size */
+#define TX_MAX_SIZE 4000000         /* Max transaction size in bytes */
+#define TX_MAX_INPUTS 100000        /* Practical limit */
+#define TX_MAX_OUTPUTS 100000       /* Practical limit */
+#define TX_MAX_SCRIPT_SIZE 10000    /* Max script size */
+#define TX_MAX_WITNESS_SIZE 4000000 /* Max witness size */
 
 /*
  * Outpoint — reference to a previous transaction output.
  * Used in transaction inputs to identify which output is being spent.
  */
 typedef struct {
-    hash256_t txid;      /* Transaction ID (SHA256d of tx without witness) */
-    uint32_t  vout;      /* Output index within that transaction */
+  hash256_t txid; /* Transaction ID (SHA256d of tx without witness) */
+  uint32_t vout;  /* Output index within that transaction */
 } outpoint_t;
 
 /*
  * Witness item — single item in a witness stack.
  */
 typedef struct {
-    uint8_t *data;       /* Witness item data (owned, must be freed) */
-    size_t   len;        /* Length of data */
+  uint8_t *data; /* Witness item data (owned, must be freed) */
+  size_t len;    /* Length of data */
 } witness_item_t;
 
 /*
  * Witness stack — all witness items for a single input.
  */
 typedef struct {
-    witness_item_t *items;  /* Array of witness items (owned) */
-    size_t          count;  /* Number of items */
+  witness_item_t *items; /* Array of witness items (owned) */
+  size_t count;          /* Number of items */
 } witness_stack_t;
 
 /*
  * Transaction input.
  */
 typedef struct {
-    outpoint_t      prevout;    /* Reference to output being spent */
-    uint8_t        *script_sig; /* Unlocking script (owned, must be freed) */
-    size_t          script_sig_len;
-    uint32_t        sequence;   /* Sequence number */
-    witness_stack_t witness;    /* Witness data (empty for non-SegWit) */
+  outpoint_t prevout;  /* Reference to output being spent */
+  uint8_t *script_sig; /* Unlocking script (owned, must be freed) */
+  size_t script_sig_len;
+  uint32_t sequence;       /* Sequence number */
+  witness_stack_t witness; /* Witness data (empty for non-SegWit) */
 } tx_input_t;
 
 /*
  * Transaction output.
  */
 typedef struct {
-    satoshi_t  value;           /* Amount in satoshis */
-    uint8_t   *script_pubkey;   /* Locking script (owned, must be freed) */
-    size_t     script_pubkey_len;
+  satoshi_t value;        /* Amount in satoshis */
+  uint8_t *script_pubkey; /* Locking script (owned, must be freed) */
+  size_t script_pubkey_len;
 } tx_output_t;
 
 /*
@@ -125,13 +127,13 @@ typedef struct {
  * Uses named struct for forward declaration compatibility.
  */
 typedef struct tx_s {
-    int32_t      version;       /* Transaction version (signed per protocol) */
-    tx_input_t  *inputs;        /* Array of inputs (owned) */
-    size_t       input_count;
-    tx_output_t *outputs;       /* Array of outputs (owned) */
-    size_t       output_count;
-    uint32_t     locktime;      /* Lock time */
-    echo_bool_t  has_witness;   /* True if any input has witness data */
+  int32_t version;    /* Transaction version (signed per protocol) */
+  tx_input_t *inputs; /* Array of inputs (owned) */
+  size_t input_count;
+  tx_output_t *outputs; /* Array of outputs (owned) */
+  size_t output_count;
+  uint32_t locktime;       /* Lock time */
+  echo_bool_t has_witness; /* True if any input has witness data */
 } tx_t;
 
 /*
@@ -169,8 +171,8 @@ void tx_free(tx_t *tx);
  *   ECHO_ERR_INVALID_FORMAT if transaction malformed
  *   ECHO_ERR_OUT_OF_MEMORY if allocation fails
  */
-echo_result_t tx_parse(const uint8_t *data, size_t data_len,
-                       tx_t *tx, size_t *consumed);
+echo_result_t tx_parse(const uint8_t *data, size_t data_len, tx_t *tx,
+                       size_t *consumed);
 
 /*
  * Compute the serialized size of a transaction.

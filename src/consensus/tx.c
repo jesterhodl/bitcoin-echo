@@ -8,6 +8,7 @@
 
 #include "tx.h"
 #include "serialize.h"
+#include "sha256.h"
 #include <stdlib.h>
 #include <string.h>
 

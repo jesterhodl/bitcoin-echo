@@ -1,7 +1,8 @@
 /**
  * Bitcoin Echo — Protocol Message Serialization
  *
- * Functions for encoding and decoding P2P protocol messages to/from wire format.
+ * Functions for encoding and decoding P2P protocol messages to/from wire
+ * format.
  *
  * All serialization follows Bitcoin protocol specification:
  * - Little-endian for all multi-byte integers except port numbers
@@ -19,8 +20,9 @@
 #ifndef ECHO_PROTOCOL_SERIALIZE_H
 #define ECHO_PROTOCOL_SERIALIZE_H
 
-#include "protocol.h"
 #include "echo_types.h"
+#include "protocol.h"
+#include <stdint.h>
 
 /**
  * Serialize message header to wire format.
@@ -36,7 +38,7 @@
  *   ECHO_ERR_BUFFER_TOO_SMALL if buf_len < 24
  */
 echo_result_t msg_header_serialize(const msg_header_t *header, uint8_t *buf,
-                                    size_t buf_len);
+                                   size_t buf_len);
 
 /**
  * Deserialize message header from wire format.
@@ -52,7 +54,7 @@ echo_result_t msg_header_serialize(const msg_header_t *header, uint8_t *buf,
  *   ECHO_ERR_TRUNCATED if buf_len < 24
  */
 echo_result_t msg_header_deserialize(const uint8_t *buf, size_t buf_len,
-                                      msg_header_t *header);
+                                     msg_header_t *header);
 
 /**
  * Serialize version message to wire format.
@@ -69,7 +71,7 @@ echo_result_t msg_header_deserialize(const uint8_t *buf, size_t buf_len,
  *   ECHO_ERR_BUFFER_TOO_SMALL if buffer is insufficient
  */
 echo_result_t msg_version_serialize(const msg_version_t *msg, uint8_t *buf,
-                                     size_t buf_len, size_t *written);
+                                    size_t buf_len, size_t *written);
 
 /**
  * Deserialize version message from wire format.
@@ -87,7 +89,7 @@ echo_result_t msg_version_serialize(const msg_version_t *msg, uint8_t *buf,
  *   ECHO_ERR_INVALID_FORMAT if data is malformed
  */
 echo_result_t msg_version_deserialize(const uint8_t *buf, size_t buf_len,
-                                       msg_version_t *msg, size_t *consumed);
+                                      msg_version_t *msg, size_t *consumed);
 
 /**
  * Serialize inv/getdata/notfound message to wire format.
@@ -116,14 +118,16 @@ echo_result_t msg_addr_deserialize(const uint8_t *buf, size_t buf_len,
 /**
  * Serialize getheaders/getblocks message to wire format.
  */
-echo_result_t msg_getheaders_serialize(const msg_getheaders_t *msg, uint8_t *buf,
-                                       size_t buf_len, size_t *written);
+echo_result_t msg_getheaders_serialize(const msg_getheaders_t *msg,
+                                       uint8_t *buf, size_t buf_len,
+                                       size_t *written);
 
 /**
  * Deserialize getheaders/getblocks message from wire format.
  */
 echo_result_t msg_getheaders_deserialize(const uint8_t *buf, size_t buf_len,
-                                         msg_getheaders_t *msg, size_t *consumed);
+                                         msg_getheaders_t *msg,
+                                         size_t *consumed);
 
 /**
  * Serialize headers message to wire format.
@@ -261,7 +265,8 @@ echo_result_t write_i64_le(uint8_t **ptr, const uint8_t *end, int64_t val);
 /**
  * Write raw bytes to buffer.
  */
-echo_result_t write_bytes(uint8_t **ptr, const uint8_t *end, const uint8_t *data, size_t len);
+echo_result_t write_bytes(uint8_t **ptr, const uint8_t *end,
+                          const uint8_t *data, size_t len);
 
 /**
  * Read a uint8_t from buffer.
@@ -271,36 +276,43 @@ echo_result_t read_u8(const uint8_t **ptr, const uint8_t *end, uint8_t *val);
 /**
  * Read a uint16_t from buffer (little-endian).
  */
-echo_result_t read_u16_le(const uint8_t **ptr, const uint8_t *end, uint16_t *val);
+echo_result_t read_u16_le(const uint8_t **ptr, const uint8_t *end,
+                          uint16_t *val);
 
 /**
  * Read a uint16_t from buffer (big-endian, for port numbers).
  */
-echo_result_t read_u16_be(const uint8_t **ptr, const uint8_t *end, uint16_t *val);
+echo_result_t read_u16_be(const uint8_t **ptr, const uint8_t *end,
+                          uint16_t *val);
 
 /**
  * Read a uint32_t from buffer (little-endian).
  */
-echo_result_t read_u32_le(const uint8_t **ptr, const uint8_t *end, uint32_t *val);
+echo_result_t read_u32_le(const uint8_t **ptr, const uint8_t *end,
+                          uint32_t *val);
 
 /**
  * Read a uint64_t from buffer (little-endian).
  */
-echo_result_t read_u64_le(const uint8_t **ptr, const uint8_t *end, uint64_t *val);
+echo_result_t read_u64_le(const uint8_t **ptr, const uint8_t *end,
+                          uint64_t *val);
 
 /**
  * Read a int32_t from buffer (little-endian).
  */
-echo_result_t read_i32_le(const uint8_t **ptr, const uint8_t *end, int32_t *val);
+echo_result_t read_i32_le(const uint8_t **ptr, const uint8_t *end,
+                          int32_t *val);
 
 /**
  * Read a int64_t from buffer (little-endian).
  */
-echo_result_t read_i64_le(const uint8_t **ptr, const uint8_t *end, int64_t *val);
+echo_result_t read_i64_le(const uint8_t **ptr, const uint8_t *end,
+                          int64_t *val);
 
 /**
  * Read raw bytes from buffer.
  */
-echo_result_t read_bytes(const uint8_t **ptr, const uint8_t *end, uint8_t *data, size_t len);
+echo_result_t read_bytes(const uint8_t **ptr, const uint8_t *end, uint8_t *data,
+                         size_t len);
 
 #endif /* ECHO_PROTOCOL_SERIALIZE_H */
