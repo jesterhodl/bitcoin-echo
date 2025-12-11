@@ -13,8 +13,18 @@
 #include "protocol.h"
 #include "protocol_serialize.h"
 #include "tx.h"
+#include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+
+/*
+ * C11 doesn't guarantee strnlen(); use a small, portable helper instead.
+ * (clangd on macOS may suggest a private <_string.h> include for strnlen.)
+ */
+static size_t bounded_strlen(const char *s, size_t max_len) {
+  const void *nul = memchr(s, '\0', max_len);
+  return nul ? (size_t)((const char *)nul - s) : max_len;
+}
 
 /* ========================================================================
  * Helper Functions for Reading/Writing Primitive Types
@@ -330,8 +340,9 @@ static echo_result_t write_net_addr(uint8_t **ptr, const uint8_t *end,
   return ECHO_OK;
 }
 
-static echo_result_t read_net_addr(const uint8_t **ptr, const uint8_t *end,
-                                   net_addr_t *addr) {
+static echo_result_t
+read_net_addr( // NOLINT function will be used in the near future
+    const uint8_t **ptr, const uint8_t *end, net_addr_t *addr) {
   echo_result_t res;
 
   /* Timestamp */
@@ -967,7 +978,7 @@ echo_result_t msg_reject_serialize(const msg_reject_t *msg, uint8_t *buf,
   echo_result_t res;
 
   /* Message (varint length + string) */
-  size_t msg_len = strnlen(msg->message, COMMAND_LEN);
+  size_t msg_len = bounded_strlen(msg->message, COMMAND_LEN);
   size_t varint_len;
   res = varint_write(ptr, (size_t)(end - ptr), msg_len, &varint_len);
   if (res != ECHO_OK)
