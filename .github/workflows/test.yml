@@ -2,9 +2,9 @@ name: Tests
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
 
 jobs:
   test:
@@ -14,46 +14,14 @@ jobs:
         os: [ubuntu-latest, macos-latest]
 
     steps:
-    - uses: actions/checkout@v4
-      with:
-        token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Build and run tests
-      run: |
-        make clean
-        make test 2>&1 | tee test_output.txt
+      - name: Build and run tests
+        run: |
+          make clean
+          make test 2>&1 | tee test_output.txt
 
-    - name: Count tests and update badge
-      if: matrix.os == 'ubuntu-latest' && github.ref == 'refs/heads/main' && github.event_name == 'push'
-      run: |
-        # Count "X/X tests passed" lines from all test outputs
-        TEST_COUNT=$(grep -oP '\d+/\d+ tests passed' test_output.txt | awk -F'/' '{sum+=$1} END {print sum}')
-
-        if [ -n "$TEST_COUNT" ] && [ "$TEST_COUNT" -gt 0 ]; then
-          echo "Found $TEST_COUNT total tests"
-
-          # Update README badge
-          sed -i "s/tests-[0-9]*%20passing/tests-${TEST_COUNT}%20passing/" README.md
-
-          # Check if README was actually modified
-          if git diff --quiet README.md; then
-            echo "No changes to README.md - badge already up to date"
-          else
-            echo "README.md updated with new test count"
-
-            # Configure git
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-
-            # Commit and push
-            git add README.md
-            git commit -m "ci: update test count badge to $TEST_COUNT tests [skip ci]"
-            git push
-          fi
-        else
-          echo "Could not determine test count from output"
-          exit 1
-        fi
-
-    - name: Build main binary
-      run: make all
+      - name: Build main binary
+        run: make all
