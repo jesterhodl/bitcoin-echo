@@ -84,7 +84,6 @@ bitcoin-echo/
 **After completing each session and all tests pass:**
 
 1. **Update roadmap** — Mark session complete in `bitcoinecho-org/ROADMAP.md` with status and test count
-2. **Update test badge** — Add new test count to total in `bitcoin-echo/README.md` badge
 3. **Commit bitcoin-echo** — Commit implementation changes with descriptive message
 4. **Commit bitcoinecho-org** — Commit roadmap update
 5. **Push both repos** — Push changes to GitHub
