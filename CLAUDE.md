@@ -21,6 +21,13 @@
 - Constants over magic numbers
 - Descriptive names over abbreviations
 
+**Include Hygiene (Critical for Ossification):**
+- Every symbol used must have its header explicitly included
+- No transitive include dependencies (don't rely on A→B→C chains)
+- Headers must be self-contained and independently compilable
+- Remove unused includes - they mislead future maintainers
+- If you use `uint32_t`, explicitly include `<stdint.h>` even if another header does
+
 ## Context Loading Strategy
 
 To avoid context window limits and ensure focused implementation:

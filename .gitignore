@@ -14,5 +14,10 @@ test/unit/test_*
 .vscode/
 .idea/
 
+# clangd files
+.clangd/
+.cache/
+compile_commands.json
+
 # macOS
 .DS_Store
