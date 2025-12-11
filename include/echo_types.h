@@ -70,6 +70,7 @@ typedef struct {
  */
 typedef enum {
     ECHO_OK = 0,
+    ECHO_DONE = 1,                   /* Iterator/query has no more items */
 
     /* General errors */
     ECHO_ERR_NULL_PARAM      = -1,   /* Required parameter was NULL */
@@ -77,6 +78,7 @@ typedef enum {
     ECHO_ERR_OUT_OF_MEMORY   = -3,   /* Memory allocation failed */
     ECHO_ERR_OUT_OF_RANGE    = -4,   /* Index out of valid range */
     ECHO_ERR_NOT_FOUND       = -5,   /* Item not found */
+    ECHO_ERR_INVALID         = -6,   /* Invalid operation or state */
 
     /* Parsing errors */
     ECHO_ERR_PARSE_FAILED    = -10,  /* General parse failure */
@@ -125,6 +127,10 @@ typedef enum {
     /* Platform errors */
     ECHO_ERR_PLATFORM_IO      = -70, /* I/O operation failed */
     ECHO_ERR_PLATFORM_NET     = -71, /* Network operation failed */
+
+    /* Database errors */
+    ECHO_ERR_DB               = -80, /* Database operation failed */
+    ECHO_ERR_IO               = -81, /* File I/O error */
 
 } echo_result_t;
 
