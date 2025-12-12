@@ -133,11 +133,25 @@ bitcoin-echo/
 
 **Test vectors:** Embed Bitcoin Core's consensus test suite; 100% pass required
 
+## Pre-Commit Quality Checklist (MANDATORY - Phase 8+)
+
+**Before committing ANY code, verify ALL of the following:**
+
+- [ ] **File saved** — Auto-formatting applied
+- [ ] **Zero clangd warnings** — Check VSCode Problems panel, address every warning
+- [ ] **Include hygiene verified** — All used symbols have headers explicitly included
+- [ ] **No unused includes** — Remove headers that aren't needed
+- [ ] **NOLINT justified** — Every suppression has clear explanatory comment
+- [ ] **Tests pass** — All unit tests passing
+
+**If you skip this checklist, the commit is INVALID and must be redone.**
+
 ## Session Completion Workflow
 
 **After completing each session and all tests pass:**
 
-1. **Update roadmap** — Mark session complete in `bitcoinecho-org/ROADMAP.md` with status and test count
+1. **Run quality checklist** — Verify all items in Pre-Commit Quality Checklist above
+2. **Update roadmap** — Mark session complete in `bitcoinecho-org/ROADMAP.md` with status and test count
 3. **Commit bitcoin-echo** — Commit implementation changes with descriptive message
 4. **Commit bitcoinecho-org** — Commit roadmap update
 5. **Push both repos** — Push changes to GitHub
