@@ -29,10 +29,10 @@
 #define ADDR_BROADCAST_INTERVAL_MS (24ULL * 60 * 60 * 1000)
 
 /* Maximum age for peer address to be considered fresh (3 hours in seconds) */
-#define ADDR_FRESH_THRESHOLD_SEC (3 * 60 * 60)
+#define ADDR_FRESH_THRESHOLD_SEC (3ULL * 60 * 60)
 
 /* Maximum age for peer address to be considered valid (7 days in seconds) */
-#define ADDR_MAX_AGE_SEC (7 * 24 * 60 * 60)
+#define ADDR_MAX_AGE_SEC (7ULL * 24 * 60 * 60)
 
 /**
  * Network type for seed selection

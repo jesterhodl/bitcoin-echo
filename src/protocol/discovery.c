@@ -3,6 +3,7 @@
  */
 
 #include "discovery.h"
+#include "echo_types.h"
 #include "platform.h"
 #include "protocol.h"
 #include <stdint.h>
@@ -100,8 +101,8 @@ static echo_bool_t is_unspecified(const uint8_t *ipv6) {
   }
 
   /* Check for IPv4-mapped 0.0.0.0 (::ffff:0.0.0.0) */
-  if (is_ipv4_mapped(ipv6) &&
-      ipv6[12] == 0 && ipv6[13] == 0 && ipv6[14] == 0 && ipv6[15] == 0) {
+  if (is_ipv4_mapped(ipv6) && ipv6[12] == 0 && ipv6[13] == 0 && ipv6[14] == 0 &&
+      ipv6[15] == 0) {
     return ECHO_TRUE;
   }
 
@@ -419,7 +420,7 @@ echo_result_t discovery_select_outbound_address(peer_addr_manager_t *manager,
 
     /* Penalty for failed attempts */
     if (entry->attempts > 0) {
-      score -= entry->attempts * 10000;
+      score -= (uint64_t)entry->attempts * 10000;
     }
 
     /* Consider this address if it's the best so far */
