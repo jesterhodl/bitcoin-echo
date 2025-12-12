@@ -1,0 +1,1812 @@
+/*
+ * Bitcoin Echo — RPC Interface Implementation
+ *
+ * Minimal JSON-RPC server for external access to the node.
+ *
+ * This implementation includes:
+ *   - Minimal embedded JSON parser (no external dependencies)
+ *   - JSON builder for constructing responses
+ *   - HTTP/1.0 request handling
+ *   - RPC method dispatch
+ *   - All required RPC methods
+ *
+ * Session 9.3: RPC Interface implementation.
+ *
+ * Build once. Build right. Stop.
+ */
+
+#include "rpc.h"
+#include "block.h"
+#include "chainstate.h"
+#include "consensus.h"
+#include "echo_config.h"
+#include "echo_types.h"
+#include "mempool.h"
+#include "node.h"
+#include "platform.h"
+#include "tx.h"
+#include <ctype.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/*
+ * ============================================================================
+ * INTERNAL CONSTANTS
+ * ============================================================================
+ */
+
+/* HTTP buffer sizes */
+#define HTTP_HEADER_MAX_SIZE 4096
+#define HTTP_READ_CHUNK_SIZE 1024
+
+/* Initial JSON builder capacity */
+#define JSON_BUILDER_INIT_CAP 1024
+
+/*
+ * ============================================================================
+ * INTERNAL HELPERS
+ * ============================================================================
+ */
+
+/* Portable string duplicate (avoids POSIX str_dup dependency) */
+static char *str_dup(const char *s) {
+  if (s == NULL) {
+    return NULL;
+  }
+  size_t len = strlen(s) + 1;
+  char *copy = malloc(len);
+  if (copy != NULL) {
+    memcpy(copy, s, len);
+  }
+  return copy;
+}
+
+/*
+ * ============================================================================
+ * JSON PARSER IMPLEMENTATION
+ * ============================================================================
+ * A simple recursive descent JSON parser.
+ */
+
+/* Parser state */
+typedef struct {
+  const char *ptr;
+  const char *end;
+} json_parser_t;
+
+/* Forward declarations */
+static json_value_t *json_parse_value(json_parser_t *p);
+
+/* Skip whitespace */
+static void json_skip_ws(json_parser_t *p) {
+  while (p->ptr < p->end && isspace((unsigned char)*p->ptr)) {
+    p->ptr++;
+  }
+}
+
+/* Check and consume a character */
+static bool json_expect(json_parser_t *p, char c) {
+  json_skip_ws(p);
+  if (p->ptr < p->end && *p->ptr == c) {
+    p->ptr++;
+    return true;
+  }
+  return false;
+}
+
+/* Parse a string (including quotes) */
+static char *json_parse_string_raw(json_parser_t *p) {
+  json_skip_ws(p);
+  if (p->ptr >= p->end || *p->ptr != '"') {
+    return NULL;
+  }
+  p->ptr++; /* Skip opening quote */
+
+  /* Find string length and check for escapes */
+  const char *start = p->ptr;
+  size_t len = 0;
+  bool has_escapes = false;
+
+  while (p->ptr < p->end && *p->ptr != '"') {
+    if (*p->ptr == '\\') {
+      has_escapes = true;
+      p->ptr++;
+      if (p->ptr >= p->end) {
+        return NULL;
+      }
+    }
+    p->ptr++;
+    len++;
+  }
+
+  if (p->ptr >= p->end) {
+    return NULL;
+  }
+  p->ptr++; /* Skip closing quote */
+
+  /* Allocate and copy string */
+  char *str = malloc(len + 1);
+  if (str == NULL) {
+    return NULL;
+  }
+
+  if (!has_escapes) {
+    memcpy(str, start, len);
+    str[len] = '\0';
+  } else {
+    /* Unescape */
+    const char *src = start;
+    char *dst = str;
+    while (src < p->ptr - 1) {
+      if (*src == '\\') {
+        src++;
+        switch (*src) {
+        case '"':
+          *dst++ = '"';
+          break;
+        case '\\':
+          *dst++ = '\\';
+          break;
+        case '/':
+          *dst++ = '/';
+          break;
+        case 'b':
+          *dst++ = '\b';
+          break;
+        case 'f':
+          *dst++ = '\f';
+          break;
+        case 'n':
+          *dst++ = '\n';
+          break;
+        case 'r':
+          *dst++ = '\r';
+          break;
+        case 't':
+          *dst++ = '\t';
+          break;
+        case 'u':
+          /* Unicode escape - simplified: just skip it */
+          src += 4;
+          *dst++ = '?';
+          break;
+        default:
+          *dst++ = *src;
+        }
+        src++;
+      } else {
+        *dst++ = *src++;
+      }
+    }
+    *dst = '\0';
+  }
+
+  return str;
+}
+
+/* Parse a number */
+static json_value_t *json_parse_number(json_parser_t *p) {
+  json_skip_ws(p);
+
+  const char *start = p->ptr;
+
+  /* Handle negative sign */
+  if (p->ptr < p->end && *p->ptr == '-') {
+    p->ptr++;
+  }
+
+  /* Integer part */
+  if (p->ptr >= p->end || !isdigit((unsigned char)*p->ptr)) {
+    p->ptr = start;
+    return NULL;
+  }
+  while (p->ptr < p->end && isdigit((unsigned char)*p->ptr)) {
+    p->ptr++;
+  }
+
+  /* Fractional part */
+  if (p->ptr < p->end && *p->ptr == '.') {
+    p->ptr++;
+    while (p->ptr < p->end && isdigit((unsigned char)*p->ptr)) {
+      p->ptr++;
+    }
+  }
+
+  /* Exponent part */
+  if (p->ptr < p->end && (*p->ptr == 'e' || *p->ptr == 'E')) {
+    p->ptr++;
+    if (p->ptr < p->end && (*p->ptr == '+' || *p->ptr == '-')) {
+      p->ptr++;
+    }
+    while (p->ptr < p->end && isdigit((unsigned char)*p->ptr)) {
+      p->ptr++;
+    }
+  }
+
+  /* Parse the number */
+  size_t num_len = (size_t)(p->ptr - start);
+  char *num_str = malloc(num_len + 1);
+  if (num_str == NULL) {
+    return NULL;
+  }
+  memcpy(num_str, start, num_len);
+  num_str[num_len] = '\0';
+
+  double value = strtod(num_str, NULL);
+  free(num_str);
+
+  json_value_t *jv = malloc(sizeof(json_value_t));
+  if (jv == NULL) {
+    return NULL;
+  }
+  jv->type = JSON_NUMBER;
+  jv->u.number = value;
+  return jv;
+}
+
+/* Parse an object - recursion is required for nested JSON structures */
+static json_value_t *json_parse_object(json_parser_t *p) { // NOLINT(misc-no-recursion)
+  if (!json_expect(p, '{')) {
+    return NULL;
+  }
+
+  json_value_t *obj = malloc(sizeof(json_value_t));
+  if (obj == NULL) {
+    return NULL;
+  }
+  obj->type = JSON_OBJECT;
+  obj->u.object = NULL;
+
+  json_member_t **tail = &obj->u.object;
+
+  json_skip_ws(p);
+  if (p->ptr < p->end && *p->ptr == '}') {
+    p->ptr++;
+    return obj;
+  }
+
+  while (true) {
+    /* Parse key */
+    char *key = json_parse_string_raw(p);
+    if (key == NULL) {
+      json_free(obj);
+      return NULL;
+    }
+
+    /* Expect colon */
+    if (!json_expect(p, ':')) {
+      free(key);
+      json_free(obj);
+      return NULL;
+    }
+
+    /* Parse value */
+    json_value_t *value = json_parse_value(p);
+    if (value == NULL) {
+      free(key);
+      json_free(obj);
+      return NULL;
+    }
+
+    /* Add member */
+    json_member_t *member = malloc(sizeof(json_member_t));
+    if (member == NULL) {
+      free(key);
+      json_free(value);
+      json_free(obj);
+      return NULL;
+    }
+    member->key = key;
+    member->value = value;
+    member->next = NULL;
+    *tail = member;
+    tail = &member->next;
+
+    json_skip_ws(p);
+    if (p->ptr >= p->end) {
+      json_free(obj);
+      return NULL;
+    }
+
+    if (*p->ptr == '}') {
+      p->ptr++;
+      return obj;
+    }
+
+    if (*p->ptr != ',') {
+      json_free(obj);
+      return NULL;
+    }
+    p->ptr++;
+  }
+}
+
+/* Parse an array - recursion is required for nested JSON structures */
+static json_value_t *json_parse_array(json_parser_t *p) { // NOLINT(misc-no-recursion)
+  if (!json_expect(p, '[')) {
+    return NULL;
+  }
+
+  json_value_t *arr = malloc(sizeof(json_value_t));
+  if (arr == NULL) {
+    return NULL;
+  }
+  arr->type = JSON_ARRAY;
+  arr->u.array = NULL;
+
+  json_array_elem_t **tail = &arr->u.array;
+
+  json_skip_ws(p);
+  if (p->ptr < p->end && *p->ptr == ']') {
+    p->ptr++;
+    return arr;
+  }
+
+  while (true) {
+    /* Parse value */
+    json_value_t *value = json_parse_value(p);
+    if (value == NULL) {
+      json_free(arr);
+      return NULL;
+    }
+
+    /* Add element */
+    json_array_elem_t *elem = malloc(sizeof(json_array_elem_t));
+    if (elem == NULL) {
+      json_free(value);
+      json_free(arr);
+      return NULL;
+    }
+    elem->value = value;
+    elem->next = NULL;
+    *tail = elem;
+    tail = &elem->next;
+
+    json_skip_ws(p);
+    if (p->ptr >= p->end) {
+      json_free(arr);
+      return NULL;
+    }
+
+    if (*p->ptr == ']') {
+      p->ptr++;
+      return arr;
+    }
+
+    if (*p->ptr != ',') {
+      json_free(arr);
+      return NULL;
+    }
+    p->ptr++;
+  }
+}
+
+/* Parse any value - recursion is required for nested JSON structures */
+static json_value_t *json_parse_value(json_parser_t *p) { // NOLINT(misc-no-recursion)
+  json_skip_ws(p);
+
+  if (p->ptr >= p->end) {
+    return NULL;
+  }
+
+  switch (*p->ptr) {
+  case '{':
+    return json_parse_object(p);
+  case '[':
+    return json_parse_array(p);
+  case '"': {
+    char *str = json_parse_string_raw(p);
+    if (str == NULL) {
+      return NULL;
+    }
+    json_value_t *jv = malloc(sizeof(json_value_t));
+    if (jv == NULL) {
+      free(str);
+      return NULL;
+    }
+    jv->type = JSON_STRING;
+    jv->u.string = str;
+    return jv;
+  }
+  case 't': /* true */
+    if (p->ptr + 4 <= p->end && strncmp(p->ptr, "true", 4) == 0) {
+      p->ptr += 4;
+      json_value_t *jv = malloc(sizeof(json_value_t));
+      if (jv == NULL) {
+        return NULL;
+      }
+      jv->type = JSON_BOOL;
+      jv->u.boolean = true;
+      return jv;
+    }
+    return NULL;
+  case 'f': /* false */
+    if (p->ptr + 5 <= p->end && strncmp(p->ptr, "false", 5) == 0) {
+      p->ptr += 5;
+      json_value_t *jv = malloc(sizeof(json_value_t));
+      if (jv == NULL) {
+        return NULL;
+      }
+      jv->type = JSON_BOOL;
+      jv->u.boolean = false;
+      return jv;
+    }
+    return NULL;
+  case 'n': /* null */
+    if (p->ptr + 4 <= p->end && strncmp(p->ptr, "null", 4) == 0) {
+      p->ptr += 4;
+      json_value_t *jv = malloc(sizeof(json_value_t));
+      if (jv == NULL) {
+        return NULL;
+      }
+      jv->type = JSON_NULL;
+      return jv;
+    }
+    return NULL;
+  default:
+    if (*p->ptr == '-' || isdigit((unsigned char)*p->ptr)) {
+      return json_parse_number(p);
+    }
+    return NULL;
+  }
+}
+
+/* Public API: parse JSON string */
+echo_result_t json_parse(const char *json, json_value_t **out) {
+  if (json == NULL || out == NULL) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  json_parser_t parser;
+  parser.ptr = json;
+  parser.end = json + strlen(json);
+
+  *out = json_parse_value(&parser);
+  if (*out == NULL) {
+    return ECHO_ERR_INVALID_FORMAT;
+  }
+
+  return ECHO_OK;
+}
+
+/* Free JSON value - recursion required for nested structures */
+void json_free(json_value_t *value) { // NOLINT(misc-no-recursion)
+  if (value == NULL) {
+    return;
+  }
+
+  switch (value->type) {
+  case JSON_STRING:
+    free(value->u.string);
+    break;
+  case JSON_OBJECT:
+    for (json_member_t *m = value->u.object; m != NULL;) {
+      json_member_t *next = m->next;
+      free(m->key);
+      json_free(m->value);
+      free(m);
+      m = next;
+    }
+    break;
+  case JSON_ARRAY:
+    for (json_array_elem_t *e = value->u.array; e != NULL;) {
+      json_array_elem_t *next = e->next;
+      json_free(e->value);
+      free(e);
+      e = next;
+    }
+    break;
+  default:
+    break;
+  }
+
+  free(value);
+}
+
+/* Get object member by key */
+json_value_t *json_object_get(const json_value_t *obj, const char *key) {
+  if (obj == NULL || obj->type != JSON_OBJECT || key == NULL) {
+    return NULL;
+  }
+
+  for (json_member_t *m = obj->u.object; m != NULL; m = m->next) {
+    if (strcmp(m->key, key) == 0) {
+      return m->value;
+    }
+  }
+
+  return NULL;
+}
+
+/* Get array element by index */
+json_value_t *json_array_get(const json_value_t *arr, size_t index) {
+  if (arr == NULL || arr->type != JSON_ARRAY) {
+    return NULL;
+  }
+
+  size_t i = 0;
+  for (json_array_elem_t *e = arr->u.array; e != NULL; e = e->next, i++) {
+    if (i == index) {
+      return e->value;
+    }
+  }
+
+  return NULL;
+}
+
+/* Get array length */
+size_t json_array_length(const json_value_t *arr) {
+  if (arr == NULL || arr->type != JSON_ARRAY) {
+    return 0;
+  }
+
+  size_t count = 0;
+  for (json_array_elem_t *e = arr->u.array; e != NULL; e = e->next) {
+    count++;
+  }
+
+  return count;
+}
+
+/*
+ * ============================================================================
+ * JSON BUILDER IMPLEMENTATION
+ * ============================================================================
+ */
+
+void json_builder_init(json_builder_t *builder) {
+  builder->buf = malloc(JSON_BUILDER_INIT_CAP);
+  builder->len = 0;
+  builder->cap = JSON_BUILDER_INIT_CAP;
+  if (builder->buf != NULL) {
+    builder->buf[0] = '\0';
+  }
+}
+
+void json_builder_free(json_builder_t *builder) {
+  free(builder->buf);
+  builder->buf = NULL;
+  builder->len = 0;
+  builder->cap = 0;
+}
+
+const char *json_builder_str(const json_builder_t *builder) {
+  return builder->buf;
+}
+
+/* Ensure capacity for additional bytes */
+static echo_result_t json_builder_ensure(json_builder_t *builder,
+                                         size_t additional) {
+  if (builder->buf == NULL) {
+    return ECHO_ERR_OUT_OF_MEMORY;
+  }
+
+  size_t needed = builder->len + additional + 1;
+  if (needed <= builder->cap) {
+    return ECHO_OK;
+  }
+
+  size_t new_cap = builder->cap * 2;
+  while (new_cap < needed) {
+    new_cap *= 2;
+  }
+
+  char *new_buf = realloc(builder->buf, new_cap);
+  if (new_buf == NULL) {
+    return ECHO_ERR_OUT_OF_MEMORY;
+  }
+
+  builder->buf = new_buf;
+  builder->cap = new_cap;
+  return ECHO_OK;
+}
+
+echo_result_t json_builder_append(json_builder_t *builder, const char *str) {
+  size_t len = strlen(str);
+  echo_result_t res = json_builder_ensure(builder, len);
+  if (res != ECHO_OK) {
+    return res;
+  }
+
+  memcpy(builder->buf + builder->len, str, len + 1);
+  builder->len += len;
+  return ECHO_OK;
+}
+
+echo_result_t json_builder_string(json_builder_t *builder, const char *str) {
+  /* Count needed space (with escapes) */
+  size_t needed = 2; /* quotes */
+  for (const char *p = str; *p; p++) {
+    switch (*p) {
+    case '"':
+    case '\\':
+    case '\b':
+    case '\f':
+    case '\n':
+    case '\r':
+    case '\t':
+      needed += 2;
+      break;
+    default:
+      if ((unsigned char)*p < 0x20) {
+        needed += 6; /* \uXXXX */
+      } else {
+        needed++;
+      }
+    }
+  }
+
+  echo_result_t res = json_builder_ensure(builder, needed);
+  if (res != ECHO_OK) {
+    return res;
+  }
+
+  char *out = builder->buf + builder->len;
+  *out++ = '"';
+
+  for (const char *p = str; *p; p++) {
+    switch (*p) {
+    case '"':
+      *out++ = '\\';
+      *out++ = '"';
+      break;
+    case '\\':
+      *out++ = '\\';
+      *out++ = '\\';
+      break;
+    case '\b':
+      *out++ = '\\';
+      *out++ = 'b';
+      break;
+    case '\f':
+      *out++ = '\\';
+      *out++ = 'f';
+      break;
+    case '\n':
+      *out++ = '\\';
+      *out++ = 'n';
+      break;
+    case '\r':
+      *out++ = '\\';
+      *out++ = 'r';
+      break;
+    case '\t':
+      *out++ = '\\';
+      *out++ = 't';
+      break;
+    default:
+      if ((unsigned char)*p < 0x20) {
+        /* NOLINTBEGIN(cert-err33-c) - snprintf return checked implicitly */
+        snprintf(out, 7, "\\u%04x", (unsigned char)*p);
+        /* NOLINTEND(cert-err33-c) */
+        out += 6;
+      } else {
+        *out++ = *p;
+      }
+    }
+  }
+
+  *out++ = '"';
+  *out = '\0';
+  builder->len = (size_t)(out - builder->buf);
+  return ECHO_OK;
+}
+
+echo_result_t json_builder_number(json_builder_t *builder, double num) {
+  char buf[64];
+  snprintf(buf, sizeof(buf), "%.17g", num);
+  return json_builder_append(builder, buf);
+}
+
+echo_result_t json_builder_int(json_builder_t *builder, int64_t num) {
+  char buf[32];
+  snprintf(buf, sizeof(buf), "%lld", (long long)num);
+  return json_builder_append(builder, buf);
+}
+
+echo_result_t json_builder_uint(json_builder_t *builder, uint64_t num) {
+  char buf[32];
+  snprintf(buf, sizeof(buf), "%llu", (unsigned long long)num);
+  return json_builder_append(builder, buf);
+}
+
+echo_result_t json_builder_bool(json_builder_t *builder, bool value) {
+  return json_builder_append(builder, value ? "true" : "false");
+}
+
+echo_result_t json_builder_null(json_builder_t *builder) {
+  return json_builder_append(builder, "null");
+}
+
+echo_result_t json_builder_hex(json_builder_t *builder, const uint8_t *data,
+                               size_t len) {
+  static const char hex_chars[] = "0123456789abcdef";
+
+  size_t needed = len * 2 + 2; /* quotes + hex */
+  echo_result_t res = json_builder_ensure(builder, needed);
+  if (res != ECHO_OK) {
+    return res;
+  }
+
+  char *out = builder->buf + builder->len;
+  *out++ = '"';
+
+  for (size_t i = 0; i < len; i++) {
+    *out++ = hex_chars[(data[i] >> 4) & 0x0F];
+    *out++ = hex_chars[data[i] & 0x0F];
+  }
+
+  *out++ = '"';
+  *out = '\0';
+  builder->len = (size_t)(out - builder->buf);
+  return ECHO_OK;
+}
+
+/*
+ * ============================================================================
+ * RPC REQUEST/RESPONSE
+ * ============================================================================
+ */
+
+echo_result_t rpc_request_parse(const char *json, rpc_request_t *req) {
+  if (json == NULL || req == NULL) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  memset(req, 0, sizeof(*req));
+
+  json_value_t *root = NULL;
+  echo_result_t res = json_parse(json, &root);
+  if (res != ECHO_OK) {
+    return res;
+  }
+
+  if (root->type != JSON_OBJECT) {
+    json_free(root);
+    return ECHO_ERR_INVALID_FORMAT;
+  }
+
+  /* Get method (required) */
+  json_value_t *method = json_object_get(root, "method");
+  if (method == NULL || method->type != JSON_STRING) {
+    json_free(root);
+    return ECHO_ERR_INVALID_FORMAT;
+  }
+  req->method = str_dup(method->u.string);
+  if (req->method == NULL) {
+    json_free(root);
+    return ECHO_ERR_OUT_OF_MEMORY;
+  }
+
+  /* Get id (optional, can be string or number) */
+  json_value_t *id = json_object_get(root, "id");
+  if (id != NULL) {
+    if (id->type == JSON_STRING) {
+      req->id = str_dup(id->u.string);
+    } else if (id->type == JSON_NUMBER) {
+      char buf[32];
+      snprintf(buf, sizeof(buf), "%.0f", id->u.number);
+      req->id = str_dup(buf);
+    } else if (id->type == JSON_NULL) {
+      req->id = NULL;
+    }
+  }
+
+  /* Get params (optional, can be array or object) */
+  json_value_t *params = json_object_get(root, "params");
+  if (params != NULL) {
+    /* Don't free params - we transfer ownership */
+    req->params = params;
+    /* Detach from root by setting to NULL in the original object */
+    for (json_member_t *m = root->u.object; m != NULL; m = m->next) {
+      if (strcmp(m->key, "params") == 0) {
+        m->value = NULL;
+        break;
+      }
+    }
+  }
+
+  json_free(root);
+  return ECHO_OK;
+}
+
+void rpc_request_free(rpc_request_t *req) {
+  if (req == NULL) {
+    return;
+  }
+  free(req->id);
+  free(req->method);
+  json_free(req->params);
+  memset(req, 0, sizeof(*req));
+}
+
+echo_result_t rpc_response_success(const char *id, const char *result,
+                                   json_builder_t *builder) {
+  json_builder_init(builder);
+
+  json_builder_append(builder, "{\"result\":");
+  if (result != NULL && result[0] != '\0') {
+    json_builder_append(builder, result);
+  } else {
+    json_builder_null(builder);
+  }
+
+  json_builder_append(builder, ",\"error\":null,\"id\":");
+  if (id != NULL) {
+    json_builder_string(builder, id);
+  } else {
+    json_builder_null(builder);
+  }
+  json_builder_append(builder, "}");
+
+  return ECHO_OK;
+}
+
+echo_result_t rpc_response_error(const char *id, int code, const char *message,
+                                 json_builder_t *builder) {
+  json_builder_init(builder);
+
+  json_builder_append(builder, "{\"result\":null,\"error\":{\"code\":");
+  json_builder_int(builder, code);
+  json_builder_append(builder, ",\"message\":");
+  json_builder_string(builder, message);
+  json_builder_append(builder, "},\"id\":");
+  if (id != NULL) {
+    json_builder_string(builder, id);
+  } else {
+    json_builder_null(builder);
+  }
+  json_builder_append(builder, "}");
+
+  return ECHO_OK;
+}
+
+/*
+ * ============================================================================
+ * RPC SERVER STRUCTURE
+ * ============================================================================
+ */
+
+struct rpc_server {
+  plat_socket_t *listen_sock;
+  node_t *node;
+  uint16_t port;
+  bool running;
+};
+
+void rpc_config_init(rpc_config_t *config) {
+  if (config == NULL) {
+    return;
+  }
+  config->port = RPC_DEFAULT_PORT;
+  config->bind_addr = NULL; /* Default to localhost */
+}
+
+rpc_server_t *rpc_server_create(const rpc_config_t *config, node_t *node) {
+  if (node == NULL) {
+    return NULL;
+  }
+
+  rpc_server_t *server = calloc(1, sizeof(rpc_server_t));
+  if (server == NULL) {
+    return NULL;
+  }
+
+  server->node = node;
+  server->port = config ? config->port : RPC_DEFAULT_PORT;
+  server->listen_sock = NULL;
+  server->running = false;
+
+  return server;
+}
+
+echo_result_t rpc_server_start(rpc_server_t *server) {
+  if (server == NULL) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  if (server->running) {
+    return ECHO_OK; /* Already running */
+  }
+
+  /* Allocate and create listening socket */
+  server->listen_sock = plat_socket_alloc();
+  if (server->listen_sock == NULL) {
+    return ECHO_ERR_OUT_OF_MEMORY;
+  }
+
+  int res = plat_socket_create(server->listen_sock);
+  if (res != PLAT_OK) {
+    plat_socket_free(server->listen_sock);
+    server->listen_sock = NULL;
+    return ECHO_ERR_PLATFORM_IO;
+  }
+
+  /* Bind and listen */
+  res = plat_socket_listen(server->listen_sock, server->port, RPC_BACKLOG);
+  if (res != PLAT_OK) {
+    plat_socket_close(server->listen_sock);
+    plat_socket_free(server->listen_sock);
+    server->listen_sock = NULL;
+    return ECHO_ERR_PLATFORM_IO;
+  }
+
+  server->running = true;
+  return ECHO_OK;
+}
+
+/*
+ * ============================================================================
+ * HTTP REQUEST HANDLING
+ * ============================================================================
+ */
+
+/* Simple HTTP request parser */
+typedef struct {
+  char method[16];
+  char path[256];
+  size_t content_length;
+  const char *body;
+} http_request_t;
+
+/* Parse HTTP request headers */
+static echo_result_t http_parse_request(const char *data, size_t len,
+                                        http_request_t *req) {
+  (void)len; /* Used implicitly by string functions */
+  memset(req, 0, sizeof(*req));
+
+  /* Find end of first line */
+  const char *line_end = strchr(data, '\r');
+  if (line_end == NULL) {
+    return ECHO_ERR_INVALID_FORMAT;
+  }
+
+  /* Parse request line: METHOD PATH HTTP/x.x */
+  /* NOLINTBEGIN(cert-err34-c,clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling)
+   * sscanf is correct here: we limit field widths (%15s, %255s match buffer
+   * sizes) and check return value. sscanf_s is not portable C11. */
+  if (sscanf(data, "%15s %255s", req->method, req->path) != 2) {
+    return ECHO_ERR_INVALID_FORMAT;
+  }
+  /* NOLINTEND(cert-err34-c,clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling)
+   */
+
+  /* Find Content-Length header */
+  const char *cl = strstr(data, "Content-Length:");
+  if (cl == NULL) {
+    cl = strstr(data, "content-length:");
+  }
+  if (cl != NULL) {
+    /* NOLINTBEGIN(cert-err34-c,clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling)
+     * sscanf is correct here: parsing numeric value into size_t, return value
+     * checked. sscanf_s is not portable C11. */
+    if (sscanf(cl, "%*[^:]: %zu", &req->content_length) != 1) {
+      req->content_length = 0;
+    }
+    /* NOLINTEND(cert-err34-c,clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling)
+     */
+  }
+
+  /* Find body (after \r\n\r\n) */
+  const char *body = strstr(data, "\r\n\r\n");
+  if (body != NULL) {
+    req->body = body + 4;
+  }
+
+  return ECHO_OK;
+}
+
+/* Send HTTP response */
+static void http_send_response(plat_socket_t *sock, int status,
+                               const char *status_text, const char *body) {
+  char header[512];
+  size_t body_len = body ? strlen(body) : 0;
+
+  int header_len = snprintf(header, sizeof(header),
+                            "HTTP/1.0 %d %s\r\n"
+                            "Content-Type: application/json\r\n"
+                            "Content-Length: %zu\r\n"
+                            "Connection: close\r\n"
+                            "\r\n",
+                            status, status_text, body_len);
+
+  plat_socket_send(sock, header, (size_t)header_len);
+  if (body != NULL && body_len > 0) {
+    plat_socket_send(sock, body, body_len);
+  }
+}
+
+/*
+ * ============================================================================
+ * RPC METHOD DISPATCH
+ * ============================================================================
+ */
+
+/* Method dispatch table entry */
+typedef struct {
+  const char *name;
+  echo_result_t (*handler)(node_t *node, const json_value_t *params,
+                           json_builder_t *builder);
+} rpc_method_entry_t;
+
+/* Method dispatch table */
+static const rpc_method_entry_t rpc_methods[] = {
+    {"getblockchaininfo", rpc_getblockchaininfo},
+    {"getblock", rpc_getblock},
+    {"getblockhash", rpc_getblockhash},
+    {"getrawtransaction", rpc_getrawtransaction},
+    {"sendrawtransaction", rpc_sendrawtransaction},
+    {"getblocktemplate", rpc_getblocktemplate},
+    {"submitblock", rpc_submitblock},
+    {NULL, NULL}};
+
+/* Find method handler */
+static echo_result_t (*rpc_find_method(const char *name))(node_t *,
+                                                          const json_value_t *,
+                                                          json_builder_t *) {
+  for (size_t i = 0; rpc_methods[i].name != NULL; i++) {
+    if (strcmp(rpc_methods[i].name, name) == 0) {
+      return rpc_methods[i].handler;
+    }
+  }
+  return NULL;
+}
+
+/* Handle a single RPC request */
+static void rpc_handle_request(rpc_server_t *server, plat_socket_t *client_sock,
+                               const char *body) {
+  json_builder_t response;
+
+  /* Parse RPC request */
+  rpc_request_t req;
+  echo_result_t res = rpc_request_parse(body, &req);
+  if (res != ECHO_OK) {
+    rpc_response_error(NULL, RPC_ERR_PARSE_ERROR, "Parse error", &response);
+    http_send_response(client_sock, 200, "OK", json_builder_str(&response));
+    json_builder_free(&response);
+    return;
+  }
+
+  /* Find and execute method */
+  echo_result_t (*handler)(node_t *, const json_value_t *, json_builder_t *) =
+      rpc_find_method(req.method);
+
+  if (handler == NULL) {
+    rpc_response_error(req.id, RPC_ERR_METHOD_NOT_FOUND, "Method not found",
+                       &response);
+  } else {
+    json_builder_t result;
+    json_builder_init(&result);
+
+    res = handler(server->node, req.params, &result);
+
+    if (res == ECHO_OK) {
+      rpc_response_success(req.id, json_builder_str(&result), &response);
+    } else {
+      /* Handler sets its own error - extract it from result */
+      rpc_response_error(req.id, RPC_ERR_INTERNAL_ERROR, "Internal error",
+                         &response);
+    }
+
+    json_builder_free(&result);
+  }
+
+  http_send_response(client_sock, 200, "OK", json_builder_str(&response));
+  json_builder_free(&response);
+  rpc_request_free(&req);
+}
+
+echo_result_t rpc_server_process(rpc_server_t *server) {
+  if (server == NULL || !server->running) {
+    return ECHO_ERR_INVALID_STATE;
+  }
+
+  /* Allocate client socket */
+  plat_socket_t *client_sock = plat_socket_alloc();
+  if (client_sock == NULL) {
+    return ECHO_ERR_OUT_OF_MEMORY;
+  }
+
+  /* Check for new connection (blocking, but will timeout) */
+  int res = plat_socket_accept(server->listen_sock, client_sock);
+  if (res != PLAT_OK) {
+    plat_socket_free(client_sock);
+    return ECHO_OK; /* No pending connection */
+  }
+
+  /* Read HTTP request */
+  char buf[RPC_MAX_REQUEST_SIZE];
+  size_t total_read = 0;
+
+  while (total_read < sizeof(buf) - 1) {
+    int n =
+        plat_socket_recv(client_sock, buf + total_read, HTTP_READ_CHUNK_SIZE);
+    if (n <= 0) {
+      break;
+    }
+    total_read += (size_t)n;
+    buf[total_read] = '\0';
+
+    /* Check if we have complete request */
+    if (strstr(buf, "\r\n\r\n") != NULL) {
+      /* Check Content-Length */
+      const char *cl = strstr(buf, "Content-Length:");
+      if (cl == NULL) {
+        cl = strstr(buf, "content-length:");
+      }
+      if (cl != NULL) {
+        size_t content_length = 0;
+        /* NOLINTBEGIN(cert-err34-c,clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling)
+         * sscanf is correct here: parsing numeric value into size_t.
+         * If parse fails, content_length stays 0 which is safe. sscanf_s
+         * is not portable C11. */
+        sscanf(cl, "%*[^:]: %zu", &content_length);
+        /* NOLINTEND(cert-err34-c,clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling)
+         */
+
+        const char *body_start = strstr(buf, "\r\n\r\n") + 4;
+        size_t header_len = (size_t)(body_start - buf);
+        size_t body_received = total_read - header_len;
+
+        if (body_received >= content_length) {
+          break; /* Complete request */
+        }
+      } else {
+        break; /* No Content-Length, assume complete */
+      }
+    }
+  }
+
+  /* Parse HTTP request */
+  http_request_t http_req;
+  echo_result_t parse_res = http_parse_request(buf, total_read, &http_req);
+
+  if (parse_res == ECHO_OK && strcmp(http_req.method, "POST") == 0 &&
+      http_req.body != NULL) {
+    rpc_handle_request(server, client_sock, http_req.body);
+  } else {
+    /* Bad request */
+    json_builder_t response;
+    rpc_response_error(NULL, RPC_ERR_INVALID_REQUEST, "Invalid request",
+                       &response);
+    http_send_response(client_sock, 400, "Bad Request",
+                       json_builder_str(&response));
+    json_builder_free(&response);
+  }
+
+  plat_socket_close(client_sock);
+  plat_socket_free(client_sock);
+  return ECHO_OK;
+}
+
+echo_result_t rpc_server_stop(rpc_server_t *server) {
+  if (server == NULL) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  if (!server->running) {
+    return ECHO_OK;
+  }
+
+  if (server->listen_sock != NULL) {
+    plat_socket_close(server->listen_sock);
+    plat_socket_free(server->listen_sock);
+    server->listen_sock = NULL;
+  }
+
+  server->running = false;
+  return ECHO_OK;
+}
+
+void rpc_server_destroy(rpc_server_t *server) {
+  if (server == NULL) {
+    return;
+  }
+
+  rpc_server_stop(server);
+  free(server);
+}
+
+bool rpc_server_is_running(const rpc_server_t *server) {
+  return server != NULL && server->running;
+}
+
+uint16_t rpc_server_get_port(const rpc_server_t *server) {
+  if (server == NULL || !server->running) {
+    return 0;
+  }
+  return server->port;
+}
+
+/*
+ * ============================================================================
+ * UTILITY FUNCTIONS
+ * ============================================================================
+ */
+
+/* Hex character to value */
+static int hex_char_value(char c) {
+  if (c >= '0' && c <= '9') {
+    return c - '0';
+  }
+  if (c >= 'a' && c <= 'f') {
+    return 10 + (c - 'a');
+  }
+  if (c >= 'A' && c <= 'F') {
+    return 10 + (c - 'A');
+  }
+  return -1;
+}
+
+echo_result_t rpc_hex_decode(const char *hex, uint8_t *out, size_t out_len,
+                             size_t *written) {
+  if (hex == NULL || out == NULL) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  size_t hex_len = strlen(hex);
+  if (hex_len % 2 != 0) {
+    return ECHO_ERR_INVALID_FORMAT;
+  }
+
+  size_t bytes = hex_len / 2;
+  if (bytes > out_len) {
+    return ECHO_ERR_BUFFER_TOO_SMALL;
+  }
+
+  for (size_t i = 0; i < bytes; i++) {
+    int hi = hex_char_value(hex[i * 2]);
+    int lo = hex_char_value(hex[i * 2 + 1]);
+    if (hi < 0 || lo < 0) {
+      return ECHO_ERR_INVALID_FORMAT;
+    }
+    out[i] = (uint8_t)((hi << 4) | lo);
+  }
+
+  if (written) {
+    *written = bytes;
+  }
+  return ECHO_OK;
+}
+
+void rpc_format_hash(const hash256_t *hash, char *out) {
+  static const char hex_chars[] = "0123456789abcdef";
+
+  /* Bitcoin displays hashes in reverse byte order */
+  for (int i = 31; i >= 0; i--) {
+    *out++ = hex_chars[(hash->bytes[i] >> 4) & 0x0F];
+    *out++ = hex_chars[hash->bytes[i] & 0x0F];
+  }
+  *out = '\0';
+}
+
+echo_result_t rpc_parse_hash(const char *hex, hash256_t *hash) {
+  if (hex == NULL || hash == NULL) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  if (strlen(hex) != 64) {
+    return ECHO_ERR_INVALID_FORMAT;
+  }
+
+  /* Parse in reverse (display order to internal order) */
+  for (size_t i = 0; i < 32; i++) {
+    size_t hex_idx = (31 - i) * 2;
+    int hi = hex_char_value(hex[hex_idx]);
+    int lo = hex_char_value(hex[hex_idx + 1]);
+    if (hi < 0 || lo < 0) {
+      return ECHO_ERR_INVALID_FORMAT;
+    }
+    hash->bytes[i] = (uint8_t)((hi << 4) | lo);
+  }
+
+  return ECHO_OK;
+}
+
+/*
+ * ============================================================================
+ * RPC METHOD IMPLEMENTATIONS
+ * ============================================================================
+ */
+
+/* getblockchaininfo */
+echo_result_t rpc_getblockchaininfo(node_t *node, const json_value_t *params,
+                                    json_builder_t *builder) {
+  (void)params; /* Unused */
+
+  if (node == NULL || builder == NULL) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  const consensus_engine_t *consensus = node_get_consensus_const(node);
+  if (consensus == NULL) {
+    return ECHO_ERR_INVALID_STATE;
+  }
+
+  /* Get chain info */
+  chain_tip_t tip;
+  consensus_get_chain_tip(consensus, &tip);
+
+  consensus_stats_t stats;
+  consensus_get_stats(consensus, &stats);
+
+  node_stats_t node_stats;
+  node_get_stats(node, &node_stats);
+
+  /* Format block hash */
+  char hash_hex[65];
+  rpc_format_hash(&tip.hash, hash_hex);
+
+  /* Format chainwork as hex */
+  char chainwork_hex[65];
+  rpc_format_hash((const hash256_t *)&tip.chainwork, chainwork_hex);
+
+  /* Build JSON response */
+  json_builder_append(builder, "{");
+
+  json_builder_append(builder, "\"chain\":");
+  json_builder_string(builder, ECHO_NETWORK_NAME);
+
+  json_builder_append(builder, ",\"blocks\":");
+  json_builder_uint(builder, tip.height);
+
+  json_builder_append(builder, ",\"headers\":");
+  json_builder_uint(builder, stats.block_index_count);
+
+  json_builder_append(builder, ",\"bestblockhash\":");
+  json_builder_string(builder, hash_hex);
+
+  json_builder_append(builder, ",\"difficulty\":");
+  /* Simplified difficulty calculation */
+  json_builder_number(builder, 1.0);
+
+  json_builder_append(builder, ",\"mediantime\":");
+  json_builder_uint(builder, 0); /* TODO: implement MTP query */
+
+  json_builder_append(builder, ",\"verificationprogress\":");
+  json_builder_number(builder, node_stats.sync_progress / 100.0);
+
+  json_builder_append(builder, ",\"initialblockdownload\":");
+  json_builder_bool(builder, node_stats.is_syncing);
+
+  json_builder_append(builder, ",\"chainwork\":");
+  json_builder_string(builder, chainwork_hex);
+
+  json_builder_append(builder, ",\"size_on_disk\":");
+  json_builder_uint(builder, 0); /* TODO: calculate disk usage */
+
+  json_builder_append(builder, ",\"pruned\":");
+  json_builder_bool(builder, false);
+
+  json_builder_append(builder, "}");
+
+  return ECHO_OK;
+}
+
+/* getblockhash */
+echo_result_t rpc_getblockhash(node_t *node, const json_value_t *params,
+                               json_builder_t *builder) {
+  if (node == NULL || builder == NULL) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  /* Get height parameter */
+  json_value_t *height_val = json_array_get(params, 0);
+  if (height_val == NULL || height_val->type != JSON_NUMBER) {
+    return ECHO_ERR_INVALID_PARAM;
+  }
+
+  uint32_t height = (uint32_t)height_val->u.number;
+
+  const consensus_engine_t *consensus = node_get_consensus_const(node);
+  if (consensus == NULL) {
+    return ECHO_ERR_INVALID_STATE;
+  }
+
+  hash256_t hash;
+  echo_result_t res = consensus_get_block_hash(consensus, height, &hash);
+  if (res != ECHO_OK) {
+    return res;
+  }
+
+  char hash_hex[65];
+  rpc_format_hash(&hash, hash_hex);
+  json_builder_string(builder, hash_hex);
+
+  return ECHO_OK;
+}
+
+/* getblock */
+echo_result_t rpc_getblock(node_t *node, const json_value_t *params,
+                           json_builder_t *builder) {
+  if (node == NULL || builder == NULL) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  /* Get blockhash parameter */
+  json_value_t *hash_val = json_array_get(params, 0);
+  if (hash_val == NULL || hash_val->type != JSON_STRING) {
+    return ECHO_ERR_INVALID_PARAM;
+  }
+
+  /* Get verbosity (default 1) */
+  int verbosity = 1;
+  json_value_t *verb_val = json_array_get(params, 1);
+  if (verb_val != NULL && verb_val->type == JSON_NUMBER) {
+    verbosity = (int)verb_val->u.number;
+  }
+
+  /* Parse block hash */
+  hash256_t block_hash;
+  echo_result_t res = rpc_parse_hash(hash_val->u.string, &block_hash);
+  if (res != ECHO_OK) {
+    return res;
+  }
+
+  /* Find block in index */
+  const consensus_engine_t *consensus = node_get_consensus_const(node);
+  const block_index_t *index =
+      consensus_lookup_block_index(consensus, &block_hash);
+  if (index == NULL) {
+    return ECHO_ERR_NOT_FOUND;
+  }
+
+  if (verbosity == 0) {
+    /* Return raw hex block */
+    /* TODO: Read block from storage and return hex */
+    json_builder_string(builder, "");
+    return ECHO_OK;
+  }
+
+  /* Build JSON response */
+  char hash_hex[65];
+  rpc_format_hash(&block_hash, hash_hex);
+
+  char prev_hash_hex[65];
+  rpc_format_hash(&index->prev_hash, prev_hash_hex);
+
+  json_builder_append(builder, "{");
+
+  json_builder_append(builder, "\"hash\":");
+  json_builder_string(builder, hash_hex);
+
+  json_builder_append(builder, ",\"confirmations\":");
+  uint32_t tip_height = consensus_get_height(consensus);
+  int64_t confirmations = (int64_t)tip_height - (int64_t)index->height + 1;
+  json_builder_int(builder, confirmations);
+
+  json_builder_append(builder, ",\"height\":");
+  json_builder_uint(builder, index->height);
+
+  json_builder_append(builder, ",\"version\":");
+  json_builder_int(builder, 1); /* Simplified */
+
+  json_builder_append(builder, ",\"time\":");
+  json_builder_uint(builder, index->timestamp);
+
+  json_builder_append(builder, ",\"mediantime\":");
+  json_builder_uint(builder, index->timestamp); /* Simplified */
+
+  json_builder_append(builder, ",\"bits\":");
+  char bits_hex[9];
+  snprintf(bits_hex, sizeof(bits_hex), "%08x", index->bits);
+  json_builder_string(builder, bits_hex);
+
+  json_builder_append(builder, ",\"difficulty\":");
+  json_builder_number(builder, 1.0); /* Simplified */
+
+  json_builder_append(builder, ",\"previousblockhash\":");
+  if (index->height > 0) {
+    json_builder_string(builder, prev_hash_hex);
+  } else {
+    json_builder_null(builder);
+  }
+
+  /* Next block hash (if exists) */
+  json_builder_append(builder, ",\"nextblockhash\":");
+  hash256_t next_hash;
+  res = consensus_get_block_hash(consensus, index->height + 1, &next_hash);
+  if (res == ECHO_OK) {
+    char next_hex[65];
+    rpc_format_hash(&next_hash, next_hex);
+    json_builder_string(builder, next_hex);
+  } else {
+    json_builder_null(builder);
+  }
+
+  json_builder_append(builder, ",\"nTx\":");
+  json_builder_uint(builder, 0); /* TODO: get tx count from storage */
+
+  json_builder_append(builder, "}");
+
+  return ECHO_OK;
+}
+
+/* getrawtransaction */
+echo_result_t rpc_getrawtransaction(node_t *node, const json_value_t *params,
+                                    json_builder_t *builder) {
+  if (node == NULL || builder == NULL) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  /* Get txid parameter */
+  json_value_t *txid_val = json_array_get(params, 0);
+  if (txid_val == NULL || txid_val->type != JSON_STRING) {
+    return ECHO_ERR_INVALID_PARAM;
+  }
+
+  /* Parse txid */
+  hash256_t txid;
+  echo_result_t res = rpc_parse_hash(txid_val->u.string, &txid);
+  if (res != ECHO_OK) {
+    return res;
+  }
+
+  /* Check mempool first */
+  const mempool_t *mp = node_get_mempool_const(node);
+  const mempool_entry_t *entry = mempool_lookup(mp, &txid);
+
+  if (entry != NULL) {
+    /* Found in mempool - serialize and return */
+    size_t tx_size = tx_serialize_size(&entry->tx, ECHO_TRUE);
+    uint8_t *tx_data = malloc(tx_size);
+    if (tx_data == NULL) {
+      return ECHO_ERR_OUT_OF_MEMORY;
+    }
+
+    size_t written;
+    res = tx_serialize(&entry->tx, ECHO_TRUE, tx_data, tx_size, &written);
+    if (res != ECHO_OK) {
+      free(tx_data);
+      return res;
+    }
+
+    json_builder_hex(builder, tx_data, written);
+    free(tx_data);
+    return ECHO_OK;
+  }
+
+  /* Not in mempool - would need to search blocks */
+  /* TODO: Implement transaction index for confirmed txs */
+  return ECHO_ERR_NOT_FOUND;
+}
+
+/* sendrawtransaction */
+echo_result_t rpc_sendrawtransaction(node_t *node, const json_value_t *params,
+                                     json_builder_t *builder) {
+  if (node == NULL || builder == NULL) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  /* Get hex parameter */
+  json_value_t *hex_val = json_array_get(params, 0);
+  if (hex_val == NULL || hex_val->type != JSON_STRING) {
+    return ECHO_ERR_INVALID_PARAM;
+  }
+
+  /* Decode hex */
+  size_t hex_len = strlen(hex_val->u.string);
+  size_t tx_max_len = hex_len / 2;
+  uint8_t *tx_data = malloc(tx_max_len);
+  if (tx_data == NULL) {
+    return ECHO_ERR_OUT_OF_MEMORY;
+  }
+
+  size_t tx_len;
+  echo_result_t res =
+      rpc_hex_decode(hex_val->u.string, tx_data, tx_max_len, &tx_len);
+  if (res != ECHO_OK) {
+    free(tx_data);
+    return res;
+  }
+
+  /* Parse transaction */
+  tx_t tx;
+  tx_init(&tx);
+  res = tx_parse(tx_data, tx_len, &tx, NULL);
+  free(tx_data);
+
+  if (res != ECHO_OK) {
+    return res;
+  }
+
+  /* Add to mempool */
+  mempool_t *mp = node_get_mempool(node);
+  mempool_accept_result_t accept_result;
+  res = mempool_add(mp, &tx, &accept_result);
+
+  if (res != ECHO_OK) {
+    tx_free(&tx);
+    return res;
+  }
+
+  /* Return txid */
+  hash256_t txid;
+  tx_compute_txid(&tx, &txid);
+  tx_free(&tx);
+
+  char txid_hex[65];
+  rpc_format_hash(&txid, txid_hex);
+  json_builder_string(builder, txid_hex);
+
+  return ECHO_OK;
+}
+
+/* getblocktemplate */
+echo_result_t rpc_getblocktemplate(node_t *node, const json_value_t *params,
+                                   json_builder_t *builder) {
+  (void)params; /* TODO: process template_request */
+
+  if (node == NULL || builder == NULL) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  const consensus_engine_t *consensus = node_get_consensus_const(node);
+
+  /* Get current tip */
+  chain_tip_t tip;
+  consensus_get_chain_tip(consensus, &tip);
+
+  char prev_hash[65];
+  rpc_format_hash(&tip.hash, prev_hash);
+
+  /* Get transactions from mempool */
+  const mempool_t *mp = node_get_mempool_const(node);
+  mempool_stats_t mp_stats;
+  mempool_get_stats(mp, &mp_stats);
+
+  json_builder_append(builder, "{");
+
+  json_builder_append(builder, "\"version\":");
+  json_builder_int(builder, 0x20000000); /* BIP9 version bits */
+
+  json_builder_append(builder, ",\"previousblockhash\":");
+  json_builder_string(builder, prev_hash);
+
+  json_builder_append(builder, ",\"transactions\":[");
+
+  /* Select transactions for block */
+  const mempool_entry_t *selected[1000];
+  size_t selected_count = 0;
+  mempool_select_for_block(mp, selected, 1000,
+                           BLOCK_MAX_WEIGHT - 4000, /* Reserve for coinbase */
+                           &selected_count);
+
+  satoshi_t total_fees = 0;
+  for (size_t i = 0; i < selected_count; i++) {
+    if (i > 0) {
+      json_builder_append(builder, ",");
+    }
+
+    const mempool_entry_t *entry = selected[i];
+    total_fees += entry->fee;
+
+    /* Serialize transaction data */
+    size_t tx_size = tx_serialize_size(&entry->tx, ECHO_TRUE);
+    uint8_t *tx_data = malloc(tx_size);
+    if (tx_data == NULL) {
+      continue;
+    }
+
+    size_t written;
+    if (tx_serialize(&entry->tx, ECHO_TRUE, tx_data, tx_size, &written) ==
+        ECHO_OK) {
+      char txid_hex[65];
+      rpc_format_hash(&entry->txid, txid_hex);
+
+      json_builder_append(builder, "{\"data\":");
+      json_builder_hex(builder, tx_data, written);
+      json_builder_append(builder, ",\"txid\":");
+      json_builder_string(builder, txid_hex);
+      json_builder_append(builder, ",\"fee\":");
+      json_builder_int(builder, entry->fee);
+      json_builder_append(builder, ",\"weight\":");
+      json_builder_uint(builder, entry->vsize * 4);
+      json_builder_append(builder, "}");
+    }
+    free(tx_data);
+  }
+
+  json_builder_append(builder, "]");
+
+  /* Coinbase value = subsidy + fees */
+  satoshi_t subsidy = 50 * 100000000LL; /* Start at 50 BTC */
+  uint32_t halvings = tip.height / 210000;
+  for (uint32_t i = 0; i < halvings && subsidy > 0; i++) {
+    subsidy /= 2;
+  }
+
+  json_builder_append(builder, ",\"coinbasevalue\":");
+  json_builder_int(builder, subsidy + total_fees);
+
+  json_builder_append(builder, ",\"target\":");
+  /* TODO: calculate proper target from bits */
+  json_builder_string(
+      builder, "00000000ffffffffffffffffffffffffffffffffffffffffffffffff");
+
+  json_builder_append(builder, ",\"mintime\":");
+  json_builder_uint(builder, 0); /* TODO: MTP + 1 */
+
+  json_builder_append(builder, ",\"curtime\":");
+  json_builder_uint(builder, (uint64_t)(plat_time_ms() / 1000));
+
+  json_builder_append(builder, ",\"bits\":");
+  char bits_hex[9];
+  snprintf(bits_hex, sizeof(bits_hex), "%08x",
+           0x1d00ffff); /* TODO: actual bits */
+  json_builder_string(builder, bits_hex);
+
+  json_builder_append(builder, ",\"height\":");
+  json_builder_uint(builder, tip.height + 1);
+
+  json_builder_append(builder, "}");
+
+  return ECHO_OK;
+}
+
+/* submitblock */
+echo_result_t rpc_submitblock(node_t *node, const json_value_t *params,
+                              json_builder_t *builder) {
+  if (node == NULL || builder == NULL) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  /* Get hex parameter */
+  json_value_t *hex_val = json_array_get(params, 0);
+  if (hex_val == NULL || hex_val->type != JSON_STRING) {
+    return ECHO_ERR_INVALID_PARAM;
+  }
+
+  /* Decode hex */
+  size_t hex_len = strlen(hex_val->u.string);
+  size_t block_max_len = hex_len / 2;
+  uint8_t *block_data = malloc(block_max_len);
+  if (block_data == NULL) {
+    return ECHO_ERR_OUT_OF_MEMORY;
+  }
+
+  size_t block_len;
+  echo_result_t res =
+      rpc_hex_decode(hex_val->u.string, block_data, block_max_len, &block_len);
+  if (res != ECHO_OK) {
+    free(block_data);
+    return res;
+  }
+
+  /* Parse block */
+  block_t block;
+  block_init(&block);
+  res = block_parse(block_data, block_len, &block, NULL);
+  free(block_data);
+
+  if (res != ECHO_OK) {
+    return res;
+  }
+
+  /* Validate and apply block */
+  consensus_engine_t *consensus = node_get_consensus(node);
+  consensus_result_t validation_result;
+  consensus_result_init(&validation_result);
+
+  bool valid = consensus_validate_block(consensus, &block, &validation_result);
+  if (!valid) {
+    block_free(&block);
+    json_builder_string(builder, "invalid");
+    return ECHO_OK;
+  }
+
+  res = consensus_apply_block(consensus, &block, &validation_result);
+  block_free(&block);
+
+  if (res != ECHO_OK) {
+    json_builder_string(builder, "rejected");
+    return ECHO_OK;
+  }
+
+  /* Success - null means accepted */
+  json_builder_null(builder);
+  return ECHO_OK;
+}

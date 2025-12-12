@@ -15,6 +15,7 @@
 #include "tx.h"
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 /*
@@ -340,9 +341,8 @@ static echo_result_t write_net_addr(uint8_t **ptr, const uint8_t *end,
   return ECHO_OK;
 }
 
-static echo_result_t
-read_net_addr( // NOLINT function will be used in the near future
-    const uint8_t **ptr, const uint8_t *end, net_addr_t *addr) {
+static echo_result_t read_net_addr(const uint8_t **ptr, const uint8_t *end,
+                                   net_addr_t *addr) {
   echo_result_t res;
 
   /* Timestamp */
@@ -725,24 +725,30 @@ echo_result_t msg_addr_deserialize(const uint8_t *buf, size_t buf_len,
   }
 
   msg->count = (size_t)count;
-  msg->addresses = NULL; /* Caller must allocate */
 
-  /* TODO(Session 9.3+): Implement full addr deserialization using read_net_addr()
-   * Currently this is a stub that only reads the count and calculates consumed bytes.
-   * When full peer discovery is needed, this should:
-   * 1. Allocate msg->addresses array (or use caller-provided buffer)
-   * 2. Loop through and call read_net_addr() for each address
-   * 3. Return the fully populated address list
-   * The read_net_addr() helper function is already implemented above.
-   */
+  /* Allocate addresses array if count > 0 */
+  if (msg->count > 0) {
+    msg->addresses = malloc(msg->count * sizeof(net_addr_t));
+    if (msg->addresses == NULL) {
+      return ECHO_ERR_OUT_OF_MEMORY;
+    }
+
+    /* Read each address */
+    for (size_t i = 0; i < msg->count; i++) {
+      res = read_net_addr(&ptr, end, &msg->addresses[i]);
+      if (res != ECHO_OK) {
+        free(msg->addresses);
+        msg->addresses = NULL;
+        msg->count = 0;
+        return res;
+      }
+    }
+  } else {
+    msg->addresses = NULL;
+  }
 
   if (consumed) {
-    /* Each address is 30 bytes (4 timestamp + 8 services + 16 ip + 2 port) */
-    size_t addr_bytes = msg->count * 30;
-    if (ptr + addr_bytes > end) {
-      return ECHO_ERR_TRUNCATED;
-    }
-    *consumed = (size_t)(ptr - buf) + addr_bytes;
+    *consumed = (size_t)(ptr - buf);
   }
 
   return ECHO_OK;
