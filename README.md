@@ -14,7 +14,7 @@ A complete, ossified implementation of the Bitcoin protocol in pure C.
 
 ## Status
 
-**Phase 7: Storage Layer** — Complete
+**Phase 8: Protocol Layer** — Complete
 
 | Component | Status |
 |-----------|--------|
@@ -56,8 +56,16 @@ A complete, ossified implementation of the Bitcoin protocol in pure C.
 | SQLite Integration | Complete |
 | UTXO Database | Complete |
 | Block Index Database | Complete |
+| **Protocol Layer** | |
+| P2P Message Structures | Complete |
+| Message Serialization | Complete |
+| Peer Connection Management | Complete |
+| Peer Discovery | Complete |
+| Inventory/Data Relay | Complete |
+| Headers-First Sync | Complete |
+| Transaction Mempool | Complete |
 
-Next: [Phase 8 — Protocol Layer](https://github.com/bitcoinecho/bitcoinecho-org/blob/main/ROADMAP.md#phase-8-protocol-layer)
+Next: [Phase 9 — Application Layer](https://github.com/bitcoinecho/bitcoinecho-org/blob/main/ROADMAP.md#phase-9-application-layer)
 
 ## Building
 
