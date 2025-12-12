@@ -22,10 +22,8 @@
  */
 
 #include "node.h"
-#include "block.h"
 #include "block_index_db.h"
 #include "blocks_storage.h"
-#include "chainstate.h"
 #include "consensus.h"
 #include "discovery.h"
 #include "echo_config.h"
@@ -231,8 +229,7 @@ static echo_result_t node_init_directories(node_t *node) {
   }
 
   /* Create blocks directory */
-  ret =
-      snprintf(path, sizeof(path), "%s/%s", node->config.data_dir, "blocks");
+  ret = snprintf(path, sizeof(path), "%s/%s", node->config.data_dir, "blocks");
   if (ret < 0 || (size_t)ret >= sizeof(path)) {
     return ECHO_ERR_BUFFER_TOO_SMALL;
   }
