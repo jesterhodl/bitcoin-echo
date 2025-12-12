@@ -1,0 +1,1048 @@
+/**
+ * Bitcoin Echo — Headers-First Initial Block Download Implementation
+ *
+ * This module implements headers-first sync as specified in whitepaper §7.3.
+ *
+ * Build once. Build right. Stop.
+ */
+
+#include "sync.h"
+#include "block.h"
+#include "chainstate.h"
+#include "echo_types.h"
+#include "peer.h"
+#include "platform.h"
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* ============================================================================
+ * Internal Structures
+ * ============================================================================
+ */
+
+/**
+ * Block queue entry
+ */
+typedef struct {
+  hash256_t hash;
+  uint32_t height;
+  peer_t *assigned_peer;
+  uint64_t request_time;
+  bool in_flight;
+  uint32_t retry_count;
+  bool valid; /* Entry is in use */
+} block_queue_entry_t;
+
+/**
+ * Block download queue implementation
+ */
+struct block_queue {
+  block_queue_entry_t *entries;
+  size_t capacity;
+  size_t count;
+  size_t pending_count;
+  size_t inflight_count;
+};
+
+/**
+ * Maximum sync peers to track
+ */
+#define SYNC_MAX_PEERS 128
+
+/**
+ * Sync manager implementation
+ */
+struct sync_manager {
+  /* Chain state */
+  chainstate_t *chainstate;
+
+  /* Callbacks */
+  sync_callbacks_t callbacks;
+
+  /* Current sync mode */
+  sync_mode_t mode;
+
+  /* Peer sync states */
+  peer_sync_state_t peers[SYNC_MAX_PEERS];
+  size_t peer_count;
+
+  /* Block download queue */
+  block_queue_t *block_queue;
+
+  /* Sync timing */
+  uint64_t start_time;
+  uint64_t last_progress_time;
+
+  /* Stats */
+  uint32_t headers_received_total;
+  uint32_t blocks_received_total;
+  uint32_t blocks_validated_total;
+
+  /* Best known header chain */
+  block_index_t *best_header;
+};
+
+/* ============================================================================
+ * Block Queue Implementation
+ * ============================================================================
+ */
+
+block_queue_t *block_queue_create(size_t capacity) {
+  if (capacity == 0) {
+    return NULL;
+  }
+
+  block_queue_t *queue = calloc(1, sizeof(block_queue_t));
+  if (!queue) {
+    return NULL;
+  }
+
+  queue->entries = calloc(capacity, sizeof(block_queue_entry_t));
+  if (!queue->entries) {
+    free(queue);
+    return NULL;
+  }
+
+  queue->capacity = capacity;
+  queue->count = 0;
+  queue->pending_count = 0;
+  queue->inflight_count = 0;
+
+  return queue;
+}
+
+void block_queue_destroy(block_queue_t *queue) {
+  if (!queue) {
+    return;
+  }
+  free(queue->entries);
+  free(queue);
+}
+
+echo_result_t block_queue_add(block_queue_t *queue, const hash256_t *hash,
+                              uint32_t height) {
+  if (!queue || !hash) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  /* Check for duplicate */
+  for (size_t i = 0; i < queue->capacity; i++) {
+    if (queue->entries[i].valid &&
+        memcmp(&queue->entries[i].hash, hash, sizeof(hash256_t)) == 0) {
+      return ECHO_ERR_EXISTS;
+    }
+  }
+
+  /* Check capacity */
+  if (queue->count >= queue->capacity) {
+    return ECHO_ERR_FULL;
+  }
+
+  /* Find empty slot */
+  for (size_t i = 0; i < queue->capacity; i++) {
+    if (!queue->entries[i].valid) {
+      queue->entries[i].hash = *hash;
+      queue->entries[i].height = height;
+      queue->entries[i].assigned_peer = NULL;
+      queue->entries[i].request_time = 0;
+      queue->entries[i].in_flight = false;
+      queue->entries[i].retry_count = 0;
+      queue->entries[i].valid = true;
+      queue->count++;
+      queue->pending_count++;
+      return ECHO_OK;
+    }
+  }
+
+  return ECHO_ERR_FULL;
+}
+
+echo_result_t block_queue_next(block_queue_t *queue, hash256_t *hash,
+                               uint32_t *height) {
+  if (!queue || !hash || !height) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  /* Find lowest-height unassigned block */
+  uint32_t min_height = UINT32_MAX;
+  size_t min_idx = SIZE_MAX;
+
+  for (size_t i = 0; i < queue->capacity; i++) {
+    if (queue->entries[i].valid && !queue->entries[i].in_flight) {
+      if (queue->entries[i].height < min_height) {
+        min_height = queue->entries[i].height;
+        min_idx = i;
+      }
+    }
+  }
+
+  if (min_idx == SIZE_MAX) {
+    return ECHO_ERR_NOT_FOUND;
+  }
+
+  *hash = queue->entries[min_idx].hash;
+  *height = queue->entries[min_idx].height;
+  return ECHO_OK;
+}
+
+void block_queue_assign(block_queue_t *queue, const hash256_t *hash,
+                        peer_t *peer) {
+  if (!queue || !hash || !peer) {
+    return;
+  }
+
+  for (size_t i = 0; i < queue->capacity; i++) {
+    if (queue->entries[i].valid &&
+        memcmp(&queue->entries[i].hash, hash, sizeof(hash256_t)) == 0) {
+      if (!queue->entries[i].in_flight) {
+        queue->pending_count--;
+        queue->inflight_count++;
+      }
+      queue->entries[i].assigned_peer = peer;
+      queue->entries[i].request_time = plat_time_ms();
+      queue->entries[i].in_flight = true;
+      return;
+    }
+  }
+}
+
+void block_queue_complete(block_queue_t *queue, const hash256_t *hash) {
+  if (!queue || !hash) {
+    return;
+  }
+
+  for (size_t i = 0; i < queue->capacity; i++) {
+    if (queue->entries[i].valid &&
+        memcmp(&queue->entries[i].hash, hash, sizeof(hash256_t)) == 0) {
+      if (queue->entries[i].in_flight) {
+        queue->inflight_count--;
+      } else {
+        queue->pending_count--;
+      }
+      queue->entries[i].valid = false;
+      queue->count--;
+      return;
+    }
+  }
+}
+
+void block_queue_unassign(block_queue_t *queue, const hash256_t *hash) {
+  if (!queue || !hash) {
+    return;
+  }
+
+  for (size_t i = 0; i < queue->capacity; i++) {
+    if (queue->entries[i].valid &&
+        memcmp(&queue->entries[i].hash, hash, sizeof(hash256_t)) == 0) {
+      if (queue->entries[i].in_flight) {
+        queue->entries[i].assigned_peer = NULL;
+        queue->entries[i].in_flight = false;
+        queue->entries[i].retry_count++;
+        queue->inflight_count--;
+        queue->pending_count++;
+      }
+      return;
+    }
+  }
+}
+
+void block_queue_unassign_peer(block_queue_t *queue, peer_t *peer) {
+  if (!queue || !peer) {
+    return;
+  }
+
+  for (size_t i = 0; i < queue->capacity; i++) {
+    if (queue->entries[i].valid && queue->entries[i].in_flight &&
+        queue->entries[i].assigned_peer == peer) {
+      queue->entries[i].assigned_peer = NULL;
+      queue->entries[i].in_flight = false;
+      queue->entries[i].retry_count++;
+      queue->inflight_count--;
+      queue->pending_count++;
+    }
+  }
+}
+
+size_t block_queue_pending_count(const block_queue_t *queue) {
+  return queue ? queue->pending_count : 0;
+}
+
+size_t block_queue_inflight_count(const block_queue_t *queue) {
+  return queue ? queue->inflight_count : 0;
+}
+
+size_t block_queue_size(const block_queue_t *queue) {
+  return queue ? queue->count : 0;
+}
+
+bool block_queue_contains(const block_queue_t *queue, const hash256_t *hash) {
+  if (!queue || !hash) {
+    return false;
+  }
+
+  for (size_t i = 0; i < queue->capacity; i++) {
+    if (queue->entries[i].valid &&
+        memcmp(&queue->entries[i].hash, hash, sizeof(hash256_t)) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/* ============================================================================
+ * Block Locator
+ * ============================================================================
+ */
+
+echo_result_t sync_build_locator(const chainstate_t *state, hash256_t *locator,
+                                 size_t *locator_len) {
+  if (!state || !locator || !locator_len) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  block_index_t *tip = chainstate_get_tip_index(state);
+  if (!tip) {
+    /* No blocks yet - return empty locator */
+    *locator_len = 0;
+    return ECHO_OK;
+  }
+
+  /* NOLINTBEGIN(clang-analyzer-core.Cast) - chainstate_get_block_index_map
+   * doesn't modify state, but API lacks const qualifier */
+  block_index_map_t *index_map =
+      chainstate_get_block_index_map((chainstate_t *)(uintptr_t)state);
+  /* NOLINTEND(clang-analyzer-core.Cast) */
+  return sync_build_locator_from(index_map, tip, locator, locator_len);
+}
+
+echo_result_t sync_build_locator_from(const block_index_map_t *index_map,
+                                      const block_index_t *start,
+                                      hash256_t *locator, size_t *locator_len) {
+  if (!locator || !locator_len) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  (void)index_map; /* May be used for additional lookups in future */
+
+  if (!start) {
+    *locator_len = 0;
+    return ECHO_OK;
+  }
+
+  size_t count = 0;
+  const block_index_t *idx = start;
+  uint32_t step = 1;
+  uint32_t steps_since_increase = 0;
+
+  /* Walk back from tip, adding hashes with exponentially increasing step */
+  while (idx && count < SYNC_MAX_LOCATOR_HASHES) {
+    locator[count++] = idx->hash;
+
+    /* Move back 'step' blocks */
+    for (uint32_t i = 0; i < step && idx->prev; i++) {
+      idx = idx->prev;
+    }
+
+    /* After first 10 entries, double step size every 2 entries */
+    if (count > 10) {
+      steps_since_increase++;
+      if (steps_since_increase >= 2) {
+        step *= 2;
+        steps_since_increase = 0;
+      }
+    }
+
+    /* If we've moved to genesis or same block, we're done */
+    if (!idx->prev) {
+      if (count > 0 &&
+          memcmp(&locator[count - 1], &idx->hash, sizeof(hash256_t)) != 0) {
+        /* Add genesis if not already added */
+        locator[count++] = idx->hash;
+      }
+      break;
+    }
+  }
+
+  *locator_len = count;
+  return ECHO_OK;
+}
+
+block_index_t *sync_find_locator_fork(const chainstate_t *state,
+                                      const hash256_t *locator, size_t count) {
+  if (!state || !locator || count == 0) {
+    return NULL;
+  }
+
+  /* NOLINTBEGIN(clang-analyzer-core.Cast) - chainstate_get_block_index_map
+   * doesn't modify state, but API lacks const qualifier */
+  block_index_map_t *index_map =
+      chainstate_get_block_index_map((chainstate_t *)(uintptr_t)state);
+  /* NOLINTEND(clang-analyzer-core.Cast) */
+  if (!index_map) {
+    return NULL;
+  }
+
+  /* Search for first matching block in locator */
+  for (size_t i = 0; i < count; i++) {
+    block_index_t *idx = block_index_map_lookup(index_map, &locator[i]);
+    if (idx && idx->on_main_chain) {
+      return idx;
+    }
+  }
+
+  /* No match found - return genesis or NULL */
+  hash256_t genesis_hash;
+  block_header_t genesis;
+  block_genesis_header(&genesis);
+  block_header_hash(&genesis, &genesis_hash);
+  return block_index_map_lookup(index_map, &genesis_hash);
+}
+
+/* ============================================================================
+ * Sync Manager Implementation
+ * ============================================================================
+ */
+
+/**
+ * Find peer sync state by peer pointer.
+ */
+static peer_sync_state_t *find_peer_state(sync_manager_t *mgr, peer_t *peer) {
+  for (size_t i = 0; i < mgr->peer_count; i++) {
+    if (mgr->peers[i].peer == peer) {
+      return &mgr->peers[i];
+    }
+  }
+  return NULL;
+}
+
+/**
+ * Find best peer for header sync (highest start_height, not in flight).
+ * Note: Will be used when implementing selective header sync peer selection.
+ */
+/* NOLINTNEXTLINE(misc-unused-parameters) - reserved for future use */
+__attribute__((unused)) static peer_sync_state_t *
+find_best_header_peer(sync_manager_t *mgr) {
+  peer_sync_state_t *best = NULL;
+  int32_t best_height = -1;
+
+  for (size_t i = 0; i < mgr->peer_count; i++) {
+    peer_sync_state_t *ps = &mgr->peers[i];
+    if (ps->sync_candidate && !ps->headers_in_flight &&
+        peer_is_ready(ps->peer)) {
+      if (ps->start_height > best_height) {
+        best_height = ps->start_height;
+        best = ps;
+      }
+    }
+  }
+  return best;
+}
+
+/**
+ * Find best peer for block download (fewest blocks in flight).
+ */
+static peer_sync_state_t *find_best_block_peer(sync_manager_t *mgr) {
+  peer_sync_state_t *best = NULL;
+  size_t min_inflight = SIZE_MAX;
+
+  for (size_t i = 0; i < mgr->peer_count; i++) {
+    peer_sync_state_t *ps = &mgr->peers[i];
+    if (ps->sync_candidate && peer_is_ready(ps->peer) &&
+        ps->blocks_in_flight_count < SYNC_MAX_BLOCKS_PER_PEER) {
+      if (ps->blocks_in_flight_count < min_inflight) {
+        min_inflight = ps->blocks_in_flight_count;
+        best = ps;
+      }
+    }
+  }
+  return best;
+}
+
+/**
+ * Count sync-eligible peers.
+ */
+static size_t count_sync_peers(const sync_manager_t *mgr) {
+  size_t count = 0;
+  for (size_t i = 0; i < mgr->peer_count; i++) {
+    if (mgr->peers[i].sync_candidate && peer_is_ready(mgr->peers[i].peer)) {
+      count++;
+    }
+  }
+  return count;
+}
+
+sync_manager_t *sync_create(chainstate_t *chainstate,
+                            const sync_callbacks_t *callbacks) {
+  if (!chainstate || !callbacks) {
+    return NULL;
+  }
+
+  sync_manager_t *mgr = calloc(1, sizeof(sync_manager_t));
+  if (!mgr) {
+    return NULL;
+  }
+
+  mgr->block_queue = block_queue_create(SYNC_BLOCK_DOWNLOAD_WINDOW);
+  if (!mgr->block_queue) {
+    free(mgr);
+    return NULL;
+  }
+
+  mgr->chainstate = chainstate;
+  mgr->callbacks = *callbacks;
+  mgr->mode = SYNC_MODE_IDLE;
+  mgr->peer_count = 0;
+
+  /* Initialize best header to current tip */
+  mgr->best_header = chainstate_get_tip_index(chainstate);
+
+  return mgr;
+}
+
+void sync_destroy(sync_manager_t *mgr) {
+  if (!mgr) {
+    return;
+  }
+  block_queue_destroy(mgr->block_queue);
+  free(mgr);
+}
+
+void sync_add_peer(sync_manager_t *mgr, peer_t *peer, int32_t height) {
+  if (!mgr || !peer) {
+    return;
+  }
+
+  /* Check if already tracked */
+  if (find_peer_state(mgr, peer)) {
+    return;
+  }
+
+  /* Check capacity */
+  if (mgr->peer_count >= SYNC_MAX_PEERS) {
+    return;
+  }
+
+  /* Add peer */
+  peer_sync_state_t *ps = &mgr->peers[mgr->peer_count++];
+  memset(ps, 0, sizeof(peer_sync_state_t));
+  ps->peer = peer;
+  ps->start_height = height;
+
+  /* Peer is sync candidate if they have blocks we need */
+  uint32_t our_height = chainstate_get_height(mgr->chainstate);
+  ps->sync_candidate = (height > (int32_t)our_height);
+}
+
+void sync_remove_peer(sync_manager_t *mgr, peer_t *peer) {
+  if (!mgr || !peer) {
+    return;
+  }
+
+  for (size_t i = 0; i < mgr->peer_count; i++) {
+    if (mgr->peers[i].peer == peer) {
+      /* Unassign any blocks from this peer */
+      block_queue_unassign_peer(mgr->block_queue, peer);
+
+      /* Remove by shifting remaining peers */
+      for (size_t j = i; j < mgr->peer_count - 1; j++) {
+        mgr->peers[j] = mgr->peers[j + 1];
+      }
+      mgr->peer_count--;
+      return;
+    }
+  }
+}
+
+echo_result_t sync_start(sync_manager_t *mgr) {
+  if (!mgr) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  if (mgr->mode != SYNC_MODE_IDLE && mgr->mode != SYNC_MODE_STALLED) {
+    return ECHO_ERR_INVALID_STATE;
+  }
+
+  if (count_sync_peers(mgr) == 0) {
+    return ECHO_ERR_INVALID_STATE;
+  }
+
+  mgr->mode = SYNC_MODE_HEADERS;
+  mgr->start_time = plat_time_ms();
+  mgr->last_progress_time = mgr->start_time;
+
+  return ECHO_OK;
+}
+
+void sync_stop(sync_manager_t *mgr) {
+  if (!mgr) {
+    return;
+  }
+
+  mgr->mode = SYNC_MODE_IDLE;
+
+  /* Clear all in-flight state */
+  for (size_t i = 0; i < mgr->peer_count; i++) {
+    mgr->peers[i].headers_in_flight = false;
+    mgr->peers[i].blocks_in_flight_count = 0;
+  }
+
+  /* Clear block queue */
+  while (block_queue_size(mgr->block_queue) > 0) {
+    hash256_t hash;
+    uint32_t height;
+    if (block_queue_next(mgr->block_queue, &hash, &height) == ECHO_OK) {
+      block_queue_complete(mgr->block_queue, &hash);
+    } else {
+      break;
+    }
+  }
+}
+
+echo_result_t sync_handle_headers(sync_manager_t *mgr, peer_t *peer,
+                                  const block_header_t *headers, size_t count) {
+  if (!mgr || !peer || (!headers && count > 0)) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  peer_sync_state_t *ps = find_peer_state(mgr, peer);
+  if (!ps) {
+    return ECHO_ERR_NOT_FOUND;
+  }
+
+  /* Clear in-flight flag */
+  ps->headers_in_flight = false;
+
+  if (count == 0) {
+    /* No more headers from this peer */
+    return ECHO_OK;
+  }
+
+  /* Process each header */
+  block_index_map_t *index_map =
+      chainstate_get_block_index_map(mgr->chainstate);
+  block_index_t *prev_index = NULL;
+
+  for (size_t i = 0; i < count; i++) {
+    const block_header_t *header = &headers[i];
+
+    /* Compute header hash */
+    hash256_t header_hash;
+    if (block_header_hash(header, &header_hash) != ECHO_OK) {
+      return ECHO_ERR_INVALID;
+    }
+
+    /* Check if we already have this header */
+    block_index_t *existing = block_index_map_lookup(index_map, &header_hash);
+    if (existing) {
+      prev_index = existing;
+      continue;
+    }
+
+    /* Find previous block */
+    if (i == 0) {
+      prev_index = block_index_map_lookup(index_map, &header->prev_hash);
+    }
+
+    if (!prev_index) {
+      /* Orphan header - can't connect to our chain */
+      return ECHO_ERR_INVALID;
+    }
+
+    /* Validate header if callback provided */
+    if (mgr->callbacks.validate_header) {
+      echo_result_t result = mgr->callbacks.validate_header(header, prev_index,
+                                                            mgr->callbacks.ctx);
+      if (result != ECHO_OK) {
+        return ECHO_ERR_INVALID;
+      }
+    }
+
+    /* Add header to chain state */
+    block_index_t *new_index = NULL;
+    echo_result_t result =
+        chainstate_add_header(mgr->chainstate, header, &new_index);
+
+    if (result == ECHO_ERR_EXISTS) {
+      /* Already have it - continue with next */
+      new_index = block_index_map_lookup(index_map, &header_hash);
+    } else if (result != ECHO_OK) {
+      return result;
+    }
+
+    /* Update best header if this has more work */
+    if (new_index && (!mgr->best_header ||
+                      work256_compare(&new_index->chainwork,
+                                      &mgr->best_header->chainwork) > 0)) {
+      mgr->best_header = new_index;
+    }
+
+    prev_index = new_index;
+    mgr->headers_received_total++;
+    ps->headers_received++;
+  }
+
+  ps->last_header_hash = headers[count - 1].prev_hash;
+  block_header_hash(&headers[count - 1], &ps->last_header_hash);
+
+  mgr->last_progress_time = plat_time_ms();
+
+  /* If we got max headers, request more */
+  if (count == SYNC_MAX_HEADERS_PER_REQUEST) {
+    /* Will request more on next tick */
+  } else {
+    /* Got fewer than max - peer has no more headers */
+    /* Check if we should transition to block download */
+    if (mgr->mode == SYNC_MODE_HEADERS && mgr->best_header) {
+      uint32_t tip_height = chainstate_get_height(mgr->chainstate);
+      if (mgr->best_header->height > tip_height) {
+        mgr->mode = SYNC_MODE_BLOCKS;
+      }
+    }
+  }
+
+  return ECHO_OK;
+}
+
+echo_result_t sync_handle_block(sync_manager_t *mgr, peer_t *peer,
+                                const block_t *block) {
+  if (!mgr || !peer || !block) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  peer_sync_state_t *ps = find_peer_state(mgr, peer);
+  if (!ps) {
+    return ECHO_ERR_NOT_FOUND;
+  }
+
+  /* Compute block hash */
+  hash256_t block_hash;
+  if (block_header_hash(&block->header, &block_hash) != ECHO_OK) {
+    return ECHO_ERR_INVALID;
+  }
+
+  /* Check if this block was requested */
+  bool found = false;
+  for (size_t i = 0; i < ps->blocks_in_flight_count; i++) {
+    if (memcmp(&ps->blocks_in_flight[i], &block_hash, sizeof(hash256_t)) == 0) {
+      /* Remove from in-flight list */
+      for (size_t j = i; j < ps->blocks_in_flight_count - 1; j++) {
+        ps->blocks_in_flight[j] = ps->blocks_in_flight[j + 1];
+        ps->block_request_time[j] = ps->block_request_time[j + 1];
+      }
+      ps->blocks_in_flight_count--;
+      found = true;
+      break;
+    }
+  }
+
+  if (!found) {
+    /* Unsolicited block - might still be useful */
+  }
+
+  /* Complete in queue */
+  block_queue_complete(mgr->block_queue, &block_hash);
+
+  /* Store block if callback provided */
+  if (mgr->callbacks.store_block) {
+    mgr->callbacks.store_block(block, mgr->callbacks.ctx);
+  }
+
+  /* Find block index */
+  block_index_map_t *index_map =
+      chainstate_get_block_index_map(mgr->chainstate);
+  block_index_t *block_index = block_index_map_lookup(index_map, &block_hash);
+
+  /* Validate and apply if callback provided */
+  if (mgr->callbacks.validate_and_apply_block && block_index) {
+    echo_result_t result = mgr->callbacks.validate_and_apply_block(
+        block, block_index, mgr->callbacks.ctx);
+    if (result != ECHO_OK) {
+      return ECHO_ERR_INVALID;
+    }
+    mgr->blocks_validated_total++;
+  }
+
+  mgr->blocks_received_total++;
+  ps->blocks_received++;
+  mgr->last_progress_time = plat_time_ms();
+
+  /* Check if sync is complete */
+  if (mgr->mode == SYNC_MODE_BLOCKS &&
+      block_queue_size(mgr->block_queue) == 0) {
+    uint32_t tip_height = chainstate_get_height(mgr->chainstate);
+    if (!mgr->best_header || tip_height >= mgr->best_header->height) {
+      mgr->mode = SYNC_MODE_DONE;
+    }
+  }
+
+  return ECHO_OK;
+}
+
+void sync_process_timeouts(sync_manager_t *mgr) {
+  if (!mgr) {
+    return;
+  }
+
+  uint64_t now = plat_time_ms();
+
+  /* Check for stalled sync */
+  if (mgr->mode != SYNC_MODE_IDLE && mgr->mode != SYNC_MODE_DONE) {
+    if (now - mgr->last_progress_time > SYNC_STALE_TIP_THRESHOLD_MS) {
+      mgr->mode = SYNC_MODE_STALLED;
+    }
+  }
+
+  /* Process header timeouts */
+  for (size_t i = 0; i < mgr->peer_count; i++) {
+    peer_sync_state_t *ps = &mgr->peers[i];
+
+    if (ps->headers_in_flight &&
+        (now - ps->headers_sent_time > SYNC_HEADERS_TIMEOUT_MS)) {
+      ps->headers_in_flight = false;
+      ps->timeout_count++;
+    }
+
+    /* Process block timeouts */
+    for (size_t j = 0; j < ps->blocks_in_flight_count;) {
+      if (now - ps->block_request_time[j] > SYNC_BLOCK_TIMEOUT_MS) {
+        /* Timeout - unassign block */
+        block_queue_unassign(mgr->block_queue, &ps->blocks_in_flight[j]);
+
+        /* Remove from peer's in-flight list */
+        for (size_t k = j; k < ps->blocks_in_flight_count - 1; k++) {
+          ps->blocks_in_flight[k] = ps->blocks_in_flight[k + 1];
+          ps->block_request_time[k] = ps->block_request_time[k + 1];
+        }
+        ps->blocks_in_flight_count--;
+        ps->timeout_count++;
+      } else {
+        j++;
+      }
+    }
+  }
+}
+
+/**
+ * Queue blocks for download from headers.
+ */
+static void queue_blocks_from_headers(sync_manager_t *mgr) {
+  if (!mgr->best_header) {
+    return;
+  }
+
+  uint32_t tip_height = chainstate_get_height(mgr->chainstate);
+
+  /* Walk back from best header to find blocks we need */
+  block_index_t *idx = mgr->best_header;
+
+  /* Collect blocks to queue (we need to reverse the order) */
+  hash256_t to_queue[SYNC_BLOCK_DOWNLOAD_WINDOW];
+  uint32_t heights[SYNC_BLOCK_DOWNLOAD_WINDOW];
+  size_t to_queue_count = 0;
+
+  while (idx && idx->height > tip_height &&
+         to_queue_count < SYNC_BLOCK_DOWNLOAD_WINDOW) {
+    /* Check if we already have this block (in queue or storage) */
+    if (!block_queue_contains(mgr->block_queue, &idx->hash)) {
+      /* Check storage */
+      block_t stored;
+      block_init(&stored);
+      if (!mgr->callbacks.get_block ||
+          mgr->callbacks.get_block(&idx->hash, &stored, mgr->callbacks.ctx) !=
+              ECHO_OK) {
+        to_queue[to_queue_count] = idx->hash;
+        heights[to_queue_count] = idx->height;
+        to_queue_count++;
+      }
+      block_free(&stored);
+    }
+    idx = idx->prev;
+  }
+
+  /* Add to queue in height order (lowest first) */
+  for (size_t i = to_queue_count; i > 0; i--) {
+    block_queue_add(mgr->block_queue, &to_queue[i - 1], heights[i - 1]);
+  }
+}
+
+/**
+ * Request blocks from peers.
+ */
+static void request_blocks(sync_manager_t *mgr) {
+  /* Request blocks from queue */
+  while (block_queue_pending_count(mgr->block_queue) > 0 &&
+         block_queue_inflight_count(mgr->block_queue) <
+             SYNC_MAX_PARALLEL_BLOCKS) {
+    /* Find peer with capacity */
+    peer_sync_state_t *ps = find_best_block_peer(mgr);
+    if (!ps) {
+      break;
+    }
+
+    /* Get next block to download */
+    hash256_t hash;
+    uint32_t height;
+    if (block_queue_next(mgr->block_queue, &hash, &height) != ECHO_OK) {
+      break;
+    }
+
+    /* Assign to peer */
+    block_queue_assign(mgr->block_queue, &hash, ps->peer);
+
+    /* Add to peer's in-flight list */
+    if (ps->blocks_in_flight_count < SYNC_MAX_BLOCKS_PER_PEER) {
+      ps->blocks_in_flight[ps->blocks_in_flight_count] = hash;
+      ps->block_request_time[ps->blocks_in_flight_count] = plat_time_ms();
+      ps->blocks_in_flight_count++;
+    }
+
+    /* Note: Actual getdata message sending would be done by the application
+     * layer.
+     * This module just manages what to request and from whom. */
+  }
+}
+
+void sync_tick(sync_manager_t *mgr) {
+  if (!mgr) {
+    return;
+  }
+
+  sync_process_timeouts(mgr);
+
+  switch (mgr->mode) {
+  case SYNC_MODE_HEADERS: {
+    /* Request headers from peers that aren't already syncing */
+    for (size_t i = 0; i < mgr->peer_count; i++) {
+      peer_sync_state_t *ps = &mgr->peers[i];
+      if (ps->sync_candidate && !ps->headers_in_flight &&
+          peer_is_ready(ps->peer)) {
+        uint64_t now = plat_time_ms();
+        if (now - ps->headers_sent_time >= SYNC_HEADER_RETRY_INTERVAL_MS) {
+          ps->headers_in_flight = true;
+          ps->headers_sent_time = now;
+          /* Note: Actual getheaders message would be sent by app layer */
+        }
+      }
+    }
+    break;
+  }
+
+  case SYNC_MODE_BLOCKS: {
+    /* Queue blocks from headers */
+    queue_blocks_from_headers(mgr);
+
+    /* Request blocks from peers */
+    request_blocks(mgr);
+    break;
+  }
+
+  case SYNC_MODE_IDLE:
+  case SYNC_MODE_DONE:
+  case SYNC_MODE_STALLED:
+    break;
+  }
+}
+
+void sync_get_progress(const sync_manager_t *mgr, sync_progress_t *progress) {
+  if (!mgr || !progress) {
+    return;
+  }
+
+  memset(progress, 0, sizeof(sync_progress_t));
+
+  progress->mode = mgr->mode;
+  progress->start_time = mgr->start_time;
+  progress->last_progress_time = mgr->last_progress_time;
+
+  /* Header progress */
+  block_index_map_t *index_map =
+      chainstate_get_block_index_map(mgr->chainstate);
+  progress->headers_total = (uint32_t)block_index_map_size(index_map);
+  progress->headers_validated = progress->headers_total;
+
+  /* Block progress */
+  progress->blocks_downloaded = mgr->blocks_received_total;
+  progress->blocks_validated = mgr->blocks_validated_total;
+  progress->blocks_pending =
+      (uint32_t)block_queue_pending_count(mgr->block_queue);
+  progress->blocks_in_flight = block_queue_inflight_count(mgr->block_queue);
+
+  /* Network state */
+  progress->sync_peers = count_sync_peers(mgr);
+
+  /* Chain info */
+  chain_tip_t tip;
+  if (chainstate_get_tip(mgr->chainstate, &tip) == ECHO_OK) {
+    progress->tip_height = tip.height;
+    progress->tip_work = tip.chainwork;
+  }
+
+  if (mgr->best_header) {
+    progress->best_header_height = mgr->best_header->height;
+    progress->best_header_work = mgr->best_header->chainwork;
+  }
+
+  /* Calculate percentage */
+  if (progress->best_header_height > 0) {
+    progress->sync_percentage = (float)progress->tip_height /
+                                (float)progress->best_header_height * 100.0f;
+  }
+}
+
+bool sync_is_complete(const sync_manager_t *mgr) {
+  return mgr && mgr->mode == SYNC_MODE_DONE;
+}
+
+bool sync_is_ibd(const sync_manager_t *mgr) {
+  return mgr &&
+         (mgr->mode == SYNC_MODE_HEADERS || mgr->mode == SYNC_MODE_BLOCKS);
+}
+
+/* ============================================================================
+ * Helper Functions
+ * ============================================================================
+ */
+
+const char *sync_mode_string(sync_mode_t mode) {
+  switch (mode) {
+  case SYNC_MODE_IDLE:
+    return "IDLE";
+  case SYNC_MODE_HEADERS:
+    return "HEADERS";
+  case SYNC_MODE_BLOCKS:
+    return "BLOCKS";
+  case SYNC_MODE_DONE:
+    return "DONE";
+  case SYNC_MODE_STALLED:
+    return "STALLED";
+  default:
+    return "UNKNOWN";
+  }
+}
+
+uint64_t sync_estimate_remaining_time(const sync_progress_t *progress) {
+  if (!progress || progress->mode == SYNC_MODE_IDLE ||
+      progress->mode == SYNC_MODE_DONE) {
+    return 0;
+  }
+
+  uint64_t elapsed = progress->last_progress_time - progress->start_time;
+  if (elapsed == 0 || progress->tip_height == 0) {
+    return UINT64_MAX;
+  }
+
+  /* Estimate based on blocks validated per unit time */
+  float blocks_per_ms = (float)progress->blocks_validated / (float)elapsed;
+  if (blocks_per_ms <= 0) {
+    return UINT64_MAX;
+  }
+
+  uint32_t remaining = 0;
+  if (progress->best_header_height > progress->tip_height) {
+    remaining = progress->best_header_height - progress->tip_height;
+  }
+
+  return (uint64_t)((float)remaining / blocks_per_ms);
+}
