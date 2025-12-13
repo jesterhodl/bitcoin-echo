@@ -14,6 +14,9 @@
  * Build once. Build right. Stop.
  */
 
+/* Enable POSIX extensions for localtime_r (must be before any includes) */
+#define _POSIX_C_SOURCE 200809L
+
 #include "log.h"
 
 #include "platform.h"
