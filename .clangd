@@ -48,10 +48,15 @@ Index:
 # clangd include-cleaner on macOS may attribute symbols like pthread_t/socklen_t
 # to private system headers (e.g. sys/_pthread/*), producing noisy
 # clangd(missing-includes) diagnostics. We keep the source clean and suppress
-# MissingIncludes for this one translation unit instead of including private
+# MissingIncludes for these translation units instead of including private
 # headers.
 ---
 If:
   PathMatch: '(^|.*/)src/platform/posix\.c$'
+Diagnostics:
+  MissingIncludes: None
+---
+If:
+  PathMatch: '(^|.*/)src/app/log\.c$'
 Diagnostics:
   MissingIncludes: None
