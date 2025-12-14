@@ -206,8 +206,6 @@ static void test_relay_handle_inv(void) {
   echo_result_t result = relay_handle_inv(mgr, peer, &inv);
   if (result != ECHO_SUCCESS) {
     printf("  FAIL: relay_handle_inv returned %d\n", result);
-    relay_destroy(mgr);
-    free(peer);
   }
 
   relay_destroy(mgr);
@@ -242,16 +240,12 @@ static void test_relay_inv_rate_limit(void) {
   for (size_t i = 0; i < MAX_INV_PER_SECOND; i++) {
     if (relay_handle_inv(mgr, peer, &inv) != ECHO_SUCCESS) {
       printf("  FAIL: inv %zu should succeed\n", i);
-      relay_destroy(mgr);
-      free(peer);
     }
   }
 
   /* Next message should be rate limited */
   if (relay_handle_inv(mgr, peer, &inv) != ECHO_ERR_RATE_LIMIT) {
     printf("  FAIL: inv should be rate limited\n");
-    relay_destroy(mgr);
-    free(peer);
   }
 
   relay_destroy(mgr);
@@ -299,8 +293,6 @@ static void test_relay_handle_getdata(void) {
   echo_result_t result = relay_handle_getdata(mgr, peer, &getdata);
   if (result != ECHO_SUCCESS) {
     printf("  FAIL: relay_handle_getdata returned %d\n", result);
-    relay_destroy(mgr);
-    free(peer);
   }
 
   relay_destroy(mgr);
@@ -335,16 +327,12 @@ static void test_relay_getdata_rate_limit(void) {
   for (size_t i = 0; i < MAX_GETDATA_PER_SECOND; i++) {
     if (relay_handle_getdata(mgr, peer, &getdata) != ECHO_SUCCESS) {
       printf("  FAIL: getdata %zu should succeed\n", i);
-      relay_destroy(mgr);
-      free(peer);
     }
   }
 
   /* Next message should be rate limited */
   if (relay_handle_getdata(mgr, peer, &getdata) != ECHO_ERR_RATE_LIMIT) {
     printf("  FAIL: getdata should be rate limited\n");
-    relay_destroy(mgr);
-    free(peer);
   }
 
   relay_destroy(mgr);
@@ -380,18 +368,12 @@ static void test_relay_handle_block(void) {
   echo_result_t result = relay_handle_block(mgr, peer1, &block);
   if (result != ECHO_SUCCESS) {
     printf("  FAIL: relay_handle_block returned %d\n", result);
-    relay_destroy(mgr);
-    free(peer1);
-    free(peer2);
   }
 
   /* Verify block was processed */
   if (tctx.blocks_processed != 1) {
     printf("  FAIL: expected 1 block processed, got %zu\n",
            tctx.blocks_processed);
-    relay_destroy(mgr);
-    free(peer1);
-    free(peer2);
   }
 
   relay_destroy(mgr);
@@ -428,17 +410,11 @@ static void test_relay_handle_tx(void) {
   echo_result_t result = relay_handle_tx(mgr, peer1, &tx);
   if (result != ECHO_SUCCESS) {
     printf("  FAIL: relay_handle_tx returned %d\n", result);
-    relay_destroy(mgr);
-    free(peer1);
-    free(peer2);
   }
 
   /* Verify tx was processed */
   if (tctx.txs_processed != 1) {
     printf("  FAIL: expected 1 tx processed, got %zu\n", tctx.txs_processed);
-    relay_destroy(mgr);
-    free(peer1);
-    free(peer2);
   }
 
   relay_destroy(mgr);
@@ -532,23 +508,17 @@ static void test_relay_ban_score(void) {
       mgr, peer, 50, BAN_REASON_PROTOCOL_VIOLATION);
   if (should_ban) {
     printf("  FAIL: should not ban yet\n");
-    relay_destroy(mgr);
-    free(peer);
   }
 
   /* Increase to threshold */
   should_ban = relay_increase_ban_score(mgr, peer, 50, BAN_REASON_MISBEHAVING);
   if (!should_ban) {
     printf("  FAIL: should ban now\n");
-    relay_destroy(mgr);
-    free(peer);
   }
 
   /* Check if address is banned */
   if (!relay_is_banned(mgr, "192.168.1.1")) {
     printf("  FAIL: address should be banned\n");
-    relay_destroy(mgr);
-    free(peer);
   }
 
   relay_destroy(mgr);
@@ -576,7 +546,6 @@ static void test_relay_ban_address(void) {
   /* Check if banned */
   if (!relay_is_banned(mgr, "192.168.1.100")) {
     printf("  FAIL: address should be banned\n");
-    relay_destroy(mgr);
   }
 
   /* Unban */
@@ -585,7 +554,6 @@ static void test_relay_ban_address(void) {
   /* Check if unbanned */
   if (relay_is_banned(mgr, "192.168.1.100")) {
     printf("  FAIL: address should be unbanned\n");
-    relay_destroy(mgr);
   }
 
   relay_destroy(mgr);
@@ -618,7 +586,6 @@ static void test_relay_cleanup(void) {
   /* Check if unbanned */
   if (relay_is_banned(mgr, "192.168.1.200")) {
     printf("  FAIL: expired ban should be removed\n");
-    relay_destroy(mgr);
   }
 
   relay_destroy(mgr);
@@ -650,8 +617,6 @@ static void test_relay_invalid_block(void) {
   echo_result_t result = relay_handle_block(mgr, peer, &block);
   if (result != ECHO_ERR_INVALID) {
     printf("  FAIL: should return ECHO_ERR_INVALID\n");
-    relay_destroy(mgr);
-    free(peer);
   }
 
   /* Peer's ban score should be increased */
