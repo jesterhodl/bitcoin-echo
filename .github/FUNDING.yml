@@ -1,0 +1,4 @@
+# Bitcoin Echo Funding
+# Adds a "Sponsor" button to the repository
+
+custom: ['https://bitcoinecho.org/funding']
