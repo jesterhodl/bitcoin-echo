@@ -17,7 +17,6 @@
  * Build once. Build right. Stop.
  */
 
-#include "consensus.h"
 #include "echo_assert.h"
 #include "echo_config.h"
 #include "echo_types.h"
@@ -27,6 +26,7 @@
 #include "rpc.h"
 #include <signal.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -53,7 +53,8 @@ static node_t *g_node = NULL;
  * Print usage information and exit.
  */
 static void print_usage(const char *program_name) {
-  printf("Bitcoin Echo v%s - A complete Bitcoin protocol implementation in pure C\n\n",
+  printf("Bitcoin Echo v%s - A complete Bitcoin protocol implementation in "
+         "pure C\n\n",
          ECHO_VERSION_STRING);
   printf("Usage: %s [options]\n\n", program_name);
   printf("Options:\n");
@@ -62,8 +63,10 @@ static void print_usage(const char *program_name) {
   printf("  --observe           Observer mode (connect without validation)\n");
   printf("  --testnet           Use testnet3 network\n");
   printf("  --regtest           Use regression test network\n");
-  printf("  --port=<port>       P2P listening port (default: network-specific)\n");
-  printf("  --rpcport=<port>    RPC listening port (default: network-specific)\n");
+  printf(
+      "  --port=<port>       P2P listening port (default: network-specific)\n");
+  printf(
+      "  --rpcport=<port>    RPC listening port (default: network-specific)\n");
   printf("\n");
   printf("Network: %s (compile-time)\n", ECHO_NETWORK_NAME);
   printf("\n");

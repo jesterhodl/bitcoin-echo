@@ -19,8 +19,8 @@
  * Build once. Build right. Stop.
  */
 
-#ifndef ECHO_CONSENSUS_H
-#define ECHO_CONSENSUS_H
+#ifndef ECHO_CONSENSUS_ENGINE_H
+#define ECHO_CONSENSUS_ENGINE_H
 
 #include "block.h"
 #include "block_validate.h"
@@ -649,4 +649,4 @@ chainstate_t *consensus_get_chainstate(consensus_engine_t *engine);
  */
 const utxo_set_t *consensus_get_utxo_set(const consensus_engine_t *engine);
 
-#endif /* ECHO_CONSENSUS_H */
+#endif /* ECHO_CONSENSUS_ENGINE_H */
