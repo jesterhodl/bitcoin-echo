@@ -731,7 +731,16 @@ size_t node_get_peer_count(const node_t *node) {
   if (node == NULL) {
     return 0;
   }
-  return node->peer_count;
+
+  /* Count actual connected peers instead of using cached value
+   * This ensures accuracy even if peers disconnect asynchronously */
+  size_t count = 0;
+  for (size_t i = 0; i < NODE_MAX_PEERS; i++) {
+    if (peer_is_connected(&node->peers[i])) {
+      count++;
+    }
+  }
+  return count;
 }
 
 peer_t *node_get_peer(node_t *node, size_t index) {
