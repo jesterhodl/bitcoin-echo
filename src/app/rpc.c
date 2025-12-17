@@ -1103,17 +1103,10 @@ static void rpc_execute_single(rpc_server_t *server, rpc_request_t *req,
     echo_result_t res = handler(server->node, req->params, &result);
 
     const char *result_str = json_builder_str(&result);
-    log_info(LOG_COMP_RPC, "Handler returned: res=%d, result_str=%s",
-             res, result_str ? result_str : "(null)");
+    log_info(LOG_COMP_RPC, "Handler returned: res=%d", res);
 
     if (res == ECHO_OK) {
-      log_info(LOG_COMP_RPC, "Building success response with result: %s",
-               result_str ? result_str : "(null)");
       rpc_response_success(req->id, result_str, response);
-
-      const char *response_str = json_builder_str(response);
-      log_info(LOG_COMP_RPC, "After rpc_response_success, response_str=%s",
-               response_str ? response_str : "(null)");
     } else {
       /* Handler sets its own error - extract it from result */
       rpc_response_error(req->id, RPC_ERR_INTERNAL_ERROR, "Internal error",
@@ -1230,8 +1223,7 @@ static void rpc_handle_request(rpc_server_t *server, plat_socket_t *client_sock,
     json_builder_append(&batch_response, "]");
 
     const char *final_response = json_builder_str(&batch_response);
-    log_info(LOG_COMP_RPC, "Sending batch response: %s",
-             final_response ? final_response : "(null)");
+    log_info(LOG_COMP_RPC, "Sending batch response with %zu items", batch_size);
     http_send_response(client_sock, 200, "OK", final_response);
     json_builder_free(&batch_response);
 
@@ -1393,10 +1385,16 @@ echo_result_t rpc_server_process(rpc_server_t *server) {
   http_request_t http_req;
   echo_result_t parse_res = http_parse_request(buf, total_read, &http_req);
 
-  log_info(LOG_COMP_RPC, "Parsed HTTP: res=%d, method=%s, body=%s",
-           parse_res,
-           (parse_res == ECHO_OK) ? http_req.method : "(null)",
-           (parse_res == ECHO_OK && http_req.body) ? http_req.body : "(null)");
+  /* Log request (truncate large bodies to keep logs clean) */
+  if (parse_res == ECHO_OK && http_req.body != NULL) {
+    size_t body_len = strlen(http_req.body);
+    log_info(LOG_COMP_RPC, "Parsed HTTP: res=%d, method=%s, body_len=%zu",
+             parse_res, http_req.method, body_len);
+  } else {
+    log_info(LOG_COMP_RPC, "Parsed HTTP: res=%d, method=%s",
+             parse_res,
+             (parse_res == ECHO_OK) ? http_req.method : "(null)");
+  }
 
   if (parse_res == ECHO_OK && strcmp(http_req.method, "OPTIONS") == 0) {
     /* CORS preflight request - respond with 204 No Content and CORS headers
@@ -1405,14 +1403,13 @@ echo_result_t rpc_server_process(rpc_server_t *server) {
     http_send_response(client_sock, 204, "No Content", NULL);
   } else if (parse_res == ECHO_OK && strcmp(http_req.method, "POST") == 0 &&
              http_req.body != NULL) {
-    log_info(LOG_COMP_RPC, "Handling POST, body=%s", http_req.body);
+    log_info(LOG_COMP_RPC, "Handling POST");
     rpc_handle_request(server, client_sock, http_req.body);
   } else {
     /* Bad request */
-    log_warn(LOG_COMP_RPC, "Bad request: parse_res=%d, method=%s, body=%s",
+    log_warn(LOG_COMP_RPC, "Bad request: parse_res=%d, method=%s",
              parse_res,
-             (parse_res == ECHO_OK) ? http_req.method : "(null)",
-             (parse_res == ECHO_OK && http_req.body) ? http_req.body : "(null)");
+             (parse_res == ECHO_OK) ? http_req.method : "(null)");
     json_builder_t response;
     rpc_response_error(NULL, RPC_ERR_INVALID_REQUEST, "Invalid request",
                        &response);
