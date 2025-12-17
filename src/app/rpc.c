@@ -1025,6 +1025,7 @@ static void http_send_response(plat_socket_t *sock, int status,
                             "Access-Control-Allow-Origin: *\r\n"
                             "Access-Control-Allow-Methods: POST, OPTIONS\r\n"
                             "Access-Control-Allow-Headers: Content-Type\r\n"
+                            "Access-Control-Max-Age: 3600\r\n"
                             "\r\n",
                             status, status_text, body_len);
 
