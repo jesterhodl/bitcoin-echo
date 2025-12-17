@@ -384,6 +384,54 @@ int plat_dns_resolve(const char *host, char *ip_out, size_t ip_len) {
   return PLAT_OK;
 }
 
+int plat_dns_resolve_all(const char *host, char **ips_out, size_t ip_len,
+                         size_t max_ips, size_t *count_out) {
+  struct addrinfo hints;
+  struct addrinfo *result;
+  struct addrinfo *current;
+  int ret;
+  size_t count = 0;
+
+  if (host == NULL || ips_out == NULL || count_out == NULL || max_ips == 0) {
+    return PLAT_ERR;
+  }
+
+  /* Set up hints for getaddrinfo */
+  memset(&hints, 0, sizeof(hints));
+  hints.ai_family = AF_INET; /* IPv4 */
+  hints.ai_socktype = SOCK_STREAM;
+
+  /* Resolve hostname */
+  ret = getaddrinfo(host, NULL, &hints, &result);
+  if (ret != 0) {
+    *count_out = 0;
+    return PLAT_ERR;
+  }
+
+  if (result == NULL) {
+    *count_out = 0;
+    return PLAT_ERR;
+  }
+
+  /* Iterate through all results and convert to strings */
+  for (current = result; current != NULL && count < max_ips;
+       current = current->ai_next) {
+    if (current->ai_family == AF_INET) {
+      /* Copy to properly aligned structure to avoid alignment issues */
+      struct sockaddr_in addr_in_aligned;
+      memcpy(&addr_in_aligned, current->ai_addr, sizeof(struct sockaddr_in));
+      if (inet_ntop(AF_INET, &addr_in_aligned.sin_addr, ips_out[count],
+                    (socklen_t)ip_len) != NULL) {
+        count++;
+      }
+    }
+  }
+
+  freeaddrinfo(result);
+  *count_out = count;
+  return (count > 0) ? PLAT_OK : PLAT_ERR;
+}
+
 /*
  * ============================================================================
  * Threading Implementation

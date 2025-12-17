@@ -247,6 +247,27 @@ void plat_socket_close(plat_socket_t *sock);
 int plat_dns_resolve(const char *host, char *ip_out, size_t ip_len);
 
 /*
+ * Resolve hostname to multiple IP addresses.
+ *
+ * Parameters:
+ *   host      - Hostname to resolve (e.g., "seed.bitcoin.sipa.be")
+ *   ips_out   - Array of buffers for resulting IP address strings
+ *   ip_len    - Size of each IP buffer (should be at least 46 for IPv6)
+ *   max_ips   - Maximum number of addresses to return (size of ips_out array)
+ *   count_out - Pointer to store actual number of addresses returned
+ *
+ * Returns:
+ *   PLAT_OK on success, PLAT_ERR on failure
+ *
+ * Notes:
+ *   - Returns up to max_ips addresses (IPv4 preferred)
+ *   - Each result is a null-terminated string (e.g., "192.168.1.1")
+ *   - Useful for DNS seeds which return many addresses
+ */
+int plat_dns_resolve_all(const char *host, char **ips_out, size_t ip_len,
+                         size_t max_ips, size_t *count_out);
+
+/*
  * ============================================================================
  * Threading
  * ============================================================================

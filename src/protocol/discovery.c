@@ -192,41 +192,52 @@ size_t discovery_query_dns_seeds(peer_addr_manager_t *manager) {
 
   size_t total_added = 0;
 
-  /* Query each DNS seed */
+  /* Query each DNS seed - get up to 50 addresses per seed */
+  #define MAX_ADDRS_PER_SEED 50
   for (size_t i = 0; seeds[i] != NULL; i++) {
-    char ip_str[64];
-    memset(ip_str, 0, sizeof(ip_str));
-    log_debug(LOG_COMP_NET, "Resolving DNS seed: %s", seeds[i]);
-    int result = plat_dns_resolve(seeds[i], ip_str, sizeof(ip_str));
+    log_info(LOG_COMP_NET, "Resolving DNS seed: %s", seeds[i]);
+
+    /* Allocate buffer for multiple IP strings */
+    char ip_buffers[MAX_ADDRS_PER_SEED][64];
+    char *ip_ptrs[MAX_ADDRS_PER_SEED];
+    for (size_t j = 0; j < MAX_ADDRS_PER_SEED; j++) {
+      ip_ptrs[j] = ip_buffers[j];
+    }
+
+    size_t addr_count = 0;
+    int result = plat_dns_resolve_all(seeds[i], ip_ptrs, 64,
+                                      MAX_ADDRS_PER_SEED, &addr_count);
 
     /* Skip if DNS resolution failed */
-    if (result != PLAT_OK) {
+    if (result != PLAT_OK || addr_count == 0) {
       log_warn(LOG_COMP_NET, "DNS resolution failed for %s (error %d)", seeds[i], result);
       continue;
     }
 
-    log_info(LOG_COMP_NET, "Resolved %s -> '%s' (len=%zu)", seeds[i], ip_str, strlen(ip_str));
+    log_info(LOG_COMP_NET, "Resolved %s -> %zu addresses", seeds[i], addr_count);
 
-    /* Create address from resolved IP */
-    net_addr_t addr;
-    memset(&addr, 0, sizeof(addr));
+    /* Add all resolved addresses to manager */
+    for (size_t j = 0; j < addr_count && manager->count < MAX_PEER_ADDRESSES; j++) {
+      net_addr_t addr;
+      memset(&addr, 0, sizeof(addr));
 
-    /* Convert IP string to address structure */
-    ipv4_to_ipv6_mapped(ip_str, addr.ip);
-    addr.port = default_port; /* Network byte order handled by caller */
-    addr.services = SERVICE_NODE_NETWORK | SERVICE_NODE_WITNESS;
-    addr.timestamp = (uint32_t)(plat_time_ms() / 1000);
+      /* Convert IP string to address structure */
+      ipv4_to_ipv6_mapped(ip_buffers[j], addr.ip);
+      addr.port = default_port;
+      addr.services = SERVICE_NODE_NETWORK | SERVICE_NODE_WITNESS;
+      addr.timestamp = (uint32_t)(plat_time_ms() / 1000);
 
-    /* Add to manager */
-    peer_addr_entry_t entry;
-    memset(&entry, 0, sizeof(entry));
-    entry.addr = addr;
-    entry.source = ADDR_SOURCE_DNS_SEED;
+      /* Add to manager */
+      peer_addr_entry_t entry;
+      memset(&entry, 0, sizeof(entry));
+      entry.addr = addr;
+      entry.source = ADDR_SOURCE_DNS_SEED;
 
-    if (manager->count < MAX_PEER_ADDRESSES) {
       manager->addresses[manager->count++] = entry;
       total_added++;
-      log_debug(LOG_COMP_NET, "Added address to manager: %d.%d.%d.%d:%u",
+
+      log_debug(LOG_COMP_NET, "Added address %zu/%zu from %s: %d.%d.%d.%d:%u",
+                j + 1, addr_count, seeds[i],
                 addr.ip[12], addr.ip[13], addr.ip[14], addr.ip[15], addr.port);
     }
   }
