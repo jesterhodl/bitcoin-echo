@@ -82,7 +82,6 @@ struct node {
   /* Peer discovery and management */
   peer_addr_manager_t addr_manager;
   peer_t peers[NODE_MAX_PEERS];
-  size_t peer_count;
 
   /* Listening socket */
   plat_socket_t *listen_socket;
@@ -166,7 +165,6 @@ node_t *node_create(const node_config_t *config) {
   for (size_t i = 0; i < NODE_MAX_PEERS; i++) {
     peer_init(&node->peers[i]);
   }
-  node->peer_count = 0;
 
   /* Step 1: Create data directory structure (always needed) */
   echo_result_t result = node_init_directories(node);
@@ -462,7 +460,6 @@ echo_result_t node_stop(node_t *node) {
       peer_disconnect(&node->peers[i], PEER_DISCONNECT_USER, "Node shutdown");
     }
   }
-  node->peer_count = 0;
 
   /* Destroy sync manager */
   if (node->sync_mgr != NULL) {
@@ -585,7 +582,7 @@ void node_get_stats(const node_t *node, node_stats_t *stats) {
   }
 
   /* Network state */
-  stats->peer_count = node->peer_count;
+  stats->peer_count = node_get_peer_count(node);
 
   /* Count inbound vs outbound */
   size_t outbound = 0;
@@ -769,7 +766,6 @@ void node_disconnect_peer(node_t *node, peer_t *peer,
 
   if (peer_is_connected(peer)) {
     peer_disconnect(peer, reason, NULL);
-    node->peer_count--;
   }
 }
 
@@ -1029,8 +1025,6 @@ echo_result_t node_process_peers(node_t *node) {
         uint64_t nonce = generate_nonce();
         echo_result_t result = peer_accept(peer, node->listen_socket, nonce);
         if (result == ECHO_OK) {
-          node->peer_count++;
-
           /* Send version message to start handshake */
           uint32_t our_height = 0;
           if (node->consensus != NULL) {
@@ -1136,7 +1130,7 @@ echo_result_t node_maintenance(node_t *node) {
   uint64_t now = plat_time_ms();
   static uint64_t last_log = 0;
   if (now - last_log > 5000) { /* Log every 5 seconds */
-    log_info(LOG_COMP_NET, "Maintenance tick: peer_count=%zu", node->peer_count);
+    log_info(LOG_COMP_NET, "Maintenance tick: peer_count=%zu", node_get_peer_count(node));
     last_log = now;
   }
 
@@ -1204,7 +1198,6 @@ echo_result_t node_maintenance(node_t *node) {
           uint64_t nonce = generate_nonce();
           echo_result_t result = peer_connect(peer, ip_str, addr.port, nonce);
           if (result == ECHO_OK) {
-            node->peer_count++;
             log_info(LOG_COMP_NET, "Connected to peer %s:%u", ip_str, addr.port);
 
             /* Send version message to start handshake */
