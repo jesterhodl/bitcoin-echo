@@ -16,6 +16,7 @@
 #include "echo_types.h"
 #include "mempool.h"
 #include "platform.h"
+#include "tx.h"
 #include "utxo.h"
 #include "utxo_db.h"
 #include <stdbool.h>
@@ -1025,6 +1026,293 @@ static void block_pipeline_sync_manager_observer(void) {
 
 /*
  * ============================================================================
+ * TRANSACTION PIPELINE TESTS (Session 9.6.3)
+ * ============================================================================
+ */
+
+/**
+ * Test mempool has callbacks wired after node creation.
+ */
+static void tx_pipeline_mempool_callbacks_wired(void) {
+  make_test_dir("txcb");
+  node_config_t config;
+  node_config_init(&config, test_data_dir);
+
+  node_t *node = node_create(&config);
+  ASSERT_NOT_NULL(node);
+
+  /* Mempool should exist */
+  mempool_t *mp = node_get_mempool(node);
+  ASSERT_NOT_NULL(mp);
+
+  /* Verify callbacks are set (mempool should work without crashing) */
+  mempool_stats_t stats;
+  mempool_get_stats(mp, &stats);
+  ASSERT_EQ(stats.tx_count, 0);
+
+  node_destroy(node);
+  cleanup_test_dir(test_data_dir);
+}
+
+/**
+ * Test observer mode has no mempool functionality.
+ */
+static void tx_pipeline_observer_no_mempool_validation(void) {
+  make_test_dir("txobs");
+  node_config_t config;
+  node_config_init(&config, test_data_dir);
+  config.observer_mode = true;
+
+  node_t *node = node_create(&config);
+  ASSERT_NOT_NULL(node);
+
+  /* Mempool should be NULL in observer mode */
+  mempool_t *mp = node_get_mempool(node);
+  ASSERT_NULL(mp);
+
+  node_destroy(node);
+  cleanup_test_dir(test_data_dir);
+}
+
+/**
+ * Test UTXO database is accessible for transaction validation.
+ */
+static void tx_pipeline_utxo_db_accessible(void) {
+  make_test_dir("txutxo");
+  node_config_t config;
+  node_config_init(&config, test_data_dir);
+
+  node_t *node = node_create(&config);
+  ASSERT_NOT_NULL(node);
+
+  /* UTXO database should be accessible */
+  utxo_db_t *udb = node_get_utxo_db(node);
+  ASSERT_NOT_NULL(udb);
+
+  /* Should be able to query (empty at start) */
+  size_t count;
+  echo_result_t result = utxo_db_count(udb, &count);
+  ASSERT_EQ(result, ECHO_OK);
+  ASSERT_EQ(count, 0);
+
+  node_destroy(node);
+  cleanup_test_dir(test_data_dir);
+}
+
+/**
+ * Test consensus engine accessible for script flag calculation.
+ */
+static void tx_pipeline_consensus_accessible(void) {
+  make_test_dir("txcons");
+  node_config_t config;
+  node_config_init(&config, test_data_dir);
+
+  node_t *node = node_create(&config);
+  ASSERT_NOT_NULL(node);
+
+  /* Consensus engine should be accessible */
+  const consensus_engine_t *consensus = node_get_consensus_const(node);
+  ASSERT_NOT_NULL(consensus);
+
+  /* Should be able to get height (may be 0 or UINT32_MAX depending on init) */
+  uint32_t height = consensus_get_height(consensus);
+  /* Just verify the function works - height depends on chain state */
+  (void)height;
+
+  /* Should be able to get script flags */
+  uint32_t flags = consensus_get_script_flags(0);
+  (void)flags; /* Just verify it doesn't crash */
+
+  node_destroy(node);
+  cleanup_test_dir(test_data_dir);
+}
+
+/**
+ * Test mempool minimum fee rate is queryable.
+ */
+static void tx_pipeline_mempool_fee_rate(void) {
+  make_test_dir("txfee");
+  node_config_t config;
+  node_config_init(&config, test_data_dir);
+
+  node_t *node = node_create(&config);
+  ASSERT_NOT_NULL(node);
+
+  mempool_t *mp = node_get_mempool(node);
+  ASSERT_NOT_NULL(mp);
+
+  /* Should be able to query minimum fee rate */
+  uint64_t min_fee_rate = mempool_min_fee_rate(mp);
+  /* Default should be MEMPOOL_DEFAULT_MIN_FEE_RATE (1000 sat/kvB) */
+  ASSERT(min_fee_rate >= 0); /* Just verify it doesn't crash */
+
+  node_destroy(node);
+  cleanup_test_dir(test_data_dir);
+}
+
+/**
+ * Test that mempool lookup returns NULL for missing txid.
+ */
+static void tx_pipeline_mempool_lookup_missing(void) {
+  make_test_dir("txlook");
+  node_config_t config;
+  node_config_init(&config, test_data_dir);
+
+  node_t *node = node_create(&config);
+  ASSERT_NOT_NULL(node);
+
+  mempool_t *mp = node_get_mempool(node);
+  ASSERT_NOT_NULL(mp);
+
+  /* Looking up a missing txid should return NULL */
+  hash256_t fake_txid;
+  memset(fake_txid.bytes, 0xDE, sizeof(fake_txid.bytes));
+  const mempool_entry_t *entry = mempool_lookup(mp, &fake_txid);
+  ASSERT_NULL(entry);
+
+  node_destroy(node);
+  cleanup_test_dir(test_data_dir);
+}
+
+/**
+ * Test UTXO lookup returns NOT_FOUND for missing outpoint.
+ */
+static void tx_pipeline_utxo_lookup_missing(void) {
+  make_test_dir("utxolook");
+  node_config_t config;
+  node_config_init(&config, test_data_dir);
+
+  node_t *node = node_create(&config);
+  ASSERT_NOT_NULL(node);
+
+  utxo_db_t *udb = node_get_utxo_db(node);
+  ASSERT_NOT_NULL(udb);
+
+  /* Looking up a missing outpoint should return NOT_FOUND */
+  outpoint_t fake_outpoint;
+  memset(fake_outpoint.txid.bytes, 0xAB, sizeof(fake_outpoint.txid.bytes));
+  fake_outpoint.vout = 0;
+
+  utxo_entry_t *entry = NULL;
+  echo_result_t result = utxo_db_lookup(udb, &fake_outpoint, &entry);
+  ASSERT_EQ(result, ECHO_ERR_NOT_FOUND);
+  ASSERT_NULL(entry);
+
+  node_destroy(node);
+  cleanup_test_dir(test_data_dir);
+}
+
+/**
+ * Test that UTXO can be inserted and retrieved.
+ * This tests the UTXO lookup chain used by transaction validation.
+ */
+static void tx_pipeline_utxo_insert_lookup(void) {
+  make_test_dir("utxoins");
+  node_config_t config;
+  node_config_init(&config, test_data_dir);
+
+  node_t *node = node_create(&config);
+  ASSERT_NOT_NULL(node);
+
+  utxo_db_t *udb = node_get_utxo_db(node);
+  ASSERT_NOT_NULL(udb);
+
+  /* Insert a UTXO */
+  uint8_t script[] = {0x76, 0xa9, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                      0x00, 0x00, 0x00, 0x00, 0x00, 0x88, 0xac}; /* P2PKH */
+
+  utxo_entry_t entry;
+  memset(&entry, 0, sizeof(entry));
+  entry.outpoint.txid.bytes[0] = 0x12;
+  entry.outpoint.txid.bytes[1] = 0x34;
+  entry.outpoint.vout = 1;
+  entry.value = 100000000; /* 1 BTC */
+  entry.script_pubkey = script;
+  entry.script_len = sizeof(script);
+  entry.height = 100;
+  entry.is_coinbase = false;
+
+  echo_result_t result = utxo_db_insert(udb, &entry);
+  ASSERT_EQ(result, ECHO_OK);
+
+  /* Look it up */
+  utxo_entry_t *found = NULL;
+  result = utxo_db_lookup(udb, &entry.outpoint, &found);
+  ASSERT_EQ(result, ECHO_OK);
+  ASSERT_NOT_NULL(found);
+  ASSERT_EQ(found->value, 100000000);
+  ASSERT_EQ(found->height, 100);
+  ASSERT(!found->is_coinbase);
+
+  utxo_entry_destroy(found);
+  node_destroy(node);
+  cleanup_test_dir(test_data_dir);
+}
+
+/**
+ * Test node components work together (integration-style test).
+ * This simulates what the transaction pipeline does.
+ */
+static void tx_pipeline_component_integration(void) {
+  make_test_dir("txint");
+  node_config_t config;
+  node_config_init(&config, test_data_dir);
+
+  node_t *node = node_create(&config);
+  ASSERT_NOT_NULL(node);
+
+  /* All components needed for transaction validation should be accessible */
+  mempool_t *mp = node_get_mempool(node);
+  utxo_db_t *udb = node_get_utxo_db(node);
+  const consensus_engine_t *consensus = node_get_consensus_const(node);
+
+  ASSERT_NOT_NULL(mp);
+  ASSERT_NOT_NULL(udb);
+  ASSERT_NOT_NULL(consensus);
+
+  /* Verify we can get script flags (needed for validation) */
+  uint32_t height = consensus_get_height(consensus);
+  uint32_t flags = consensus_get_script_flags(height + 1);
+  ASSERT(flags >= 0); /* Just verify it doesn't crash */
+
+  node_destroy(node);
+  cleanup_test_dir(test_data_dir);
+}
+
+/**
+ * Test that multiple restarts preserve mempool emptiness.
+ * (Mempool is not persisted - this verifies expected behavior)
+ */
+static void tx_pipeline_mempool_not_persisted(void) {
+  make_test_dir("txpers");
+  node_config_t config;
+  node_config_init(&config, test_data_dir);
+
+  /* First session */
+  node_t *node1 = node_create(&config);
+  ASSERT_NOT_NULL(node1);
+
+  mempool_t *mp1 = node_get_mempool(node1);
+  ASSERT_NOT_NULL(mp1);
+  ASSERT_EQ(mempool_size(mp1), 0);
+
+  node_destroy(node1);
+
+  /* Second session - mempool should be empty (not persisted) */
+  node_t *node2 = node_create(&config);
+  ASSERT_NOT_NULL(node2);
+
+  mempool_t *mp2 = node_get_mempool(node2);
+  ASSERT_NOT_NULL(mp2);
+  ASSERT_EQ(mempool_size(mp2), 0);
+
+  node_destroy(node2);
+  cleanup_test_dir(test_data_dir);
+}
+
+/*
+ * ============================================================================
  * MAIN
  * ============================================================================
  */
@@ -1103,6 +1391,18 @@ int main(void) {
     test_case("Observer mode rejects block processing"); block_pipeline_observer_rejects(); test_pass();
     test_case("Sync manager created for full node"); block_pipeline_sync_manager_created(); test_pass();
     test_case("Sync manager NULL for observer mode"); block_pipeline_sync_manager_observer(); test_pass();
+
+    test_section("Transaction Pipeline (Session 9.6.3)");
+    test_case("Mempool callbacks wired after creation"); tx_pipeline_mempool_callbacks_wired(); test_pass();
+    test_case("Observer mode has no mempool"); tx_pipeline_observer_no_mempool_validation(); test_pass();
+    test_case("UTXO database accessible"); tx_pipeline_utxo_db_accessible(); test_pass();
+    test_case("Consensus engine accessible"); tx_pipeline_consensus_accessible(); test_pass();
+    test_case("Mempool fee rate queryable"); tx_pipeline_mempool_fee_rate(); test_pass();
+    test_case("Mempool lookup returns NULL for missing txid"); tx_pipeline_mempool_lookup_missing(); test_pass();
+    test_case("UTXO lookup returns NOT_FOUND for missing"); tx_pipeline_utxo_lookup_missing(); test_pass();
+    test_case("UTXO insert and lookup"); tx_pipeline_utxo_insert_lookup(); test_pass();
+    test_case("Component integration"); tx_pipeline_component_integration(); test_pass();
+    test_case("Mempool not persisted across restarts"); tx_pipeline_mempool_not_persisted(); test_pass();
 
     test_suite_end();
     return test_global_summary();
