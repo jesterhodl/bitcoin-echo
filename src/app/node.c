@@ -243,10 +243,8 @@ node_t *node_create(const node_config_t *config) {
     return NULL;
   }
 
-  /* Initialize observer statistics if in observer mode */
-  if (node->config.observer_mode) {
-    memset(&node->observer_stats, 0, sizeof(observer_stats_t));
-  }
+  /* Initialize observer statistics (tracked in all modes) */
+  memset(&node->observer_stats, 0, sizeof(observer_stats_t));
 
   /* Node created successfully but not yet started */
   node->state = NODE_STATE_STOPPED;
@@ -1516,9 +1514,8 @@ static void node_handle_peer_message(node_t *node, peer_t *peer,
     return;
   }
 
-  /* Observer mode: Track message types (Session 9.5) */
-  if (node->config.observer_mode) {
-    /* Get message command string for tracking */
+  /* Track message types (all modes) */
+  {
     const char *command = NULL;
     switch (msg->type) {
     case MSG_VERSION: command = "version"; break;
@@ -1637,15 +1634,13 @@ static void node_handle_peer_message(node_t *node, peer_t *peer,
   case MSG_INV:
     /* Inventory announcement - request interesting items */
     if (msg->payload.inv.count > 0 && msg->payload.inv.inventory != NULL) {
-      /* Observer mode: Track block and transaction announcements (Session 9.5) */
-      if (node->config.observer_mode) {
-        for (size_t i = 0; i < msg->payload.inv.count; i++) {
-          const inv_vector_t *inv = &msg->payload.inv.inventory[i];
-          if (inv->type == INV_BLOCK || inv->type == INV_WITNESS_BLOCK) {
-            node_observe_block(node, &inv->hash);
-          } else if (inv->type == INV_TX || inv->type == INV_WITNESS_TX) {
-            node_observe_tx(node, &inv->hash);
-          }
+      /* Track block and transaction announcements (all modes) */
+      for (size_t i = 0; i < msg->payload.inv.count; i++) {
+        const inv_vector_t *inv = &msg->payload.inv.inventory[i];
+        if (inv->type == INV_BLOCK || inv->type == INV_WITNESS_BLOCK) {
+          node_observe_block(node, &inv->hash);
+        } else if (inv->type == INV_TX || inv->type == INV_WITNESS_TX) {
+          node_observe_tx(node, &inv->hash);
         }
       }
 
@@ -2223,18 +2218,12 @@ void node_get_observer_stats(const node_t *node, observer_stats_t *stats) {
     return;
   }
 
-  if (!node->config.observer_mode) {
-    /* Not in observer mode - return empty stats */
-    memset(stats, 0, sizeof(*stats));
-    return;
-  }
-
-  /* Copy observer statistics */
+  /* Observer stats are tracked in all modes */
   memcpy(stats, &node->observer_stats, sizeof(*stats));
 }
 
 void node_observe_block(node_t *node, const hash256_t *hash) {
-  if (node == NULL || hash == NULL || !node->config.observer_mode) {
+  if (node == NULL || hash == NULL) {
     return;
   }
 
@@ -2266,7 +2255,7 @@ void node_observe_block(node_t *node, const hash256_t *hash) {
 }
 
 void node_observe_tx(node_t *node, const hash256_t *txid) {
-  if (node == NULL || txid == NULL || !node->config.observer_mode) {
+  if (node == NULL || txid == NULL) {
     return;
   }
 
@@ -2300,7 +2289,7 @@ void node_observe_tx(node_t *node, const hash256_t *txid) {
 }
 
 void node_observe_message(node_t *node, const char *command) {
-  if (node == NULL || command == NULL || !node->config.observer_mode) {
+  if (node == NULL || command == NULL) {
     return;
   }
 

@@ -623,7 +623,9 @@ bool node_is_observer(const node_t *node);
 /**
  * Get observer statistics.
  *
- * Only valid if node_is_observer() returns true.
+ * Observer statistics are tracked in all modes. In observer-only mode
+ * (--observe), the node only observes. In full mode, the node observes
+ * AND validates.
  *
  * Parameters:
  *   node  - The node

@@ -2259,9 +2259,7 @@ static echo_result_t rpc_getobserverstats(node_t *node,
     return ECHO_ERR_NULL_PARAM;
   }
 
-  if (!node_is_observer(node)) {
-    return RPC_ERR_MISC; /* Not in observer mode */
-  }
+  /* Observer stats are tracked in all modes */
 
   /* Get observer statistics */
   observer_stats_t stats;
@@ -2274,7 +2272,12 @@ static echo_result_t rpc_getobserverstats(node_t *node,
   /* Build JSON response */
   json_builder_append(builder, "{");
 
-  json_builder_append(builder, "\"mode\":\"observer\",");
+  /* Report actual mode */
+  if (node_is_observer(node)) {
+    json_builder_append(builder, "\"mode\":\"observer\",");
+  } else {
+    json_builder_append(builder, "\"mode\":\"full\",");
+  }
 
   /* Uptime */
   uint64_t uptime_seconds = node_stats.uptime_ms / 1000;
@@ -2343,9 +2346,7 @@ static echo_result_t rpc_getobservedblocks(node_t *node,
     return ECHO_ERR_NULL_PARAM;
   }
 
-  if (!node_is_observer(node)) {
-    return RPC_ERR_MISC; /* Not in observer mode */
-  }
+  /* Observer stats are tracked in all modes */
 
   /* Get observer statistics */
   observer_stats_t stats;
@@ -2409,9 +2410,7 @@ static echo_result_t rpc_getobservedtxs(node_t *node,
     return ECHO_ERR_NULL_PARAM;
   }
 
-  if (!node_is_observer(node)) {
-    return RPC_ERR_MISC; /* Not in observer mode */
-  }
+  /* Observer stats are tracked in all modes */
 
   /* Get observer statistics */
   observer_stats_t stats;
