@@ -8,6 +8,7 @@
 #include "protocol_serialize.h"
 #include "sha256.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <assert.h>
 #include "test_utils.h"
@@ -349,6 +350,7 @@ static void test_msg_inv(void) {
     ASSERT(parsed.count == 3);
     ASSERT(consumed == written);
 
+    free(parsed.inventory);
     test_pass();
 }
 
@@ -416,6 +418,7 @@ static void test_msg_addr(void) {
     ASSERT(parsed.count == 2);
     ASSERT(consumed == written);
 
+    free(parsed.addresses);
     test_pass();
 }
 
