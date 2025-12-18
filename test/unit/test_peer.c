@@ -157,6 +157,99 @@ static void test_message_queue_full(void) {
 }
 
 /**
+ * Helper function that queues a getdata message with stack-allocated inventory.
+ * After this function returns, the stack memory is invalid.
+ */
+static void queue_getdata_with_stack_inventory(peer_t *peer) {
+    inv_vector_t items[10];  /* Stack-allocated inventory */
+
+    /* Initialize with recognizable pattern */
+    for (int i = 0; i < 10; i++) {
+        items[i].type = INV_TX;
+        memset(items[i].hash.bytes, (uint8_t)(i + 1), 32);
+    }
+
+    msg_t getdata;
+    memset(&getdata, 0, sizeof(getdata));
+    getdata.type = MSG_GETDATA;
+    getdata.payload.getdata.count = 10;
+    getdata.payload.getdata.inventory = items;
+
+    echo_result_t result = peer_queue_message(peer, &getdata);
+    assert(result == ECHO_SUCCESS);
+    /* items[] goes out of scope here - without deep copy, pointer would dangle */
+}
+
+/**
+ * Test that inventory data is deep-copied when queueing.
+ * This is a regression test for GitHub issue #12 (valgrind invalid reads).
+ *
+ * Without the fix, queuing a message with stack-allocated inventory would
+ * result in use-after-free when the message is later serialized/sent.
+ */
+static void test_inventory_deep_copy(void) {
+    peer_t peer;
+    peer_init(&peer);
+    peer.state = PEER_STATE_READY;
+
+    /* Queue a message with stack-allocated inventory (in helper function) */
+    queue_getdata_with_stack_inventory(&peer);
+
+    /* Stack memory from helper is now invalid */
+    /* Verify the queued message still has valid data */
+    assert(peer.send_queue_count == 1);
+    peer_msg_queue_entry_t *entry = &peer.send_queue[peer.send_queue_head];
+    assert(entry->message.type == MSG_GETDATA);
+    assert(entry->message.payload.getdata.count == 10);
+    assert(entry->allocated == ECHO_TRUE);  /* Should be deep-copied */
+
+    /* Verify the copied data is correct */
+    for (int i = 0; i < 10; i++) {
+        assert(entry->message.payload.getdata.inventory[i].type == INV_TX);
+        /* Check the hash pattern we set */
+        for (int j = 0; j < 32; j++) {
+            assert(entry->message.payload.getdata.inventory[i].hash.bytes[j] == (uint8_t)(i + 1));
+        }
+    }
+
+    /* Disconnect should free the allocated memory without leaking */
+    peer_disconnect(&peer, PEER_DISCONNECT_USER, "test");
+    assert(peer.send_queue_count == 0);
+}
+
+/**
+ * Test that disconnect frees allocated inventory in queued messages.
+ */
+static void test_disconnect_frees_inventory(void) {
+    peer_t peer;
+    peer_init(&peer);
+    peer.state = PEER_STATE_READY;
+
+    /* Queue multiple messages with inventory */
+    for (int m = 0; m < 3; m++) {
+        inv_vector_t inv;
+        inv.type = INV_BLOCK;
+        memset(inv.hash.bytes, (uint8_t)m, 32);
+
+        msg_t inv_msg;
+        memset(&inv_msg, 0, sizeof(inv_msg));
+        inv_msg.type = MSG_INV;
+        inv_msg.payload.inv.count = 1;
+        inv_msg.payload.inv.inventory = &inv;
+
+        echo_result_t result = peer_queue_message(&peer, &inv_msg);
+        assert(result == ECHO_SUCCESS);
+    }
+
+    assert(peer.send_queue_count == 3);
+
+    /* Disconnect should free all allocated inventory data */
+    peer_disconnect(&peer, PEER_DISCONNECT_USER, "test");
+    assert(peer.send_queue_count == 0);
+    /* ASan will catch any leaks or double-frees */
+}
+
+/**
  * Test queueing in wrong state.
  */
 static void test_queue_wrong_state(void) {
@@ -476,6 +569,8 @@ int main(void) {
     test_case("Peer state checks"); test_peer_state_checks(); test_pass();
     test_case("Message queue"); test_message_queue(); test_pass();
     test_case("Message queue full"); test_message_queue_full(); test_pass();
+    test_case("Inventory deep copy"); test_inventory_deep_copy(); test_pass();
+    test_case("Disconnect frees inventory"); test_disconnect_frees_inventory(); test_pass();
     test_case("Queue wrong state"); test_queue_wrong_state(); test_pass();
     test_case("Queue verack during handshake"); test_queue_verack_during_handshake(); test_pass();
     test_case("Disconnect"); test_disconnect(); test_pass();

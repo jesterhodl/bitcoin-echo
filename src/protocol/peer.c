@@ -469,6 +469,9 @@ echo_result_t peer_receive(peer_t *peer, msg_t *msg) {
 
 /**
  * Queue message for sending.
+ *
+ * Messages with pointer fields (inv, getdata, notfound) are deep-copied
+ * to avoid use-after-free when the caller's stack data goes out of scope.
  */
 echo_result_t peer_queue_message(peer_t *peer, const msg_t *msg) {
   if (!peer || !msg) {
@@ -493,7 +496,31 @@ echo_result_t peer_queue_message(peer_t *peer, const msg_t *msg) {
   /* Add message to queue */
   peer_msg_queue_entry_t *entry = &peer->send_queue[peer->send_queue_tail];
   entry->message = *msg;
-  entry->allocated = ECHO_FALSE; /* For now, no dynamic allocation support */
+  entry->allocated = ECHO_FALSE;
+
+  /*
+   * Deep copy pointer fields for messages that have them.
+   * This prevents use-after-free when callers pass stack-allocated data.
+   */
+  switch (msg->type) {
+  case MSG_INV:
+  case MSG_GETDATA:
+  case MSG_NOTFOUND:
+    if (msg->payload.inv.count > 0 && msg->payload.inv.inventory != NULL) {
+      size_t size = msg->payload.inv.count * sizeof(inv_vector_t);
+      inv_vector_t *copy = malloc(size);
+      if (!copy) {
+        return ECHO_ERR_MEMORY;
+      }
+      memcpy(copy, msg->payload.inv.inventory, size);
+      entry->message.payload.inv.inventory = copy;
+      entry->allocated = ECHO_TRUE;
+    }
+    break;
+  default:
+    /* Other message types don't have pointer fields we need to copy */
+    break;
+  }
 
   peer->send_queue_tail = (peer->send_queue_tail + 1) % PEER_SEND_QUEUE_SIZE;
   peer->send_queue_count++;
@@ -620,6 +647,28 @@ static echo_result_t peer_send_message_internal(peer_t *peer,
 }
 
 /**
+ * Free dynamically allocated message data.
+ */
+static void peer_free_message_data(peer_msg_queue_entry_t *entry) {
+  if (!entry->allocated) {
+    return;
+  }
+
+  switch (entry->message.type) {
+  case MSG_INV:
+  case MSG_GETDATA:
+  case MSG_NOTFOUND:
+    free(entry->message.payload.inv.inventory);
+    entry->message.payload.inv.inventory = NULL;
+    break;
+  default:
+    break;
+  }
+
+  entry->allocated = ECHO_FALSE;
+}
+
+/**
  * Send queued messages.
  */
 echo_result_t peer_send_queued(peer_t *peer) {
@@ -632,6 +681,10 @@ echo_result_t peer_send_queued(peer_t *peer) {
     peer_msg_queue_entry_t *entry = &peer->send_queue[peer->send_queue_head];
 
     echo_result_t result = peer_send_message_internal(peer, &entry->message);
+
+    /* Free allocated data regardless of send result */
+    peer_free_message_data(entry);
+
     if (result != ECHO_SUCCESS) {
       peer_disconnect(peer, PEER_DISCONNECT_NETWORK_ERROR,
                       "Failed to send message");
@@ -669,6 +722,14 @@ void peer_disconnect(peer_t *peer, peer_disconnect_reason_t reason,
     }
     memcpy(peer->disconnect_message, message, msg_len);
     peer->disconnect_message[msg_len] = '\0';
+  }
+
+  /* Free any remaining allocated messages in the send queue */
+  while (peer->send_queue_count > 0) {
+    peer_msg_queue_entry_t *entry = &peer->send_queue[peer->send_queue_head];
+    peer_free_message_data(entry);
+    peer->send_queue_head = (peer->send_queue_head + 1) % PEER_SEND_QUEUE_SIZE;
+    peer->send_queue_count--;
   }
 
   if (peer->socket) {
