@@ -1180,12 +1180,6 @@ echo_result_t node_stop(node_t *node) {
     }
   }
 
-  /* Destroy sync manager */
-  if (node->sync_mgr != NULL) {
-    sync_destroy(node->sync_mgr);
-    node->sync_mgr = NULL;
-  }
-
   node->state = NODE_STATE_STOPPED;
   return ECHO_OK;
 }
@@ -1217,6 +1211,12 @@ void node_destroy(node_t *node) {
  * Cleanup all node resources.
  */
 static void node_cleanup(node_t *node) {
+  /* Destroy sync manager */
+  if (node->sync_mgr != NULL) {
+    sync_destroy(node->sync_mgr);
+    node->sync_mgr = NULL;
+  }
+
   /* Destroy mempool */
   if (node->mempool != NULL) {
     mempool_destroy(node->mempool);

@@ -122,6 +122,14 @@ static peer_t *create_test_peer(const char *address, uint16_t port) {
   return peer;
 }
 
+/* Destroy test peer - must call to free any queued message allocations */
+static void destroy_test_peer(peer_t *peer) {
+  if (peer) {
+    peer_disconnect(peer, PEER_DISCONNECT_USER, "test cleanup");
+    free(peer);
+  }
+}
+
 /* ========== Test Cases ========== */
 
 static void test_relay_init(void) {
@@ -174,8 +182,8 @@ static void test_relay_add_remove_peer(void) {
   relay_remove_peer(mgr, peer1);
 
   relay_destroy(mgr);
-  free(peer1);
-  free(peer2);
+  destroy_test_peer(peer1);
+  destroy_test_peer(peer2);
 
 }
 
@@ -210,12 +218,12 @@ static void test_relay_handle_inv(void) {
   if (result != ECHO_SUCCESS) {
     test_fail_int("relay_handle_inv returned", (long)ECHO_SUCCESS, (long)result);
     relay_destroy(mgr);
-    free(peer);
+    destroy_test_peer(peer);
     return;
   }
 
   relay_destroy(mgr);
-  free(peer);
+  destroy_test_peer(peer);
 
 }
 
@@ -250,7 +258,7 @@ static void test_relay_inv_rate_limit(void) {
       snprintf(message, sizeof(message), "inv %zu should succeed", i);
       test_fail_int(message, (long)ECHO_SUCCESS, (long)result);
       relay_destroy(mgr);
-      free(peer);
+      destroy_test_peer(peer);
       return;
     }
   }
@@ -259,12 +267,12 @@ static void test_relay_inv_rate_limit(void) {
   if (relay_handle_inv(mgr, peer, &inv) != ECHO_ERR_RATE_LIMIT) {
     test_fail("inv should be rate limited");
     relay_destroy(mgr);
-    free(peer);
+    destroy_test_peer(peer);
     return;
   }
 
   relay_destroy(mgr);
-  free(peer);
+  destroy_test_peer(peer);
 
 }
 
@@ -309,12 +317,12 @@ static void test_relay_handle_getdata(void) {
   if (result != ECHO_SUCCESS) {
     test_fail_int("relay_handle_getdata returned", (long)ECHO_SUCCESS, (long)result);
     relay_destroy(mgr);
-    free(peer);
+    destroy_test_peer(peer);
     return;
   }
 
   relay_destroy(mgr);
-  free(peer);
+  destroy_test_peer(peer);
 
 }
 
@@ -349,7 +357,7 @@ static void test_relay_getdata_rate_limit(void) {
       snprintf(message, sizeof(message), "getdata %zu should succeed", i);
       test_fail_int(message, (long)ECHO_SUCCESS, (long)result);
       relay_destroy(mgr);
-      free(peer);
+      destroy_test_peer(peer);
     }
   }
 
@@ -357,12 +365,12 @@ static void test_relay_getdata_rate_limit(void) {
   if (relay_handle_getdata(mgr, peer, &getdata) != ECHO_ERR_RATE_LIMIT) {
     test_fail("getdata should be rate limited");
     relay_destroy(mgr);
-    free(peer);
+    destroy_test_peer(peer);
     return;
   }
 
   relay_destroy(mgr);
-  free(peer);
+  destroy_test_peer(peer);
 
 }
 
@@ -395,8 +403,8 @@ static void test_relay_handle_block(void) {
   if (result != ECHO_SUCCESS) {
     test_fail_int("relay_handle_block returned", (long)ECHO_SUCCESS, (long)result);
     relay_destroy(mgr);
-    free(peer1);
-    free(peer2);
+    destroy_test_peer(peer1);
+    destroy_test_peer(peer2);
     return;
   }
 
@@ -404,14 +412,14 @@ static void test_relay_handle_block(void) {
   if (tctx.blocks_processed != 1) {
     test_fail_int("expected blocks processed", 1, tctx.blocks_processed);
     relay_destroy(mgr);
-    free(peer1);
-    free(peer2);
+    destroy_test_peer(peer1);
+    destroy_test_peer(peer2);
     return;
   }
 
   relay_destroy(mgr);
-  free(peer1);
-  free(peer2);
+  destroy_test_peer(peer1);
+  destroy_test_peer(peer2);
 
 }
 
@@ -444,8 +452,8 @@ static void test_relay_handle_tx(void) {
   if (result != ECHO_SUCCESS) {
     test_fail_int("relay_handle_tx returned", (long)ECHO_SUCCESS, (long)result);
     relay_destroy(mgr);
-    free(peer1);
-    free(peer2);
+    destroy_test_peer(peer1);
+    destroy_test_peer(peer2);
     return;
   }
 
@@ -453,14 +461,14 @@ static void test_relay_handle_tx(void) {
   if (tctx.txs_processed != 1) {
     test_fail_int("expected tx processed", 1L, (long)tctx.blocks_processed);
     relay_destroy(mgr);
-    free(peer1);
-    free(peer2);
+    destroy_test_peer(peer1);
+    destroy_test_peer(peer2);
     return;
   }
 
   relay_destroy(mgr);
-  free(peer1);
-  free(peer2);
+  destroy_test_peer(peer1);
+  destroy_test_peer(peer2);
 
 }
 
@@ -490,8 +498,8 @@ static void test_relay_announce_block(void) {
   /* Both peers should have received inv (via send queue) */
 
   relay_destroy(mgr);
-  free(peer1);
-  free(peer2);
+  destroy_test_peer(peer1);
+  destroy_test_peer(peer2);
 
 }
 
@@ -523,8 +531,8 @@ static void test_relay_announce_tx(void) {
   /* Only peer1 should receive inv */
 
   relay_destroy(mgr);
-  free(peer1);
-  free(peer2);
+  destroy_test_peer(peer1);
+  destroy_test_peer(peer2);
 
 }
 
@@ -550,7 +558,7 @@ static void test_relay_ban_score(void) {
   if (should_ban) {
     test_fail("should not ban yet");
     relay_destroy(mgr);
-    free(peer);
+    destroy_test_peer(peer);
     return;
   }
 
@@ -559,7 +567,7 @@ static void test_relay_ban_score(void) {
   if (!should_ban) {
     test_fail("should ban now");
     relay_destroy(mgr);
-    free(peer);
+    destroy_test_peer(peer);
     return;
   }
 
@@ -567,12 +575,12 @@ static void test_relay_ban_score(void) {
   if (!relay_is_banned(mgr, "192.168.1.1")) {
     test_fail("address should be banned");
     relay_destroy(mgr);
-    free(peer);
+    destroy_test_peer(peer);
     return;
   }
 
   relay_destroy(mgr);
-  free(peer);
+  destroy_test_peer(peer);
 
 }
 
@@ -674,14 +682,14 @@ static void test_relay_invalid_block(void) {
   if (result != ECHO_ERR_INVALID) {
     test_fail_int("relay_handle_block should return", (long)ECHO_ERR_INVALID, (long)result);
     relay_destroy(mgr);
-    free(peer);
+    destroy_test_peer(peer);
     return;
   }
 
   /* Peer's ban score should be increased */
 
   relay_destroy(mgr);
-  free(peer);
+  destroy_test_peer(peer);
 
 }
 
