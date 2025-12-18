@@ -1,7 +1,7 @@
 /**
  * Bitcoin Echo — Node Lifecycle Tests
  *
- * Tests for Session 9.1: Node initialization and shutdown.
+ * Tests for node initialization, shutdown, storage, and transaction pipeline.
  *
  * Build once. Build right. Stop.
  */
@@ -644,15 +644,14 @@ static void get_state_null(void) { ASSERT_EQ(node_get_state(NULL), NODE_STATE_UN
 
 /*
  * ============================================================================
- * STORAGE FOUNDATION TESTS (Session 9.6.0)
+ * STORAGE FOUNDATION TESTS
  * ============================================================================
  */
 
 /**
  * Test chain state restoration on node restart.
  *
- * This is the key test for Session 9.6.0: verifies that chain state persists
- * across node restarts. We:
+ * Verifies that chain state persists across node restarts:
  *   1. Create a node
  *   2. Insert a block into the block index database
  *   3. Destroy the node
@@ -663,14 +662,14 @@ static void storage_chain_restoration(void) {
   make_test_dir("restore");
   node_config_t config;
   node_config_init(&config, test_data_dir);
+  bool passed = true;
 
   /* === First session: create node and add a block to database === */
   node_t *node1 = node_create(&config);
-  ASSERT_NOT_NULL(node1);
+  if (node1 == NULL) { passed = false; goto done; }
 
-  /* Get block index database and insert a test block */
   block_index_db_t *bdb1 = node_get_block_index_db(node1);
-  ASSERT_NOT_NULL(bdb1);
+  if (bdb1 == NULL) { passed = false; node_destroy(node1); goto done; }
 
   /* Create a genesis-like block entry */
   block_index_entry_t genesis_entry;
@@ -680,38 +679,44 @@ static void storage_chain_restoration(void) {
   genesis_entry.header.timestamp = 1231006505;
   genesis_entry.header.bits = 0x1d00ffff;
   genesis_entry.header.nonce = 2083236893;
-  /* Hash: compute from header or use known genesis hash */
   memset(genesis_entry.hash.bytes, 0, 32);
-  genesis_entry.hash.bytes[0] = 0x01; /* Simplified test hash */
+  genesis_entry.hash.bytes[0] = 0x01;
   genesis_entry.status = BLOCK_STATUS_VALID_HEADER | BLOCK_STATUS_VALID_CHAIN;
 
   echo_result_t result = block_index_db_insert(bdb1, &genesis_entry);
-  ASSERT_EQ(result, ECHO_OK);
+  if (result != ECHO_OK) { passed = false; node_destroy(node1); goto done; }
 
   /* Verify it's in the database */
   block_index_entry_t best;
   result = block_index_db_get_best_chain(bdb1, &best);
-  ASSERT_EQ(result, ECHO_OK);
-  ASSERT_EQ(best.height, 0);
+  if (result != ECHO_OK || best.height != 0) {
+    passed = false; node_destroy(node1); goto done;
+  }
 
-  /* Destroy first node */
   node_destroy(node1);
 
   /* === Second session: create new node with same data directory === */
   node_t *node2 = node_create(&config);
-  ASSERT_NOT_NULL(node2);
+  if (node2 == NULL) { passed = false; goto done; }
 
-  /* Verify chain state was restored */
   block_index_db_t *bdb2 = node_get_block_index_db(node2);
-  ASSERT_NOT_NULL(bdb2);
+  if (bdb2 == NULL) { passed = false; node_destroy(node2); goto done; }
 
   result = block_index_db_get_best_chain(bdb2, &best);
-  ASSERT_EQ(result, ECHO_OK);
-  ASSERT_EQ(best.height, 0);
-  ASSERT(best.hash.bytes[0] == 0x01);
+  if (result != ECHO_OK || best.height != 0 || best.hash.bytes[0] != 0x01) {
+    passed = false;
+  }
 
   node_destroy(node2);
+
+done:
   cleanup_test_dir(test_data_dir);
+  test_case("Chain state restoration across restarts");
+  if (passed) {
+    test_pass();
+  } else {
+    test_fail("chain state not restored correctly");
+  }
 }
 
 /**
@@ -721,13 +726,14 @@ static void storage_utxo_persistence(void) {
   make_test_dir("utxopers");
   node_config_t config;
   node_config_init(&config, test_data_dir);
+  bool passed = true;
 
   /* === First session: create node and add a UTXO === */
   node_t *node1 = node_create(&config);
-  ASSERT_NOT_NULL(node1);
+  if (node1 == NULL) { passed = false; goto done; }
 
   utxo_db_t *udb1 = node_get_utxo_db(node1);
-  ASSERT_NOT_NULL(udb1);
+  if (udb1 == NULL) { passed = false; node_destroy(node1); goto done; }
 
   /* Create a test UTXO entry */
   uint8_t script[] = {0x76, 0xa9, 0x14}; /* P2PKH prefix */
@@ -742,27 +748,29 @@ static void storage_utxo_persistence(void) {
   entry.is_coinbase = true;
 
   echo_result_t result = utxo_db_insert(udb1, &entry);
-  ASSERT_EQ(result, ECHO_OK);
+  if (result != ECHO_OK) { passed = false; node_destroy(node1); goto done; }
 
   /* Verify count */
   size_t count1;
   result = utxo_db_count(udb1, &count1);
-  ASSERT_EQ(result, ECHO_OK);
-  ASSERT_EQ(count1, 1);
+  if (result != ECHO_OK || count1 != 1) {
+    passed = false; node_destroy(node1); goto done;
+  }
 
   node_destroy(node1);
 
   /* === Second session: verify UTXO persists === */
   node_t *node2 = node_create(&config);
-  ASSERT_NOT_NULL(node2);
+  if (node2 == NULL) { passed = false; goto done; }
 
   utxo_db_t *udb2 = node_get_utxo_db(node2);
-  ASSERT_NOT_NULL(udb2);
+  if (udb2 == NULL) { passed = false; node_destroy(node2); goto done; }
 
   size_t count2;
   result = utxo_db_count(udb2, &count2);
-  ASSERT_EQ(result, ECHO_OK);
-  ASSERT_EQ(count2, 1);
+  if (result != ECHO_OK || count2 != 1) {
+    passed = false; node_destroy(node2); goto done;
+  }
 
   /* Lookup the UTXO */
   outpoint_t lookup_outpoint;
@@ -772,24 +780,36 @@ static void storage_utxo_persistence(void) {
 
   utxo_entry_t *found = NULL;
   result = utxo_db_lookup(udb2, &lookup_outpoint, &found);
-  ASSERT_EQ(result, ECHO_OK);
-  ASSERT_NOT_NULL(found);
-  ASSERT_EQ(found->value, 5000000000);
-  ASSERT(found->is_coinbase);
+  if (result != ECHO_OK || found == NULL ||
+      found->value != 5000000000 || !found->is_coinbase) {
+    passed = false;
+  }
 
-  utxo_entry_destroy(found);
+  if (found != NULL) utxo_entry_destroy(found);
   node_destroy(node2);
+
+done:
   cleanup_test_dir(test_data_dir);
+  test_case("UTXO database persistence");
+  if (passed) {
+    test_pass();
+  } else {
+    test_fail("UTXO not persisted correctly");
+  }
 }
 
 /**
- * Test node_apply_block persists to databases.
+ * Test node_apply_block handles NULL parameters.
  */
 static void storage_apply_block_persistence(void) {
-  /* This test requires a valid block, which is complex to construct.
-   * For now, we just verify the function exists and handles NULL. */
   echo_result_t result = node_apply_block(NULL, NULL);
-  ASSERT_EQ(result, ECHO_ERR_NULL_PARAM);
+
+  test_case("node_apply_block handles NULL");
+  if (result == ECHO_ERR_NULL_PARAM) {
+    test_pass();
+  } else {
+    test_fail_int("wrong return code", ECHO_ERR_NULL_PARAM, result);
+  }
 }
 
 /**
@@ -799,17 +819,18 @@ static void storage_multiple_restarts(void) {
   make_test_dir("multirest");
   node_config_t config;
   node_config_init(&config, test_data_dir);
+  bool passed = true;
 
   block_index_entry_t entry;
   echo_result_t result;
 
   /* Create and store data */
-  for (int cycle = 0; cycle < 3; cycle++) {
+  for (int cycle = 0; cycle < 3 && passed; cycle++) {
     node_t *node = node_create(&config);
-    ASSERT_NOT_NULL(node);
+    if (node == NULL) { passed = false; break; }
 
     block_index_db_t *bdb = node_get_block_index_db(node);
-    ASSERT_NOT_NULL(bdb);
+    if (bdb == NULL) { passed = false; node_destroy(node); break; }
 
     if (cycle == 0) {
       /* First cycle: insert genesis */
@@ -818,46 +839,61 @@ static void storage_multiple_restarts(void) {
       entry.hash.bytes[0] = 0x01;
       entry.status = BLOCK_STATUS_VALID_CHAIN;
       result = block_index_db_insert(bdb, &entry);
-      ASSERT_EQ(result, ECHO_OK);
+      if (result != ECHO_OK) { passed = false; node_destroy(node); break; }
     } else {
       /* Subsequent cycles: verify and add more */
       block_index_entry_t best;
       result = block_index_db_get_best_chain(bdb, &best);
-      ASSERT_EQ(result, ECHO_OK);
-      /* Should have cycle blocks (0 to cycle-1) */
-      ASSERT_EQ(best.height, (uint32_t)(cycle - 1));
+      if (result != ECHO_OK || best.height != (uint32_t)(cycle - 1)) {
+        passed = false; node_destroy(node); break;
+      }
 
       /* Add another block */
       memset(&entry, 0, sizeof(entry));
       entry.height = (uint32_t)cycle;
       entry.hash.bytes[0] = (uint8_t)(cycle + 1);
       entry.header.prev_hash.bytes[0] = (uint8_t)cycle;
-      entry.chainwork.bytes[31] = (uint8_t)(cycle + 1); /* Increasing work */
+      entry.chainwork.bytes[31] = (uint8_t)(cycle + 1);
       entry.status = BLOCK_STATUS_VALID_CHAIN;
       result = block_index_db_insert(bdb, &entry);
-      ASSERT_EQ(result, ECHO_OK);
+      if (result != ECHO_OK) { passed = false; node_destroy(node); break; }
     }
 
     node_destroy(node);
   }
 
   /* Final verification */
-  node_t *node = node_create(&config);
-  ASSERT_NOT_NULL(node);
+  if (passed) {
+    node_t *node = node_create(&config);
+    if (node != NULL) {
+      block_index_db_t *bdb = node_get_block_index_db(node);
+      if (bdb != NULL) {
+        block_index_entry_t best;
+        result = block_index_db_get_best_chain(bdb, &best);
+        if (result != ECHO_OK || best.height != 2) {
+          passed = false;
+        }
+      } else {
+        passed = false;
+      }
+      node_destroy(node);
+    } else {
+      passed = false;
+    }
+  }
 
-  block_index_db_t *bdb = node_get_block_index_db(node);
-  block_index_entry_t best;
-  result = block_index_db_get_best_chain(bdb, &best);
-  ASSERT_EQ(result, ECHO_OK);
-  ASSERT_EQ(best.height, 2); /* 3 cycles = blocks at height 0, 1, 2 */
-
-  node_destroy(node);
   cleanup_test_dir(test_data_dir);
+  test_case("Multiple restart cycles");
+  if (passed) {
+    test_pass();
+  } else {
+    test_fail("data not persisted across restarts");
+  }
 }
 
 /*
  * ============================================================================
- * BLOCK PIPELINE TESTS (Session 9.6.1)
+ * BLOCK PIPELINE TESTS
  * ============================================================================
  */
 
@@ -868,31 +904,42 @@ static void block_pipeline_invalid_tracking_init(void) {
   make_test_dir("bpinit");
   node_config_t config;
   node_config_init(&config, test_data_dir);
+  bool passed = true;
 
   node_t *node = node_create(&config);
-  ASSERT_NOT_NULL(node);
+  if (node == NULL) { passed = false; goto done; }
 
   /* Initially no invalid blocks */
-  ASSERT_EQ(node_get_invalid_block_count(node), 0);
+  if (node_get_invalid_block_count(node) != 0) { passed = false; }
 
   /* Check a random hash - should not be invalid */
   hash256_t test_hash;
   memset(test_hash.bytes, 0xAB, sizeof(test_hash.bytes));
-  ASSERT(!node_is_block_invalid(node, &test_hash));
+  if (node_is_block_invalid(node, &test_hash)) { passed = false; }
 
   node_destroy(node);
+
+done:
   cleanup_test_dir(test_data_dir);
+  test_case("Invalid block tracking initialization");
+  if (passed) {
+    test_pass();
+  } else {
+    test_fail("invalid block tracking not initialized correctly");
+  }
 }
 
 /**
  * Test node_is_block_invalid with NULL parameters.
  */
 static void block_pipeline_invalid_check_null(void) {
+  bool passed = true;
+
   hash256_t test_hash;
   memset(test_hash.bytes, 0, sizeof(test_hash.bytes));
 
   /* NULL node should return false */
-  ASSERT(!node_is_block_invalid(NULL, &test_hash));
+  if (node_is_block_invalid(NULL, &test_hash)) { passed = false; }
 
   /* Create a real node to test NULL hash */
   make_test_dir("bpnull");
@@ -900,20 +947,33 @@ static void block_pipeline_invalid_check_null(void) {
   node_config_init(&config, test_data_dir);
 
   node_t *node = node_create(&config);
-  ASSERT_NOT_NULL(node);
+  if (node == NULL) { passed = false; goto done; }
 
   /* NULL hash should return false */
-  ASSERT(!node_is_block_invalid(node, NULL));
+  if (node_is_block_invalid(node, NULL)) { passed = false; }
 
   node_destroy(node);
+
+done:
   cleanup_test_dir(test_data_dir);
+  test_case("Invalid block check with NULL params");
+  if (passed) {
+    test_pass();
+  } else {
+    test_fail("NULL handling incorrect");
+  }
 }
 
 /**
  * Test node_get_invalid_block_count with NULL.
  */
 static void block_pipeline_count_null(void) {
-  ASSERT_EQ(node_get_invalid_block_count(NULL), 0);
+  test_case("Invalid block count with NULL");
+  if (node_get_invalid_block_count(NULL) == 0) {
+    test_pass();
+  } else {
+    test_fail("should return 0 for NULL node");
+  }
 }
 
 /**
@@ -924,20 +984,29 @@ static void block_pipeline_observer_mode(void) {
   node_config_t config;
   node_config_init(&config, test_data_dir);
   config.observer_mode = true;
+  bool passed = true;
 
   node_t *node = node_create(&config);
-  ASSERT_NOT_NULL(node);
+  if (node == NULL) { passed = false; goto done; }
 
   /* Observer mode should always return 0 invalid blocks */
-  ASSERT_EQ(node_get_invalid_block_count(node), 0);
+  if (node_get_invalid_block_count(node) != 0) { passed = false; }
 
   /* Any hash check should return false in observer mode */
   hash256_t test_hash;
   memset(test_hash.bytes, 0x11, sizeof(test_hash.bytes));
-  ASSERT(!node_is_block_invalid(node, &test_hash));
+  if (node_is_block_invalid(node, &test_hash)) { passed = false; }
 
   node_destroy(node);
+
+done:
   cleanup_test_dir(test_data_dir);
+  test_case("Observer mode doesn't track invalid blocks");
+  if (passed) {
+    test_pass();
+  } else {
+    test_fail("observer mode tracking invalid blocks");
+  }
 }
 
 /**
@@ -947,20 +1016,33 @@ static void block_pipeline_process_null(void) {
   make_test_dir("bpproc");
   node_config_t config;
   node_config_init(&config, test_data_dir);
+  bool passed = true;
 
   node_t *node = node_create(&config);
-  ASSERT_NOT_NULL(node);
+  if (node == NULL) { passed = false; goto done; }
 
   /* NULL node */
   block_t dummy_block;
   block_init(&dummy_block);
-  ASSERT_EQ(node_process_received_block(NULL, &dummy_block), ECHO_ERR_NULL_PARAM);
+  if (node_process_received_block(NULL, &dummy_block) != ECHO_ERR_NULL_PARAM) {
+    passed = false;
+  }
 
   /* NULL block */
-  ASSERT_EQ(node_process_received_block(node, NULL), ECHO_ERR_NULL_PARAM);
+  if (node_process_received_block(node, NULL) != ECHO_ERR_NULL_PARAM) {
+    passed = false;
+  }
 
   node_destroy(node);
+
+done:
   cleanup_test_dir(test_data_dir);
+  test_case("Process block with NULL params");
+  if (passed) {
+    test_pass();
+  } else {
+    test_fail("NULL params not handled correctly");
+  }
 }
 
 /**
@@ -971,18 +1053,29 @@ static void block_pipeline_observer_rejects(void) {
   node_config_t config;
   node_config_init(&config, test_data_dir);
   config.observer_mode = true;
+  bool passed = true;
 
   node_t *node = node_create(&config);
-  ASSERT_NOT_NULL(node);
+  if (node == NULL) { passed = false; goto done; }
 
   block_t dummy_block;
   block_init(&dummy_block);
 
   /* Observer mode should return invalid state */
-  ASSERT_EQ(node_process_received_block(node, &dummy_block), ECHO_ERR_INVALID_STATE);
+  if (node_process_received_block(node, &dummy_block) != ECHO_ERR_INVALID_STATE) {
+    passed = false;
+  }
 
   node_destroy(node);
+
+done:
   cleanup_test_dir(test_data_dir);
+  test_case("Observer mode rejects block processing");
+  if (passed) {
+    test_pass();
+  } else {
+    test_fail("observer mode accepted block processing");
+  }
 }
 
 /**
@@ -992,16 +1085,25 @@ static void block_pipeline_sync_manager_created(void) {
   make_test_dir("bpsync");
   node_config_t config;
   node_config_init(&config, test_data_dir);
+  bool passed = true;
 
   node_t *node = node_create(&config);
-  ASSERT_NOT_NULL(node);
+  if (node == NULL) { passed = false; goto done; }
 
   /* Sync manager should be accessible */
   sync_manager_t *sync_mgr = node_get_sync_manager(node);
-  ASSERT_NOT_NULL(sync_mgr);
+  if (sync_mgr == NULL) { passed = false; }
 
   node_destroy(node);
+
+done:
   cleanup_test_dir(test_data_dir);
+  test_case("Sync manager created for full node");
+  if (passed) {
+    test_pass();
+  } else {
+    test_fail("sync manager not created");
+  }
 }
 
 /**
@@ -1012,21 +1114,30 @@ static void block_pipeline_sync_manager_observer(void) {
   node_config_t config;
   node_config_init(&config, test_data_dir);
   config.observer_mode = true;
+  bool passed = true;
 
   node_t *node = node_create(&config);
-  ASSERT_NOT_NULL(node);
+  if (node == NULL) { passed = false; goto done; }
 
   /* Sync manager should be NULL in observer mode */
   sync_manager_t *sync_mgr = node_get_sync_manager(node);
-  ASSERT_NULL(sync_mgr);
+  if (sync_mgr != NULL) { passed = false; }
 
   node_destroy(node);
+
+done:
   cleanup_test_dir(test_data_dir);
+  test_case("Sync manager NULL for observer mode");
+  if (passed) {
+    test_pass();
+  } else {
+    test_fail("sync manager created in observer mode");
+  }
 }
 
 /*
  * ============================================================================
- * TRANSACTION PIPELINE TESTS (Session 9.6.3)
+ * TRANSACTION PIPELINE TESTS
  * ============================================================================
  */
 
@@ -1037,21 +1148,30 @@ static void tx_pipeline_mempool_callbacks_wired(void) {
   make_test_dir("txcb");
   node_config_t config;
   node_config_init(&config, test_data_dir);
+  bool passed = true;
 
   node_t *node = node_create(&config);
-  ASSERT_NOT_NULL(node);
+  if (node == NULL) { passed = false; goto done; }
 
   /* Mempool should exist */
   mempool_t *mp = node_get_mempool(node);
-  ASSERT_NOT_NULL(mp);
+  if (mp == NULL) { passed = false; node_destroy(node); goto done; }
 
   /* Verify callbacks are set (mempool should work without crashing) */
   mempool_stats_t stats;
   mempool_get_stats(mp, &stats);
-  ASSERT_EQ(stats.tx_count, 0);
+  if (stats.tx_count != 0) { passed = false; }
 
   node_destroy(node);
+
+done:
   cleanup_test_dir(test_data_dir);
+  test_case("Mempool callbacks wired after creation");
+  if (passed) {
+    test_pass();
+  } else {
+    test_fail("mempool not properly initialized");
+  }
 }
 
 /**
@@ -1062,16 +1182,25 @@ static void tx_pipeline_observer_no_mempool_validation(void) {
   node_config_t config;
   node_config_init(&config, test_data_dir);
   config.observer_mode = true;
+  bool passed = true;
 
   node_t *node = node_create(&config);
-  ASSERT_NOT_NULL(node);
+  if (node == NULL) { passed = false; goto done; }
 
   /* Mempool should be NULL in observer mode */
   mempool_t *mp = node_get_mempool(node);
-  ASSERT_NULL(mp);
+  if (mp != NULL) { passed = false; }
 
   node_destroy(node);
+
+done:
   cleanup_test_dir(test_data_dir);
+  test_case("Observer mode has no mempool");
+  if (passed) {
+    test_pass();
+  } else {
+    test_fail("observer mode has mempool");
+  }
 }
 
 /**
@@ -1081,22 +1210,30 @@ static void tx_pipeline_utxo_db_accessible(void) {
   make_test_dir("txutxo");
   node_config_t config;
   node_config_init(&config, test_data_dir);
+  bool passed = true;
 
   node_t *node = node_create(&config);
-  ASSERT_NOT_NULL(node);
+  if (node == NULL) { passed = false; goto done; }
 
   /* UTXO database should be accessible */
   utxo_db_t *udb = node_get_utxo_db(node);
-  ASSERT_NOT_NULL(udb);
+  if (udb == NULL) { passed = false; node_destroy(node); goto done; }
 
   /* Should be able to query (empty at start) */
   size_t count;
   echo_result_t result = utxo_db_count(udb, &count);
-  ASSERT_EQ(result, ECHO_OK);
-  ASSERT_EQ(count, 0);
+  if (result != ECHO_OK || count != 0) { passed = false; }
 
   node_destroy(node);
+
+done:
   cleanup_test_dir(test_data_dir);
+  test_case("UTXO database accessible");
+  if (passed) {
+    test_pass();
+  } else {
+    test_fail("UTXO database not accessible");
+  }
 }
 
 /**
@@ -1106,25 +1243,33 @@ static void tx_pipeline_consensus_accessible(void) {
   make_test_dir("txcons");
   node_config_t config;
   node_config_init(&config, test_data_dir);
+  bool passed = true;
 
   node_t *node = node_create(&config);
-  ASSERT_NOT_NULL(node);
+  if (node == NULL) { passed = false; goto done; }
 
   /* Consensus engine should be accessible */
   const consensus_engine_t *consensus = node_get_consensus_const(node);
-  ASSERT_NOT_NULL(consensus);
+  if (consensus == NULL) { passed = false; node_destroy(node); goto done; }
 
   /* Should be able to get height (may be 0 or UINT32_MAX depending on init) */
   uint32_t height = consensus_get_height(consensus);
-  /* Just verify the function works - height depends on chain state */
   (void)height;
 
   /* Should be able to get script flags */
   uint32_t flags = consensus_get_script_flags(0);
-  (void)flags; /* Just verify it doesn't crash */
+  (void)flags;
 
   node_destroy(node);
+
+done:
   cleanup_test_dir(test_data_dir);
+  test_case("Consensus engine accessible");
+  if (passed) {
+    test_pass();
+  } else {
+    test_fail("consensus engine not accessible");
+  }
 }
 
 /**
@@ -1134,20 +1279,28 @@ static void tx_pipeline_mempool_fee_rate(void) {
   make_test_dir("txfee");
   node_config_t config;
   node_config_init(&config, test_data_dir);
+  bool passed = true;
 
   node_t *node = node_create(&config);
-  ASSERT_NOT_NULL(node);
+  if (node == NULL) { passed = false; goto done; }
 
   mempool_t *mp = node_get_mempool(node);
-  ASSERT_NOT_NULL(mp);
+  if (mp == NULL) { passed = false; node_destroy(node); goto done; }
 
   /* Should be able to query minimum fee rate */
   uint64_t min_fee_rate = mempool_min_fee_rate(mp);
-  /* Default should be MEMPOOL_DEFAULT_MIN_FEE_RATE (1000 sat/kvB) */
-  ASSERT(min_fee_rate >= 0); /* Just verify it doesn't crash */
+  (void)min_fee_rate; /* Just verify it doesn't crash */
 
   node_destroy(node);
+
+done:
   cleanup_test_dir(test_data_dir);
+  test_case("Mempool fee rate queryable");
+  if (passed) {
+    test_pass();
+  } else {
+    test_fail("fee rate not queryable");
+  }
 }
 
 /**
@@ -1157,21 +1310,30 @@ static void tx_pipeline_mempool_lookup_missing(void) {
   make_test_dir("txlook");
   node_config_t config;
   node_config_init(&config, test_data_dir);
+  bool passed = true;
 
   node_t *node = node_create(&config);
-  ASSERT_NOT_NULL(node);
+  if (node == NULL) { passed = false; goto done; }
 
   mempool_t *mp = node_get_mempool(node);
-  ASSERT_NOT_NULL(mp);
+  if (mp == NULL) { passed = false; node_destroy(node); goto done; }
 
   /* Looking up a missing txid should return NULL */
   hash256_t fake_txid;
   memset(fake_txid.bytes, 0xDE, sizeof(fake_txid.bytes));
   const mempool_entry_t *entry = mempool_lookup(mp, &fake_txid);
-  ASSERT_NULL(entry);
+  if (entry != NULL) { passed = false; }
 
   node_destroy(node);
+
+done:
   cleanup_test_dir(test_data_dir);
+  test_case("Mempool lookup returns NULL for missing txid");
+  if (passed) {
+    test_pass();
+  } else {
+    test_fail("lookup returned non-NULL for missing txid");
+  }
 }
 
 /**
@@ -1181,12 +1343,13 @@ static void tx_pipeline_utxo_lookup_missing(void) {
   make_test_dir("utxolook");
   node_config_t config;
   node_config_init(&config, test_data_dir);
+  bool passed = true;
 
   node_t *node = node_create(&config);
-  ASSERT_NOT_NULL(node);
+  if (node == NULL) { passed = false; goto done; }
 
   utxo_db_t *udb = node_get_utxo_db(node);
-  ASSERT_NOT_NULL(udb);
+  if (udb == NULL) { passed = false; node_destroy(node); goto done; }
 
   /* Looking up a missing outpoint should return NOT_FOUND */
   outpoint_t fake_outpoint;
@@ -1195,11 +1358,18 @@ static void tx_pipeline_utxo_lookup_missing(void) {
 
   utxo_entry_t *entry = NULL;
   echo_result_t result = utxo_db_lookup(udb, &fake_outpoint, &entry);
-  ASSERT_EQ(result, ECHO_ERR_NOT_FOUND);
-  ASSERT_NULL(entry);
+  if (result != ECHO_ERR_NOT_FOUND || entry != NULL) { passed = false; }
 
   node_destroy(node);
+
+done:
   cleanup_test_dir(test_data_dir);
+  test_case("UTXO lookup returns NOT_FOUND for missing");
+  if (passed) {
+    test_pass();
+  } else {
+    test_fail("UTXO lookup did not return NOT_FOUND");
+  }
 }
 
 /**
@@ -1210,12 +1380,13 @@ static void tx_pipeline_utxo_insert_lookup(void) {
   make_test_dir("utxoins");
   node_config_t config;
   node_config_init(&config, test_data_dir);
+  bool passed = true;
 
   node_t *node = node_create(&config);
-  ASSERT_NOT_NULL(node);
+  if (node == NULL) { passed = false; goto done; }
 
   utxo_db_t *udb = node_get_utxo_db(node);
-  ASSERT_NOT_NULL(udb);
+  if (udb == NULL) { passed = false; node_destroy(node); goto done; }
 
   /* Insert a UTXO */
   uint8_t script[] = {0x76, 0xa9, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -1234,20 +1405,30 @@ static void tx_pipeline_utxo_insert_lookup(void) {
   entry.is_coinbase = false;
 
   echo_result_t result = utxo_db_insert(udb, &entry);
-  ASSERT_EQ(result, ECHO_OK);
+  if (result != ECHO_OK) { passed = false; node_destroy(node); goto done; }
 
   /* Look it up */
   utxo_entry_t *found = NULL;
   result = utxo_db_lookup(udb, &entry.outpoint, &found);
-  ASSERT_EQ(result, ECHO_OK);
-  ASSERT_NOT_NULL(found);
-  ASSERT_EQ(found->value, 100000000);
-  ASSERT_EQ(found->height, 100);
-  ASSERT(!found->is_coinbase);
+  if (result != ECHO_OK || found == NULL) {
+    passed = false;
+  } else {
+    if (found->value != 100000000 || found->height != 100 || found->is_coinbase) {
+      passed = false;
+    }
+    utxo_entry_destroy(found);
+  }
 
-  utxo_entry_destroy(found);
   node_destroy(node);
+
+done:
   cleanup_test_dir(test_data_dir);
+  test_case("UTXO insert and lookup");
+  if (passed) {
+    test_pass();
+  } else {
+    test_fail("UTXO insert/lookup failed");
+  }
 }
 
 /**
@@ -1258,26 +1439,35 @@ static void tx_pipeline_component_integration(void) {
   make_test_dir("txint");
   node_config_t config;
   node_config_init(&config, test_data_dir);
+  bool passed = true;
 
   node_t *node = node_create(&config);
-  ASSERT_NOT_NULL(node);
+  if (node == NULL) { passed = false; goto done; }
 
   /* All components needed for transaction validation should be accessible */
   mempool_t *mp = node_get_mempool(node);
   utxo_db_t *udb = node_get_utxo_db(node);
   const consensus_engine_t *consensus = node_get_consensus_const(node);
 
-  ASSERT_NOT_NULL(mp);
-  ASSERT_NOT_NULL(udb);
-  ASSERT_NOT_NULL(consensus);
-
-  /* Verify we can get script flags (needed for validation) */
-  uint32_t height = consensus_get_height(consensus);
-  uint32_t flags = consensus_get_script_flags(height + 1);
-  ASSERT(flags >= 0); /* Just verify it doesn't crash */
+  if (mp == NULL || udb == NULL || consensus == NULL) {
+    passed = false;
+  } else {
+    /* Verify we can get script flags (needed for validation) */
+    uint32_t height = consensus_get_height(consensus);
+    uint32_t flags = consensus_get_script_flags(height + 1);
+    (void)flags;
+  }
 
   node_destroy(node);
+
+done:
   cleanup_test_dir(test_data_dir);
+  test_case("Component integration");
+  if (passed) {
+    test_pass();
+  } else {
+    test_fail("component integration failed");
+  }
 }
 
 /**
@@ -1288,27 +1478,38 @@ static void tx_pipeline_mempool_not_persisted(void) {
   make_test_dir("txpers");
   node_config_t config;
   node_config_init(&config, test_data_dir);
+  bool passed = true;
 
   /* First session */
   node_t *node1 = node_create(&config);
-  ASSERT_NOT_NULL(node1);
+  if (node1 == NULL) { passed = false; goto done; }
 
   mempool_t *mp1 = node_get_mempool(node1);
-  ASSERT_NOT_NULL(mp1);
-  ASSERT_EQ(mempool_size(mp1), 0);
+  if (mp1 == NULL || mempool_size(mp1) != 0) {
+    passed = false; node_destroy(node1); goto done;
+  }
 
   node_destroy(node1);
 
   /* Second session - mempool should be empty (not persisted) */
   node_t *node2 = node_create(&config);
-  ASSERT_NOT_NULL(node2);
+  if (node2 == NULL) { passed = false; goto done; }
 
   mempool_t *mp2 = node_get_mempool(node2);
-  ASSERT_NOT_NULL(mp2);
-  ASSERT_EQ(mempool_size(mp2), 0);
+  if (mp2 == NULL || mempool_size(mp2) != 0) {
+    passed = false;
+  }
 
   node_destroy(node2);
+
+done:
   cleanup_test_dir(test_data_dir);
+  test_case("Mempool not persisted across restarts");
+  if (passed) {
+    test_pass();
+  } else {
+    test_fail("mempool persistence incorrect");
+  }
 }
 
 /*
@@ -1377,32 +1578,32 @@ int main(void) {
     test_case("Get state for NULL node"); get_state_null(); test_pass();
 
     test_section("Storage Foundation");
-    test_case("Chain state restoration across restarts"); storage_chain_restoration(); test_pass();
-    test_case("UTXO database persistence"); storage_utxo_persistence(); test_pass();
-    test_case("node_apply_block handles NULL"); storage_apply_block_persistence(); test_pass();
-    test_case("Multiple restart cycles"); storage_multiple_restarts(); test_pass();
+    storage_chain_restoration();
+    storage_utxo_persistence();
+    storage_apply_block_persistence();
+    storage_multiple_restarts();
 
     test_section("Block Pipeline");
-    test_case("Invalid block tracking initialization"); block_pipeline_invalid_tracking_init(); test_pass();
-    test_case("Invalid block check with NULL params"); block_pipeline_invalid_check_null(); test_pass();
-    test_case("Invalid block count with NULL"); block_pipeline_count_null(); test_pass();
-    test_case("Observer mode doesn't track invalid blocks"); block_pipeline_observer_mode(); test_pass();
-    test_case("Process block with NULL params"); block_pipeline_process_null(); test_pass();
-    test_case("Observer mode rejects block processing"); block_pipeline_observer_rejects(); test_pass();
-    test_case("Sync manager created for full node"); block_pipeline_sync_manager_created(); test_pass();
-    test_case("Sync manager NULL for observer mode"); block_pipeline_sync_manager_observer(); test_pass();
+    block_pipeline_invalid_tracking_init();
+    block_pipeline_invalid_check_null();
+    block_pipeline_count_null();
+    block_pipeline_observer_mode();
+    block_pipeline_process_null();
+    block_pipeline_observer_rejects();
+    block_pipeline_sync_manager_created();
+    block_pipeline_sync_manager_observer();
 
     test_section("Transaction Pipeline");
-    test_case("Mempool callbacks wired after creation"); tx_pipeline_mempool_callbacks_wired(); test_pass();
-    test_case("Observer mode has no mempool"); tx_pipeline_observer_no_mempool_validation(); test_pass();
-    test_case("UTXO database accessible"); tx_pipeline_utxo_db_accessible(); test_pass();
-    test_case("Consensus engine accessible"); tx_pipeline_consensus_accessible(); test_pass();
-    test_case("Mempool fee rate queryable"); tx_pipeline_mempool_fee_rate(); test_pass();
-    test_case("Mempool lookup returns NULL for missing txid"); tx_pipeline_mempool_lookup_missing(); test_pass();
-    test_case("UTXO lookup returns NOT_FOUND for missing"); tx_pipeline_utxo_lookup_missing(); test_pass();
-    test_case("UTXO insert and lookup"); tx_pipeline_utxo_insert_lookup(); test_pass();
-    test_case("Component integration"); tx_pipeline_component_integration(); test_pass();
-    test_case("Mempool not persisted across restarts"); tx_pipeline_mempool_not_persisted(); test_pass();
+    tx_pipeline_mempool_callbacks_wired();
+    tx_pipeline_observer_no_mempool_validation();
+    tx_pipeline_utxo_db_accessible();
+    tx_pipeline_consensus_accessible();
+    tx_pipeline_mempool_fee_rate();
+    tx_pipeline_mempool_lookup_missing();
+    tx_pipeline_utxo_lookup_missing();
+    tx_pipeline_utxo_insert_lookup();
+    tx_pipeline_component_integration();
+    tx_pipeline_mempool_not_persisted();
 
     test_suite_end();
     return test_global_summary();
