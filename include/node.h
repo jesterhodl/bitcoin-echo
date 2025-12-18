@@ -45,16 +45,23 @@
  */
 
 /**
+ * Minimum pruning target in MB.
+ * Must keep at least 550 blocks (~550 MB) for reorg safety.
+ */
+#define PRUNE_TARGET_MIN_MB 550
+
+/**
  * Node configuration.
  *
  * All configuration is compile-time per project philosophy, but this struct
  * allows the node to be created with a specific data directory path.
  */
 typedef struct {
-  char data_dir[512];  /* Path to data directory */
-  uint16_t port;       /* P2P port (default: network-specific) */
-  uint16_t rpc_port;   /* RPC port (default: network-specific) */
-  bool observer_mode;  /* If true, skip consensus/storage (Session 9.5) */
+  char data_dir[512];     /* Path to data directory */
+  uint16_t port;          /* P2P port (default: network-specific) */
+  uint16_t rpc_port;      /* RPC port (default: network-specific) */
+  bool observer_mode;     /* If true, skip consensus/storage (Session 9.5) */
+  uint64_t prune_target_mb; /* Pruning target in MB (0 = archival/no pruning) */
 } node_config_t;
 
 /**
@@ -703,5 +710,100 @@ size_t node_get_invalid_block_count(const node_t *node);
  *   ECHO_ERR_EXISTS if block was already known
  */
 echo_result_t node_process_received_block(node_t *node, const block_t *block);
+
+/*
+ * ============================================================================
+ * PRUNING (Session 9.6.2)
+ * ============================================================================
+ */
+
+/**
+ * Check if pruning is enabled.
+ *
+ * Parameters:
+ *   node - The node
+ *
+ * Returns:
+ *   true if prune_target_mb > 0 in config
+ */
+bool node_is_pruning_enabled(const node_t *node);
+
+/**
+ * Get the configured pruning target in MB.
+ *
+ * Parameters:
+ *   node - The node
+ *
+ * Returns:
+ *   Pruning target in MB (0 = archival/no pruning)
+ */
+uint64_t node_get_prune_target(const node_t *node);
+
+/**
+ * Get the current pruned height.
+ *
+ * This is the lowest block height for which we have block data.
+ * Blocks below this height have been pruned.
+ *
+ * Parameters:
+ *   node - The node
+ *
+ * Returns:
+ *   Lowest block height with data (0 if unpruned or genesis)
+ */
+uint32_t node_get_pruned_height(const node_t *node);
+
+/**
+ * Check if a block has been pruned.
+ *
+ * Parameters:
+ *   node   - The node
+ *   height - Block height to check
+ *
+ * Returns:
+ *   true if block data has been pruned and is unavailable
+ */
+bool node_is_block_pruned(const node_t *node, uint32_t height);
+
+/**
+ * Prune blocks up to the specified height.
+ *
+ * Deletes block files containing blocks up to (but not including) height.
+ * Updates the block index to mark blocks as pruned.
+ *
+ * Parameters:
+ *   node           - The node
+ *   target_height  - Prune blocks below this height
+ *
+ * Returns:
+ *   The actual height pruned to (may be less than requested)
+ */
+uint32_t node_prune_blocks(node_t *node, uint32_t target_height);
+
+/**
+ * Perform automatic pruning if needed.
+ *
+ * Called after applying a new block to check if disk usage exceeds
+ * the pruning target. If so, prunes the oldest blocks to bring
+ * usage under target while maintaining reorg safety margin.
+ *
+ * Parameters:
+ *   node - The node
+ *
+ * Returns:
+ *   ECHO_OK if pruning succeeded or not needed
+ */
+echo_result_t node_maybe_prune(node_t *node);
+
+/**
+ * Get current block storage disk usage in bytes.
+ *
+ * Parameters:
+ *   node - The node
+ *
+ * Returns:
+ *   Total bytes used by block files
+ */
+uint64_t node_get_block_storage_size(const node_t *node);
 
 #endif /* ECHO_NODE_H */

@@ -10,6 +10,7 @@
 #include "echo_config.h"
 #include "echo_types.h"
 #include "platform.h"
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -276,4 +277,171 @@ echo_result_t block_storage_read(block_file_manager_t *mgr,
   *block_out = block;
   *size_out = block_size;
   return ECHO_OK;
+}
+
+/*
+ * ============================================================================
+ * PRUNING OPERATIONS (Session 9.6.2)
+ * ============================================================================
+ */
+
+/*
+ * Delete a block file.
+ */
+echo_result_t block_storage_delete_file(block_file_manager_t *mgr,
+                                        uint32_t file_index) {
+  if (mgr == NULL) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  /* Cannot delete the current write file */
+  if (file_index >= mgr->current_file_index) {
+    return ECHO_ERR_INVALID_PARAM;
+  }
+
+  char path[512];
+  block_storage_get_path(mgr, file_index, path);
+
+  /* Check if file exists */
+  if (!plat_file_exists(path)) {
+    return ECHO_ERR_NOT_FOUND;
+  }
+
+  /* Delete the file */
+  if (remove(path) != 0) {
+    return ECHO_ERR_PLATFORM_IO;
+  }
+
+  return ECHO_OK;
+}
+
+/*
+ * Check if a block file exists.
+ */
+echo_result_t block_storage_file_exists(const block_file_manager_t *mgr,
+                                        uint32_t file_index, bool *exists) {
+  if (mgr == NULL || exists == NULL) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  char path[512];
+  block_storage_get_path(mgr, file_index, path);
+
+  *exists = plat_file_exists(path);
+  return ECHO_OK;
+}
+
+/*
+ * Get the size of a block file.
+ */
+echo_result_t block_storage_get_file_size(const block_file_manager_t *mgr,
+                                          uint32_t file_index, uint64_t *size) {
+  if (mgr == NULL || size == NULL) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  char path[512];
+  block_storage_get_path(mgr, file_index, path);
+
+  /* Check if file exists */
+  if (!plat_file_exists(path)) {
+    *size = 0;
+    return ECHO_OK;
+  }
+
+  FILE *f = fopen(path, "rb");
+  if (f == NULL) {
+    *size = 0;
+    return ECHO_OK;
+  }
+
+  /* Seek to end to get file size */
+  if (fseek(f, 0, SEEK_END) != 0) {
+    fclose(f);
+    return ECHO_ERR_PLATFORM_IO;
+  }
+
+  long file_size = ftell(f);
+  fclose(f);
+
+  if (file_size < 0) {
+    return ECHO_ERR_PLATFORM_IO;
+  }
+
+  *size = (uint64_t)file_size;
+  return ECHO_OK;
+}
+
+/*
+ * Get total disk usage of all block files.
+ */
+echo_result_t block_storage_get_total_size(const block_file_manager_t *mgr,
+                                           uint64_t *total_size) {
+  if (mgr == NULL || total_size == NULL) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  uint64_t total = 0;
+  uint32_t file_index = 0;
+  char path[512];
+
+  /* Sum up all existing block files */
+  while (1) {
+    block_storage_get_path(mgr, file_index, path);
+
+    if (!plat_file_exists(path)) {
+      break; /* No more files */
+    }
+
+    uint64_t file_size = 0;
+    echo_result_t result = block_storage_get_file_size(mgr, file_index, &file_size);
+    if (result != ECHO_OK) {
+      return result;
+    }
+
+    total += file_size;
+    file_index++;
+
+    /* Sanity check */
+    if (file_index > 100000) {
+      break;
+    }
+  }
+
+  *total_size = total;
+  return ECHO_OK;
+}
+
+/*
+ * Get the current write file index.
+ */
+uint32_t block_storage_get_current_file(const block_file_manager_t *mgr) {
+  if (mgr == NULL) {
+    return 0;
+  }
+  return mgr->current_file_index;
+}
+
+/*
+ * Get the lowest file index (for pruning scan).
+ */
+echo_result_t block_storage_get_lowest_file(const block_file_manager_t *mgr,
+                                            uint32_t *file_index) {
+  if (mgr == NULL || file_index == NULL) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  char path[512];
+
+  /* Scan from 0 to find the first existing file */
+  for (uint32_t i = 0; i <= mgr->current_file_index; i++) {
+    block_storage_get_path(mgr, i, path);
+
+    if (plat_file_exists(path)) {
+      *file_index = i;
+      return ECHO_OK;
+    }
+  }
+
+  return ECHO_ERR_NOT_FOUND;
 }

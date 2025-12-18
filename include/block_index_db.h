@@ -51,6 +51,7 @@ typedef enum {
   BLOCK_STATUS_VALID_CHAIN = 0x08,   /* Block is part of best chain */
   BLOCK_STATUS_HAVE_DATA = 0x10,     /* Full block data is stored */
   BLOCK_STATUS_FAILED = 0x20,        /* Block validation failed */
+  BLOCK_STATUS_PRUNED = 0x40,        /* Block data has been pruned (Session 9.6.2) */
 } block_status_flags_t;
 
 /*
@@ -373,5 +374,58 @@ echo_result_t block_index_db_get_height(block_index_db_t *bdb,
  */
 echo_result_t block_index_db_get_chainwork(block_index_db_t *bdb,
                                            work256_t *chainwork);
+
+/* ========================================================================
+ * Pruning Operations (Session 9.6.2)
+ * ======================================================================== */
+
+/**
+ * Mark blocks as pruned.
+ *
+ * Sets the BLOCK_STATUS_PRUNED flag and clears BLOCK_STATUS_HAVE_DATA
+ * for blocks in the specified height range.
+ *
+ * Parameters:
+ *   bdb         - Block index database handle
+ *   start_height - Start of height range (inclusive)
+ *   end_height   - End of height range (exclusive)
+ *
+ * Returns:
+ *   ECHO_OK on success, error code on failure
+ */
+echo_result_t block_index_db_mark_pruned(block_index_db_t *bdb,
+                                         uint32_t start_height,
+                                         uint32_t end_height);
+
+/**
+ * Get the lowest block height with available data.
+ *
+ * Returns the height of the lowest block that has BLOCK_STATUS_HAVE_DATA
+ * set and BLOCK_STATUS_PRUNED cleared.
+ *
+ * Parameters:
+ *   bdb    - Block index database handle
+ *   height - Output: lowest unpruned block height (0 if none pruned)
+ *
+ * Returns:
+ *   ECHO_OK on success, ECHO_ERR_NOT_FOUND if database is empty
+ */
+echo_result_t block_index_db_get_pruned_height(block_index_db_t *bdb,
+                                               uint32_t *height);
+
+/**
+ * Check if a specific block has been pruned.
+ *
+ * Parameters:
+ *   bdb     - Block index database handle
+ *   hash    - Block hash to check
+ *   pruned  - Output: true if block is pruned, false otherwise
+ *
+ * Returns:
+ *   ECHO_OK on success, ECHO_ERR_NOT_FOUND if block not in index
+ */
+echo_result_t block_index_db_is_pruned(block_index_db_t *bdb,
+                                       const hash256_t *hash,
+                                       bool *pruned);
 
 #endif /* ECHO_BLOCK_INDEX_DB_H */

@@ -1348,8 +1348,31 @@ static void node_handle_peer_message(node_t *node, peer_t *peer,
         const inv_vector_t *inv = &msg->payload.getdata.inventory[i];
 
         if (inv->type == INV_BLOCK || inv->type == INV_WITNESS_BLOCK) {
-          /* Serving blocks from storage - deferred to later sessions */
-          /* For now, we focus on syncing, not serving */
+          /*
+           * Block request handling (Session 9.6.2 - Pruning)
+           *
+           * If pruning is enabled and we've pruned this block, send NOTFOUND.
+           * Otherwise, serving blocks from storage is deferred to later sessions.
+           */
+          if (node_is_pruning_enabled(node) && node->block_index_db_open) {
+            bool is_pruned = false;
+            echo_result_t prune_result = block_index_db_is_pruned(
+                &node->block_index_db, &inv->hash, &is_pruned);
+
+            if (prune_result == ECHO_OK && is_pruned) {
+              /* Block is pruned - send NOTFOUND */
+              log_debug(LOG_COMP_NET, "Requested block is pruned, sending notfound");
+              inv_vector_t notfound_inv = *inv; /* Copy to avoid const issues */
+              msg_t notfound_msg;
+              memset(&notfound_msg, 0, sizeof(notfound_msg));
+              notfound_msg.type = MSG_NOTFOUND;
+              notfound_msg.payload.notfound.count = 1;
+              notfound_msg.payload.notfound.inventory = &notfound_inv;
+              peer_queue_message(peer, &notfound_msg);
+            }
+            /* If block is not pruned, we could serve it (future session) */
+          }
+          /* Full block serving will be implemented in a later session */
         } else if (inv->type == INV_TX || inv->type == INV_WITNESS_TX) {
           /* Try to send transaction from mempool */
           if (node->mempool != NULL) {
@@ -1419,8 +1442,9 @@ echo_result_t node_process_peers(node_t *node) {
             our_height = consensus_get_height(node->consensus);
           }
 
-          /* Service flags: NODE_NETWORK (1) */
-          uint64_t services = 1;
+          /* Service flags: NODE_NETWORK (1) only if we're not pruned
+           * Pruned nodes cannot serve historical blocks */
+          uint64_t services = node_is_pruning_enabled(node) ? 0 : 1;
           peer_send_version(peer, services, (int32_t)our_height, true);
         }
         break; /* Only accept one per loop iteration */
@@ -1594,8 +1618,9 @@ echo_result_t node_maintenance(node_t *node) {
               our_height = consensus_get_height(node->consensus);
             }
 
-            /* Service flags: NODE_NETWORK (1) */
-            uint64_t services = 1;
+            /* Service flags: NODE_NETWORK (1) only if we're not pruned
+             * Pruned nodes cannot serve historical blocks */
+            uint64_t services = node_is_pruning_enabled(node) ? 0 : 1;
             peer_send_version(peer, services, (int32_t)our_height, true);
           } else {
             log_warn(LOG_COMP_NET, "Failed to connect to %s:%u: error %d", ip_str, addr.port, result);
@@ -2036,4 +2061,228 @@ echo_result_t node_process_received_block(node_t *node, const block_t *block) {
 
   /* Process through sync manager callback (which handles validation and storage) */
   return sync_cb_validate_and_apply_block(block, existing, node);
+}
+
+/*
+ * ============================================================================
+ * PRUNING SUPPORT (Session 9.6.2)
+ * ============================================================================
+ */
+
+bool node_is_pruning_enabled(const node_t *node) {
+  if (node == NULL) {
+    return false;
+  }
+  return node->config.prune_target_mb > 0;
+}
+
+uint64_t node_get_prune_target(const node_t *node) {
+  if (node == NULL) {
+    return 0;
+  }
+  return node->config.prune_target_mb;
+}
+
+uint32_t node_get_pruned_height(const node_t *node) {
+  if (node == NULL || !node->block_index_db_open) {
+    return 0;
+  }
+
+  /* Cast away const - block_index_db_get_pruned_height doesn't modify state
+   * but the interface doesn't use const. This is safe. */
+  block_index_db_t *bdb = (block_index_db_t *)(uintptr_t)&node->block_index_db;
+
+  uint32_t height = 0;
+  echo_result_t result = block_index_db_get_pruned_height(bdb, &height);
+
+  if (result != ECHO_OK) {
+    return 0; /* No pruning or error - return 0 */
+  }
+
+  return height;
+}
+
+bool node_is_block_pruned(const node_t *node, uint32_t height) {
+  if (node == NULL) {
+    return false;
+  }
+
+  /* If not pruning, no blocks are pruned */
+  if (!node_is_pruning_enabled(node)) {
+    return false;
+  }
+
+  /* Get the pruned height (lowest height with data) */
+  uint32_t pruned_height = node_get_pruned_height(node);
+
+  /* Block is pruned if its height is below the pruned height */
+  return height < pruned_height;
+}
+
+uint64_t node_get_block_storage_size(const node_t *node) {
+  if (node == NULL || !node->block_storage_init) {
+    return 0;
+  }
+
+  uint64_t total_size = 0;
+  echo_result_t result = block_storage_get_total_size(
+      &node->block_storage, &total_size);
+
+  if (result != ECHO_OK) {
+    return 0;
+  }
+
+  return total_size;
+}
+
+uint32_t node_prune_blocks(node_t *node, uint32_t target_height) {
+  if (node == NULL || !node->block_storage_init || !node->block_index_db_open) {
+    return 0;
+  }
+
+  /* Cannot prune if not in pruning mode */
+  if (!node_is_pruning_enabled(node)) {
+    return 0;
+  }
+
+  /* Get current chain height */
+  uint32_t chain_height = 0;
+  if (node->consensus != NULL) {
+    chain_height = consensus_get_height(node->consensus);
+  }
+
+  /* Maintain safety margin: keep at least 550 blocks for reorg safety */
+  uint32_t min_keep_height = 0;
+  if (chain_height > 550) {
+    min_keep_height = chain_height - 550;
+  }
+
+  /* Don't prune below the safety margin */
+  if (target_height > min_keep_height) {
+    target_height = min_keep_height;
+  }
+
+  /* Get current pruned height */
+  uint32_t current_pruned_height = node_get_pruned_height(node);
+
+  /* Nothing to do if already pruned past target */
+  if (current_pruned_height >= target_height) {
+    return current_pruned_height;
+  }
+
+  log_info(LOG_COMP_STORE, "Pruning blocks from height %u to %u",
+           current_pruned_height, target_height);
+
+  /*
+   * Strategy: Delete old block files that contain only prunable blocks.
+   *
+   * For simplicity, we delete entire block files. A more sophisticated
+   * approach would track exactly which blocks are in each file, but
+   * this is sufficient for the initial implementation.
+   *
+   * Block files are ~128 MB each, containing roughly 1000 blocks at
+   * current sizes.
+   */
+
+  /* Get the lowest file index */
+  uint32_t lowest_file = 0;
+  echo_result_t result = block_storage_get_lowest_file(&node->block_storage,
+                                                        &lowest_file);
+  if (result != ECHO_OK) {
+    log_warn(LOG_COMP_STORE, "No block files found for pruning");
+    return current_pruned_height;
+  }
+
+  /* Get current write file (don't delete it) */
+  uint32_t current_file = block_storage_get_current_file(&node->block_storage);
+
+  /* Delete old block files until we've freed enough space or reached target */
+  uint32_t files_deleted = 0;
+  for (uint32_t file_idx = lowest_file; file_idx < current_file; file_idx++) {
+    /* Check if file exists */
+    bool exists = false;
+    result = block_storage_file_exists(&node->block_storage, file_idx, &exists);
+    if (result != ECHO_OK || !exists) {
+      continue;
+    }
+
+    /* Delete the file */
+    result = block_storage_delete_file(
+        (block_file_manager_t *)&node->block_storage, file_idx);
+    if (result == ECHO_OK) {
+      files_deleted++;
+      log_info(LOG_COMP_STORE, "Deleted block file blk%05u.dat", file_idx);
+    } else {
+      log_warn(LOG_COMP_STORE, "Failed to delete blk%05u.dat: %d",
+               file_idx, result);
+    }
+
+    /* Estimate: each file ~1000 blocks at current sizes
+     * Stop if we've pruned enough */
+    uint32_t estimated_pruned = current_pruned_height + (files_deleted * 1000);
+    if (estimated_pruned >= target_height) {
+      break;
+    }
+  }
+
+  /* Mark blocks as pruned in the database */
+  if (files_deleted > 0) {
+    result = block_index_db_mark_pruned(
+        (block_index_db_t *)&node->block_index_db,
+        current_pruned_height, target_height);
+    if (result != ECHO_OK) {
+      log_warn(LOG_COMP_DB, "Failed to mark blocks as pruned: %d", result);
+    }
+  }
+
+  /* Get and return the new pruned height */
+  uint32_t new_pruned_height = node_get_pruned_height(node);
+
+  if (files_deleted > 0) {
+    log_info(LOG_COMP_STORE,
+             "Pruning complete: deleted %u files, pruned height now %u",
+             files_deleted, new_pruned_height);
+  }
+
+  return new_pruned_height;
+}
+
+echo_result_t node_maybe_prune(node_t *node) {
+  if (node == NULL) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  /* Nothing to do if pruning not enabled */
+  if (!node_is_pruning_enabled(node)) {
+    return ECHO_OK;
+  }
+
+  /* Get current storage size */
+  uint64_t current_size_bytes = node_get_block_storage_size(node);
+  uint64_t target_size_bytes = node->config.prune_target_mb * 1024 * 1024;
+
+  /* Check if we're over target */
+  if (current_size_bytes <= target_size_bytes) {
+    return ECHO_OK; /* Under target, nothing to do */
+  }
+
+  log_info(LOG_COMP_STORE,
+           "Storage size %llu MB exceeds target %llu MB, pruning...",
+           (unsigned long long)(current_size_bytes / (1024ULL * 1024ULL)),
+           (unsigned long long)node->config.prune_target_mb);
+
+  /* Calculate how much to prune */
+  uint64_t excess_bytes = current_size_bytes - target_size_bytes;
+
+  /* Estimate blocks to prune (assuming ~1 MB per block on average) */
+  uint32_t blocks_to_prune = (uint32_t)(excess_bytes / (1024ULL * 1024ULL)) + 100;
+
+  /* Get current pruned height and calculate target */
+  uint32_t current_pruned_height = node_get_pruned_height(node);
+  uint32_t target_height = current_pruned_height + blocks_to_prune;
+
+  /* Perform pruning */
+  node_prune_blocks(node, target_height);
+
+  return ECHO_OK;
 }

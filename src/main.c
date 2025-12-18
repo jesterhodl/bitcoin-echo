@@ -61,6 +61,9 @@ static void print_usage(const char *program_name) {
   printf("  --help              Show this help message\n");
   printf("  --datadir=<path>    Data directory (default: ~/.bitcoin-echo)\n");
   printf("  --observe           Observer mode (connect without validation)\n");
+  printf("  --prune=<MB>        Prune old blocks to keep disk usage under <MB>\n");
+  printf("                      (minimum: %d MB for reorg safety, 0=no pruning)\n",
+         PRUNE_TARGET_MIN_MB);
   printf("  --testnet           Use testnet3 network\n");
   printf("  --regtest           Use regression test network\n");
   printf(
@@ -130,6 +133,20 @@ static int parse_arguments(int argc, char *argv[], node_config_t *config) {
       }
     } else if (strcmp(arg, "--observe") == 0) {
       config->observer_mode = true;
+    } else if (strncmp(arg, "--prune=", 8) == 0) {
+      const char *prune_str = arg + 8;
+      char *endptr = NULL;
+      long prune_mb = strtol(prune_str, &endptr, 10);
+      if (endptr == prune_str || *endptr != '\0' || prune_mb < 0) {
+        fprintf(stderr, "Error: Invalid prune value: %s\n", prune_str);
+        return -1;
+      }
+      if (prune_mb > 0 && prune_mb < PRUNE_TARGET_MIN_MB) {
+        fprintf(stderr, "Error: Prune target must be at least %d MB\n",
+                PRUNE_TARGET_MIN_MB);
+        return -1;
+      }
+      config->prune_target_mb = (uint64_t)prune_mb;
     } else if (strcmp(arg, "--testnet") == 0) {
 #if !defined(ECHO_NETWORK_TESTNET)
       fprintf(stderr,
@@ -257,8 +274,11 @@ int main(int argc, char *argv[]) {
 
   if (config.observer_mode) {
     printf("Mode: Observer (watch-only, no validation)\n");
+  } else if (config.prune_target_mb > 0) {
+    printf("Mode: Full validating node (pruned, target %llu MB)\n",
+           (unsigned long long)config.prune_target_mb);
   } else {
-    printf("Mode: Full validating node\n");
+    printf("Mode: Full validating node (archival)\n");
   }
   printf("Data directory: %s\n", config.data_dir);
   printf("P2P port: %u\n", config.port);

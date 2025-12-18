@@ -710,3 +710,168 @@ echo_result_t block_index_db_get_chainwork(block_index_db_t *bdb,
   *chainwork = entry.chainwork;
   return ECHO_OK;
 }
+
+/* ========================================================================
+ * Pruning Operations (Session 9.6.2)
+ * ======================================================================== */
+
+echo_result_t block_index_db_mark_pruned(block_index_db_t *bdb,
+                                         uint32_t start_height,
+                                         uint32_t end_height) {
+  echo_result_t result;
+  db_stmt_t stmt;
+
+  if (bdb == NULL) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  if (start_height >= end_height) {
+    return ECHO_ERR_INVALID_PARAM;
+  }
+
+  /*
+   * Update status for all blocks in the height range:
+   * - Set BLOCK_STATUS_PRUNED flag
+   * - Clear BLOCK_STATUS_HAVE_DATA flag
+   */
+  result = db_prepare(
+      &bdb->db,
+      "UPDATE blocks SET status = (status | ?) & ? WHERE height >= ? AND height < ?",
+      &stmt);
+  if (result != ECHO_OK) {
+    return result;
+  }
+
+  /* Bind BLOCK_STATUS_PRUNED to set (parameter 1) */
+  result = db_bind_int(&stmt, 1, BLOCK_STATUS_PRUNED);
+  if (result != ECHO_OK) {
+    db_stmt_finalize(&stmt);
+    return result;
+  }
+
+  /* Bind mask to clear BLOCK_STATUS_HAVE_DATA (parameter 2) */
+  int clear_mask = ~BLOCK_STATUS_HAVE_DATA;
+  result = db_bind_int(&stmt, 2, clear_mask);
+  if (result != ECHO_OK) {
+    db_stmt_finalize(&stmt);
+    return result;
+  }
+
+  /* Bind start_height (parameter 3) */
+  result = db_bind_int(&stmt, 3, (int)start_height);
+  if (result != ECHO_OK) {
+    db_stmt_finalize(&stmt);
+    return result;
+  }
+
+  /* Bind end_height (parameter 4) */
+  result = db_bind_int(&stmt, 4, (int)end_height);
+  if (result != ECHO_OK) {
+    db_stmt_finalize(&stmt);
+    return result;
+  }
+
+  /* Execute update */
+  result = db_step(&stmt);
+  db_stmt_finalize(&stmt);
+
+  if (result == ECHO_DONE) {
+    return ECHO_OK;
+  }
+
+  return result;
+}
+
+echo_result_t block_index_db_get_pruned_height(block_index_db_t *bdb,
+                                               uint32_t *height) {
+  echo_result_t result;
+  db_stmt_t stmt;
+
+  if (bdb == NULL || height == NULL) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  /*
+   * Find the lowest block height that has BLOCK_STATUS_HAVE_DATA set
+   * and does NOT have BLOCK_STATUS_PRUNED set.
+   * This represents the first block with available data.
+   */
+  result = db_prepare(
+      &bdb->db,
+      "SELECT MIN(height) FROM blocks WHERE (status & ?) != 0 AND (status & ?) = 0",
+      &stmt);
+  if (result != ECHO_OK) {
+    return result;
+  }
+
+  /* Bind BLOCK_STATUS_HAVE_DATA (parameter 1) */
+  result = db_bind_int(&stmt, 1, BLOCK_STATUS_HAVE_DATA);
+  if (result != ECHO_OK) {
+    db_stmt_finalize(&stmt);
+    return result;
+  }
+
+  /* Bind BLOCK_STATUS_PRUNED (parameter 2) */
+  result = db_bind_int(&stmt, 2, BLOCK_STATUS_PRUNED);
+  if (result != ECHO_OK) {
+    db_stmt_finalize(&stmt);
+    return result;
+  }
+
+  /* Execute query */
+  result = db_step(&stmt);
+  if (result == ECHO_DONE) {
+    /* No results - database is empty */
+    db_stmt_finalize(&stmt);
+    return ECHO_ERR_NOT_FOUND;
+  }
+  if (result != ECHO_OK) {
+    db_stmt_finalize(&stmt);
+    return result;
+  }
+
+  /* Get the minimum height (may be NULL if no unpruned blocks) */
+  int min_height = db_column_int(&stmt, 0);
+  db_stmt_finalize(&stmt);
+
+  /* If result is 0 and we have blocks, check if it's real 0 or NULL */
+  if (min_height == 0) {
+    /* Check if genesis block has data */
+    block_index_entry_t genesis;
+    hash256_t zero_hash;
+    memset(&zero_hash, 0, sizeof(zero_hash));
+
+    /* Query for block at height 0 */
+    result = block_index_db_lookup_by_height(bdb, 0, &genesis);
+    if (result == ECHO_OK) {
+      if ((genesis.status & BLOCK_STATUS_HAVE_DATA) &&
+          !(genesis.status & BLOCK_STATUS_PRUNED)) {
+        *height = 0;
+        return ECHO_OK;
+      }
+    }
+  }
+
+  *height = (uint32_t)min_height;
+  return ECHO_OK;
+}
+
+echo_result_t block_index_db_is_pruned(block_index_db_t *bdb,
+                                       const hash256_t *hash,
+                                       bool *pruned) {
+  echo_result_t result;
+  block_index_entry_t entry;
+
+  if (bdb == NULL || hash == NULL || pruned == NULL) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  result = block_index_db_lookup_by_hash(bdb, hash, &entry);
+  if (result != ECHO_OK) {
+    return result;
+  }
+
+  /* A block is considered pruned if BLOCK_STATUS_PRUNED is set */
+  *pruned = (entry.status & BLOCK_STATUS_PRUNED) != 0;
+  return ECHO_OK;
+}

@@ -1058,6 +1058,8 @@ static echo_result_t rpc_getobservedblocks(node_t *node, const json_value_t *par
                                            json_builder_t *builder);
 static echo_result_t rpc_getobservedtxs(node_t *node, const json_value_t *params,
                                         json_builder_t *builder);
+static echo_result_t rpc_pruneblockchain(node_t *node, const json_value_t *params,
+                                         json_builder_t *builder);
 
 /* Method dispatch table */
 static const rpc_method_entry_t rpc_methods[] = {
@@ -1071,6 +1073,7 @@ static const rpc_method_entry_t rpc_methods[] = {
     {"getobserverstats", rpc_getobserverstats},   /* Session 9.5 */
     {"getobservedblocks", rpc_getobservedblocks}, /* Session 9.5 */
     {"getobservedtxs", rpc_getobservedtxs},       /* Session 9.5 */
+    {"pruneblockchain", rpc_pruneblockchain},     /* Session 9.6.2 */
     {NULL, NULL}};
 
 /* Find method handler */
@@ -1616,11 +1619,27 @@ echo_result_t rpc_getblockchaininfo(node_t *node, const json_value_t *params,
   json_builder_append(builder, ",\"chainwork\":");
   json_builder_string(builder, chainwork_hex);
 
+  /* Get actual disk usage from block storage (Session 9.6.2) */
+  uint64_t disk_usage = node_get_block_storage_size(node);
   json_builder_append(builder, ",\"size_on_disk\":");
-  json_builder_uint(builder, 0); /* TODO: calculate disk usage */
+  json_builder_uint(builder, disk_usage);
 
+  /* Pruning information (Session 9.6.2) */
+  bool is_pruned = node_is_pruning_enabled(node);
   json_builder_append(builder, ",\"pruned\":");
-  json_builder_bool(builder, false);
+  json_builder_bool(builder, is_pruned);
+
+  if (is_pruned) {
+    /* Add pruneheight - lowest block height with available data */
+    uint32_t pruned_height = node_get_pruned_height(node);
+    json_builder_append(builder, ",\"pruneheight\":");
+    json_builder_uint(builder, pruned_height);
+
+    /* Add prune_target_size - configured target in bytes */
+    uint64_t prune_target = node_get_prune_target(node);
+    json_builder_append(builder, ",\"prune_target_size\":");
+    json_builder_uint(builder, prune_target * 1024 * 1024); /* MB to bytes */
+  }
 
   json_builder_append(builder, "}");
 
@@ -2279,5 +2298,63 @@ static echo_result_t rpc_getobservedtxs(node_t *node,
   }
 
   json_builder_append(builder, "]}");
+  return ECHO_OK;
+}
+
+/*
+ * ============================================================================
+ * PRUNING RPC METHOD (Session 9.6.2)
+ * ============================================================================
+ */
+
+/**
+ * RPC: pruneblockchain
+ *
+ * Manually prunes blocks up to the specified height.
+ *
+ * Parameters:
+ *   height (number) - Target block height to prune up to
+ *
+ * Returns:
+ *   The actual height pruned to (may be less than requested due to
+ *   reorg safety margin).
+ *
+ * Errors:
+ *   -1: Pruning is not enabled (--prune flag not set)
+ *   -8: Invalid parameter
+ */
+static echo_result_t rpc_pruneblockchain(node_t *node, const json_value_t *params,
+                                         json_builder_t *builder) {
+  if (node == NULL || builder == NULL) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  /* Check if pruning is enabled */
+  if (!node_is_pruning_enabled(node)) {
+    /* Return error: pruning not enabled */
+    return RPC_ERR_MISC; /* "Cannot prune blocks when pruning is not enabled" */
+  }
+
+  /* Get height parameter */
+  json_value_t *height_val = json_array_get(params, 0);
+  if (height_val == NULL) {
+    return ECHO_ERR_INVALID_PARAM;
+  }
+
+  uint32_t target_height = 0;
+  if (height_val->type == JSON_NUMBER) {
+    if (height_val->u.number < 0) {
+      return ECHO_ERR_INVALID_PARAM;
+    }
+    target_height = (uint32_t)height_val->u.number;
+  } else {
+    return ECHO_ERR_INVALID_PARAM;
+  }
+
+  /* Perform pruning */
+  uint32_t actual_height = node_prune_blocks(node, target_height);
+
+  /* Return the actual height pruned to */
+  json_builder_uint(builder, actual_height);
   return ECHO_OK;
 }

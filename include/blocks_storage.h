@@ -20,6 +20,7 @@
 #define ECHO_BLOCKS_STORAGE_H
 
 #include "echo_types.h"
+#include <stdbool.h>
 #include <stdint.h>
 
 /*
@@ -125,5 +126,98 @@ echo_result_t block_storage_read(block_file_manager_t *mgr,
  */
 void block_storage_get_path(const block_file_manager_t *mgr,
                             uint32_t file_index, char *path_out);
+
+/*
+ * ============================================================================
+ * PRUNING OPERATIONS (Session 9.6.2)
+ * ============================================================================
+ */
+
+/*
+ * Delete a block file.
+ *
+ * Parameters:
+ *   mgr        - Block file manager
+ *   file_index - Index of file to delete
+ *
+ * Returns:
+ *   ECHO_OK on success, error code on failure
+ *
+ * Notes:
+ *   - File must exist
+ *   - Used during pruning to reclaim disk space
+ *   - Cannot delete the current write file
+ */
+echo_result_t block_storage_delete_file(block_file_manager_t *mgr,
+                                        uint32_t file_index);
+
+/*
+ * Check if a block file exists.
+ *
+ * Parameters:
+ *   mgr        - Block file manager
+ *   file_index - Index of file to check
+ *   exists     - Output: true if file exists, false otherwise
+ *
+ * Returns:
+ *   ECHO_OK on success, error code on failure
+ */
+echo_result_t block_storage_file_exists(const block_file_manager_t *mgr,
+                                        uint32_t file_index, bool *exists);
+
+/*
+ * Get the size of a block file.
+ *
+ * Parameters:
+ *   mgr        - Block file manager
+ *   file_index - Index of file to query
+ *   size       - Output: file size in bytes (0 if file doesn't exist)
+ *
+ * Returns:
+ *   ECHO_OK on success, error code on failure
+ */
+echo_result_t block_storage_get_file_size(const block_file_manager_t *mgr,
+                                          uint32_t file_index, uint64_t *size);
+
+/*
+ * Get total disk usage of all block files.
+ *
+ * Parameters:
+ *   mgr        - Block file manager
+ *   total_size - Output: total size of all block files in bytes
+ *
+ * Returns:
+ *   ECHO_OK on success, error code on failure
+ *
+ * Notes:
+ *   - Sums size of all blk*.dat files
+ *   - Used to check if pruning is needed
+ */
+echo_result_t block_storage_get_total_size(const block_file_manager_t *mgr,
+                                           uint64_t *total_size);
+
+/*
+ * Get the current write file index.
+ *
+ * Parameters:
+ *   mgr - Block file manager
+ *
+ * Returns:
+ *   Index of the current file being written to
+ */
+uint32_t block_storage_get_current_file(const block_file_manager_t *mgr);
+
+/*
+ * Get the lowest file index (for pruning scan).
+ *
+ * Parameters:
+ *   mgr        - Block file manager
+ *   file_index - Output: lowest file index with existing file
+ *
+ * Returns:
+ *   ECHO_OK if found, ECHO_ERR_NOT_FOUND if no files exist
+ */
+echo_result_t block_storage_get_lowest_file(const block_file_manager_t *mgr,
+                                            uint32_t *file_index);
 
 #endif /* ECHO_BLOCKS_STORAGE_H */
