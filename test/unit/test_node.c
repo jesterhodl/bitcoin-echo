@@ -7,6 +7,7 @@
  */
 
 #include "node.h"
+#include "block.h"
 #include "block_index_db.h"
 #include "blocks_storage.h"
 #include "consensus.h"
@@ -855,6 +856,175 @@ static void storage_multiple_restarts(void) {
 
 /*
  * ============================================================================
+ * BLOCK PIPELINE TESTS (Session 9.6.1)
+ * ============================================================================
+ */
+
+/**
+ * Test invalid block tracking initialization.
+ */
+static void block_pipeline_invalid_tracking_init(void) {
+  make_test_dir("bpinit");
+  node_config_t config;
+  node_config_init(&config, test_data_dir);
+
+  node_t *node = node_create(&config);
+  ASSERT_NOT_NULL(node);
+
+  /* Initially no invalid blocks */
+  ASSERT_EQ(node_get_invalid_block_count(node), 0);
+
+  /* Check a random hash - should not be invalid */
+  hash256_t test_hash;
+  memset(test_hash.bytes, 0xAB, sizeof(test_hash.bytes));
+  ASSERT(!node_is_block_invalid(node, &test_hash));
+
+  node_destroy(node);
+  cleanup_test_dir(test_data_dir);
+}
+
+/**
+ * Test node_is_block_invalid with NULL parameters.
+ */
+static void block_pipeline_invalid_check_null(void) {
+  hash256_t test_hash;
+  memset(test_hash.bytes, 0, sizeof(test_hash.bytes));
+
+  /* NULL node should return false */
+  ASSERT(!node_is_block_invalid(NULL, &test_hash));
+
+  /* Create a real node to test NULL hash */
+  make_test_dir("bpnull");
+  node_config_t config;
+  node_config_init(&config, test_data_dir);
+
+  node_t *node = node_create(&config);
+  ASSERT_NOT_NULL(node);
+
+  /* NULL hash should return false */
+  ASSERT(!node_is_block_invalid(node, NULL));
+
+  node_destroy(node);
+  cleanup_test_dir(test_data_dir);
+}
+
+/**
+ * Test node_get_invalid_block_count with NULL.
+ */
+static void block_pipeline_count_null(void) {
+  ASSERT_EQ(node_get_invalid_block_count(NULL), 0);
+}
+
+/**
+ * Test that observer mode doesn't track invalid blocks.
+ */
+static void block_pipeline_observer_mode(void) {
+  make_test_dir("bpobs");
+  node_config_t config;
+  node_config_init(&config, test_data_dir);
+  config.observer_mode = true;
+
+  node_t *node = node_create(&config);
+  ASSERT_NOT_NULL(node);
+
+  /* Observer mode should always return 0 invalid blocks */
+  ASSERT_EQ(node_get_invalid_block_count(node), 0);
+
+  /* Any hash check should return false in observer mode */
+  hash256_t test_hash;
+  memset(test_hash.bytes, 0x11, sizeof(test_hash.bytes));
+  ASSERT(!node_is_block_invalid(node, &test_hash));
+
+  node_destroy(node);
+  cleanup_test_dir(test_data_dir);
+}
+
+/**
+ * Test node_process_received_block with NULL parameters.
+ */
+static void block_pipeline_process_null(void) {
+  make_test_dir("bpproc");
+  node_config_t config;
+  node_config_init(&config, test_data_dir);
+
+  node_t *node = node_create(&config);
+  ASSERT_NOT_NULL(node);
+
+  /* NULL node */
+  block_t dummy_block;
+  block_init(&dummy_block);
+  ASSERT_EQ(node_process_received_block(NULL, &dummy_block), ECHO_ERR_NULL_PARAM);
+
+  /* NULL block */
+  ASSERT_EQ(node_process_received_block(node, NULL), ECHO_ERR_NULL_PARAM);
+
+  node_destroy(node);
+  cleanup_test_dir(test_data_dir);
+}
+
+/**
+ * Test that observer mode rejects block processing.
+ */
+static void block_pipeline_observer_rejects(void) {
+  make_test_dir("bpobsrej");
+  node_config_t config;
+  node_config_init(&config, test_data_dir);
+  config.observer_mode = true;
+
+  node_t *node = node_create(&config);
+  ASSERT_NOT_NULL(node);
+
+  block_t dummy_block;
+  block_init(&dummy_block);
+
+  /* Observer mode should return invalid state */
+  ASSERT_EQ(node_process_received_block(node, &dummy_block), ECHO_ERR_INVALID_STATE);
+
+  node_destroy(node);
+  cleanup_test_dir(test_data_dir);
+}
+
+/**
+ * Test sync manager is created for full node.
+ */
+static void block_pipeline_sync_manager_created(void) {
+  make_test_dir("bpsync");
+  node_config_t config;
+  node_config_init(&config, test_data_dir);
+
+  node_t *node = node_create(&config);
+  ASSERT_NOT_NULL(node);
+
+  /* Sync manager should be accessible */
+  sync_manager_t *sync_mgr = node_get_sync_manager(node);
+  ASSERT_NOT_NULL(sync_mgr);
+
+  node_destroy(node);
+  cleanup_test_dir(test_data_dir);
+}
+
+/**
+ * Test sync manager is NULL for observer mode.
+ */
+static void block_pipeline_sync_manager_observer(void) {
+  make_test_dir("bpsyncobs");
+  node_config_t config;
+  node_config_init(&config, test_data_dir);
+  config.observer_mode = true;
+
+  node_t *node = node_create(&config);
+  ASSERT_NOT_NULL(node);
+
+  /* Sync manager should be NULL in observer mode */
+  sync_manager_t *sync_mgr = node_get_sync_manager(node);
+  ASSERT_NULL(sync_mgr);
+
+  node_destroy(node);
+  cleanup_test_dir(test_data_dir);
+}
+
+/*
+ * ============================================================================
  * MAIN
  * ============================================================================
  */
@@ -923,6 +1093,16 @@ int main(void) {
     test_case("UTXO database persistence"); storage_utxo_persistence(); test_pass();
     test_case("node_apply_block handles NULL"); storage_apply_block_persistence(); test_pass();
     test_case("Multiple restart cycles"); storage_multiple_restarts(); test_pass();
+
+    test_section("Block Pipeline (Session 9.6.1)");
+    test_case("Invalid block tracking initialization"); block_pipeline_invalid_tracking_init(); test_pass();
+    test_case("Invalid block check with NULL params"); block_pipeline_invalid_check_null(); test_pass();
+    test_case("Invalid block count with NULL"); block_pipeline_count_null(); test_pass();
+    test_case("Observer mode doesn't track invalid blocks"); block_pipeline_observer_mode(); test_pass();
+    test_case("Process block with NULL params"); block_pipeline_process_null(); test_pass();
+    test_case("Observer mode rejects block processing"); block_pipeline_observer_rejects(); test_pass();
+    test_case("Sync manager created for full node"); block_pipeline_sync_manager_created(); test_pass();
+    test_case("Sync manager NULL for observer mode"); block_pipeline_sync_manager_observer(); test_pass();
 
     test_suite_end();
     return test_global_summary();

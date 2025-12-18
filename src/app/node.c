@@ -22,8 +22,10 @@
  */
 
 #include "node.h"
+#include "block.h"
 #include "block_index_db.h"
 #include "blocks_storage.h"
+#include "chainstate.h"
 #include "consensus.h"
 #include "discovery.h"
 #include "echo_config.h"
@@ -89,6 +91,12 @@ struct node {
 
   /* Observer mode statistics (Session 9.5) */
   observer_stats_t observer_stats;
+
+  /* Block pipeline tracking (Session 9.6.1) */
+  #define NODE_MAX_INVALID_BLOCKS 1000
+  hash256_t invalid_blocks[NODE_MAX_INVALID_BLOCKS];
+  size_t invalid_block_count;
+  size_t invalid_block_write_idx;  /* Ring buffer write position */
 };
 
 /*
@@ -103,7 +111,19 @@ static echo_result_t node_init_consensus(node_t *node);
 static echo_result_t node_restore_chain_state(node_t *node);
 static echo_result_t node_init_mempool(node_t *node);
 static echo_result_t node_init_discovery(node_t *node);
+static echo_result_t node_init_sync(node_t *node);
 static void node_cleanup(node_t *node);
+
+/* Sync manager callbacks (Session 9.6.1) */
+static echo_result_t sync_cb_get_block(const hash256_t *hash, block_t *block_out,
+                                       void *ctx);
+static echo_result_t sync_cb_store_block(const block_t *block, void *ctx);
+static echo_result_t sync_cb_validate_header(const block_header_t *header,
+                                             const block_index_t *prev_index,
+                                             void *ctx);
+static echo_result_t sync_cb_validate_and_apply_block(const block_t *block,
+                                                      const block_index_t *index,
+                                                      void *ctx);
 
 /*
  * ============================================================================
@@ -203,9 +223,17 @@ node_t *node_create(const node_config_t *config) {
       free(node);
       return NULL;
     }
+
+    /* Step 5: Initialize sync manager (full node only) - Session 9.6.1 */
+    result = node_init_sync(node);
+    if (result != ECHO_OK) {
+      node_cleanup(node);
+      free(node);
+      return NULL;
+    }
   }
 
-  /* Step 5: Initialize peer discovery (both modes) */
+  /* Step 6: Initialize peer discovery (both modes) */
   result = node_init_discovery(node);
   if (result != ECHO_OK) {
     node_cleanup(node);
@@ -461,6 +489,258 @@ static echo_result_t node_init_mempool(node_t *node) {
    * Mempool callbacks will be set up in the event loop (Session 9.2).
    * For now, the mempool is created but not connected to UTXO lookups.
    */
+
+  return ECHO_OK;
+}
+
+/*
+ * ============================================================================
+ * SYNC MANAGER CALLBACKS (Session 9.6.1)
+ * ============================================================================
+ *
+ * These callbacks connect the sync manager to the node's storage and
+ * validation infrastructure.
+ */
+
+/**
+ * Get block from storage.
+ *
+ * Called by sync manager to check if we already have a block.
+ */
+static echo_result_t sync_cb_get_block(const hash256_t *hash, block_t *block_out,
+                                       void *ctx) {
+  node_t *node = (node_t *)ctx;
+  if (node == NULL || hash == NULL || block_out == NULL) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  /* Check if block is in our block index (header known) */
+  const block_index_t *index = consensus_lookup_block_index(node->consensus, hash);
+  if (index == NULL) {
+    return ECHO_ERR_NOT_FOUND;
+  }
+
+  /* For now, we don't store full blocks in memory after validation.
+   * Return success if we have validated it (on main chain). */
+  if (index->on_main_chain) {
+    /* Block is on main chain - we have it */
+    /* TODO: Load from block file storage if needed */
+    return ECHO_OK;
+  }
+
+  return ECHO_ERR_NOT_FOUND;
+}
+
+/**
+ * Store block data.
+ *
+ * Called by sync manager to persist a block after download.
+ * Note: Actual storage happens in validate_and_apply_block for atomicity.
+ */
+static echo_result_t sync_cb_store_block(const block_t *block, void *ctx) {
+  (void)block;
+  (void)ctx;
+  /* Storage is handled atomically in validate_and_apply_block */
+  return ECHO_OK;
+}
+
+/**
+ * Validate a block header (contextual validation).
+ *
+ * Called by sync manager during headers-first sync.
+ */
+static echo_result_t sync_cb_validate_header(const block_header_t *header,
+                                             const block_index_t *prev_index,
+                                             void *ctx) {
+  node_t *node = (node_t *)ctx;
+  if (node == NULL || header == NULL) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  /* Use consensus engine header validation */
+  consensus_result_t result;
+  consensus_result_init(&result);
+
+  bool valid = consensus_validate_header(node->consensus, header, &result);
+  if (!valid) {
+    log_warn(LOG_COMP_CONS, "Header validation failed: %s",
+             consensus_error_str(result.error));
+    return ECHO_ERR_INVALID;
+  }
+
+  /* If prev_index provided, check it matches header.prev_hash */
+  if (prev_index != NULL) {
+    if (memcmp(&header->prev_hash, &prev_index->hash, sizeof(hash256_t)) != 0) {
+      log_warn(LOG_COMP_CONS, "Header prev_hash mismatch");
+      return ECHO_ERR_INVALID;
+    }
+  }
+
+  return ECHO_OK;
+}
+
+/**
+ * Mark a block as invalid (add to invalid blocks list).
+ */
+static void node_mark_block_invalid(node_t *node, const hash256_t *hash) {
+  /* Check if already marked - inline check to avoid forward declaration */
+  for (size_t i = 0; i < node->invalid_block_count; i++) {
+    if (memcmp(&node->invalid_blocks[i], hash, sizeof(hash256_t)) == 0) {
+      return; /* Already marked */
+    }
+  }
+
+  /* Add to ring buffer */
+  node->invalid_blocks[node->invalid_block_write_idx] = *hash;
+  node->invalid_block_write_idx =
+      (node->invalid_block_write_idx + 1) % NODE_MAX_INVALID_BLOCKS;
+
+  if (node->invalid_block_count < NODE_MAX_INVALID_BLOCKS) {
+    node->invalid_block_count++;
+  }
+}
+
+/**
+ * Validate and apply a full block.
+ *
+ * This is the critical callback that wires consensus validation to the
+ * block pipeline. Called by sync manager when a block is received.
+ *
+ * Steps:
+ *   1. Check if block is already known invalid
+ *   2. Validate block via consensus engine
+ *   3. If valid, apply to chain state and storage via node_apply_block
+ *   4. If invalid, mark as invalid and log error
+ *   5. Announce valid blocks to peers
+ */
+static echo_result_t sync_cb_validate_and_apply_block(const block_t *block,
+                                                      const block_index_t *index,
+                                                      void *ctx) {
+  node_t *node = (node_t *)ctx;
+  if (node == NULL || block == NULL) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  /* Compute block hash */
+  hash256_t block_hash;
+  echo_result_t result = block_header_hash(&block->header, &block_hash);
+  if (result != ECHO_OK) {
+    log_error(LOG_COMP_CONS, "Failed to compute block hash");
+    return result;
+  }
+
+  /* Step 1: Check if block is already known invalid */
+  if (node_is_block_invalid(node, &block_hash)) {
+    log_debug(LOG_COMP_CONS, "Rejecting known-invalid block");
+    return ECHO_ERR_INVALID;
+  }
+
+  /* Step 2: Validate block via consensus engine */
+  consensus_result_t validation_result;
+  consensus_result_init(&validation_result);
+
+  bool valid = consensus_validate_block(node->consensus, block, &validation_result);
+
+  if (!valid) {
+    /* Step 4: Mark as invalid and log error */
+    node_mark_block_invalid(node, &block_hash);
+
+    /* Log detailed error information */
+    uint32_t height = 0;
+    if (index != NULL) {
+      height = index->height;
+    }
+
+    log_error(LOG_COMP_CONS,
+              "Block validation failed at height %u: %s (tx=%zu, input=%zu)",
+              height,
+              consensus_error_str(validation_result.error),
+              validation_result.failing_index,
+              validation_result.failing_input_index);
+
+    /* Log additional detail based on error type */
+    if (validation_result.error == CONSENSUS_ERR_TX_SCRIPT) {
+      log_error(LOG_COMP_CONS, "  Script error: %d", validation_result.script_error);
+    } else if (validation_result.error == CONSENSUS_ERR_BLOCK_HEADER) {
+      log_error(LOG_COMP_CONS, "  Block error: %d", validation_result.block_error);
+    }
+
+    return ECHO_ERR_INVALID;
+  }
+
+  /* Step 3: Apply to chain state and storage */
+  result = node_apply_block(node, block);
+  if (result != ECHO_OK) {
+    log_error(LOG_COMP_CONS, "Failed to apply valid block: %d", result);
+    return result;
+  }
+
+  /* Step 5: Announce valid block to peers */
+  /* Send INV to all connected peers except the sender */
+  for (size_t i = 0; i < NODE_MAX_PEERS; i++) {
+    peer_t *peer = &node->peers[i];
+    if (peer_is_ready(peer)) {
+      /* Build and send INV message */
+      inv_vector_t inv_vec;
+      inv_vec.type = INV_BLOCK;
+      inv_vec.hash = block_hash;
+
+      msg_t inv_msg;
+      memset(&inv_msg, 0, sizeof(inv_msg));
+      inv_msg.type = MSG_INV;
+      inv_msg.payload.inv.count = 1;
+      inv_msg.payload.inv.inventory = &inv_vec;
+
+      peer_queue_message(peer, &inv_msg);
+    }
+  }
+
+  /* Log success */
+  uint32_t height = consensus_get_height(node->consensus);
+  log_info(LOG_COMP_CONS, "Block validated and applied: height=%u, txs=%zu",
+           height, block->tx_count);
+
+  return ECHO_OK;
+}
+
+/**
+ * Initialize sync manager with callbacks.
+ *
+ * Session 9.6.1: Block Processing Pipeline
+ */
+static echo_result_t node_init_sync(node_t *node) {
+  if (node == NULL || node->consensus == NULL) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  /* Get chainstate from consensus engine */
+  chainstate_t *chainstate = consensus_get_chainstate(node->consensus);
+  if (chainstate == NULL) {
+    log_error(LOG_COMP_MAIN, "Failed to get chainstate from consensus engine");
+    return ECHO_ERR_INVALID;
+  }
+
+  /* Set up sync callbacks */
+  sync_callbacks_t callbacks = {
+      .get_block = sync_cb_get_block,
+      .store_block = sync_cb_store_block,
+      .validate_header = sync_cb_validate_header,
+      .validate_and_apply_block = sync_cb_validate_and_apply_block,
+      .ctx = node};
+
+  /* Create sync manager */
+  node->sync_mgr = sync_create(chainstate, &callbacks);
+  if (node->sync_mgr == NULL) {
+    log_error(LOG_COMP_MAIN, "Failed to create sync manager");
+    return ECHO_ERR_OUT_OF_MEMORY;
+  }
+
+  /* Initialize invalid block tracking */
+  node->invalid_block_count = 0;
+  node->invalid_block_write_idx = 0;
+  memset(node->invalid_blocks, 0, sizeof(node->invalid_blocks));
+
+  log_info(LOG_COMP_MAIN, "Sync manager initialized with block pipeline callbacks");
 
   return ECHO_OK;
 }
@@ -1691,4 +1971,69 @@ void node_observe_message(node_t *node, const char *command) {
   } else {
     obs->msg_other++;
   }
+}
+
+/*
+ * ============================================================================
+ * BLOCK PIPELINE PUBLIC API (Session 9.6.1)
+ * ============================================================================
+ */
+
+bool node_is_block_invalid(const node_t *node, const hash256_t *hash) {
+  if (node == NULL || hash == NULL) {
+    return false;
+  }
+
+  /* In observer mode, no blocks are tracked as invalid */
+  if (node->config.observer_mode) {
+    return false;
+  }
+
+  /* Search the invalid blocks ring buffer */
+  for (size_t i = 0; i < node->invalid_block_count; i++) {
+    if (memcmp(&node->invalid_blocks[i], hash, sizeof(hash256_t)) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+size_t node_get_invalid_block_count(const node_t *node) {
+  if (node == NULL || node->config.observer_mode) {
+    return 0;
+  }
+  return node->invalid_block_count;
+}
+
+echo_result_t node_process_received_block(node_t *node, const block_t *block) {
+  if (node == NULL || block == NULL) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  /* Observer mode doesn't process blocks */
+  if (node->config.observer_mode) {
+    return ECHO_ERR_INVALID_STATE;
+  }
+
+  /* Compute block hash */
+  hash256_t block_hash;
+  echo_result_t result = block_header_hash(&block->header, &block_hash);
+  if (result != ECHO_OK) {
+    return result;
+  }
+
+  /* Check if already known (on main chain) */
+  const block_index_t *existing = consensus_lookup_block_index(node->consensus,
+                                                                &block_hash);
+  if (existing != NULL && existing->on_main_chain) {
+    return ECHO_ERR_EXISTS;
+  }
+
+  /* Check if known invalid */
+  if (node_is_block_invalid(node, &block_hash)) {
+    return ECHO_ERR_INVALID;
+  }
+
+  /* Process through sync manager callback (which handles validation and storage) */
+  return sync_cb_validate_and_apply_block(block, existing, node);
 }

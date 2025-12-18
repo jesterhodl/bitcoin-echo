@@ -23,6 +23,7 @@
 #ifndef ECHO_NODE_H
 #define ECHO_NODE_H
 
+#include "block.h"
 #include "block_index_db.h"
 #include "blocks_storage.h"
 #include "chainstate.h"
@@ -649,5 +650,58 @@ void node_observe_tx(node_t *node, const hash256_t *txid);
  *   command - Message command string (e.g., "version", "inv")
  */
 void node_observe_message(node_t *node, const char *command);
+
+/*
+ * ============================================================================
+ * BLOCK PIPELINE (Session 9.6.1)
+ * ============================================================================
+ */
+
+/**
+ * Check if a block hash is known to be invalid.
+ *
+ * The node maintains a ring buffer of recently rejected block hashes
+ * to avoid re-downloading and re-validating blocks that have already
+ * failed validation.
+ *
+ * Parameters:
+ *   node - The node
+ *   hash - Block hash to check
+ *
+ * Returns:
+ *   true if block is known invalid, false otherwise
+ */
+bool node_is_block_invalid(const node_t *node, const hash256_t *hash);
+
+/**
+ * Get the count of known invalid blocks.
+ *
+ * Parameters:
+ *   node - The node
+ *
+ * Returns:
+ *   Number of blocks in the invalid blocks list
+ */
+size_t node_get_invalid_block_count(const node_t *node);
+
+/**
+ * Process a received block through the validation pipeline.
+ *
+ * This is the main entry point for block processing:
+ *   1. Check if block is known invalid (reject if so)
+ *   2. Validate via consensus engine
+ *   3. Apply to chain state and storage
+ *   4. Announce to peers if valid
+ *
+ * Parameters:
+ *   node  - The node
+ *   block - The block to process
+ *
+ * Returns:
+ *   ECHO_OK if block was valid and applied
+ *   ECHO_ERR_INVALID if block failed validation
+ *   ECHO_ERR_EXISTS if block was already known
+ */
+echo_result_t node_process_received_block(node_t *node, const block_t *block);
 
 #endif /* ECHO_NODE_H */
