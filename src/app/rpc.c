@@ -17,12 +17,14 @@
 
 #include "rpc.h"
 #include "block.h"
+#include "block_validate.h"
 #include "chainstate.h"
 #include "consensus.h"
 #include "echo_config.h"
 #include "echo_types.h"
 #include "log.h"
 #include "mempool.h"
+#include "mining.h"
 #include "node.h"
 #include "platform.h"
 #include "tx.h"
@@ -2064,6 +2066,9 @@ echo_result_t rpc_getblocktemplate(node_t *node, const json_value_t *params,
   char prev_hash[65];
   rpc_format_hash(&tip.hash, prev_hash);
 
+  /* Next block height */
+  uint32_t next_height = tip.height + 1;
+
   /* Get transactions from mempool */
   const mempool_t *mp = node_get_mempool_const(node);
   mempool_stats_t mp_stats;
@@ -2123,35 +2128,72 @@ echo_result_t rpc_getblocktemplate(node_t *node, const json_value_t *params,
 
   json_builder_append(builder, "]");
 
-  /* Coinbase value = subsidy + fees */
-  satoshi_t subsidy = 50 * 100000000LL; /* Start at 50 BTC */
-  uint32_t halvings = tip.height / 210000;
-  for (uint32_t i = 0; i < halvings && subsidy > 0; i++) {
-    subsidy /= 2;
-  }
+  /* Coinbase value = subsidy + fees using proper subsidy calculation */
+  satoshi_t subsidy = coinbase_subsidy(next_height);
 
   json_builder_append(builder, ",\"coinbasevalue\":");
   json_builder_int(builder, subsidy + total_fees);
 
+  /*
+   * Determine difficulty bits.
+   * For regtest: always use trivial difficulty (REGTEST_POWLIMIT_BITS).
+   * For mainnet/testnet: would need full difficulty calculation from context.
+   */
+  uint32_t bits;
+#if defined(ECHO_NETWORK_REGTEST)
+  /* Regtest: trivial difficulty, no adjustment */
+  bits = REGTEST_POWLIMIT_BITS;
+#else
+  /* Mainnet/testnet: use genesis difficulty as placeholder.
+   * Full difficulty adjustment would require the difficulty context. */
+  bits = DIFFICULTY_POWLIMIT_BITS;
+#endif
+
+  /* Convert bits to target for the "target" field */
+  hash256_t target;
+  block_bits_to_target(bits, &target);
+
+  /* Format target as hex string (big-endian for display) */
+  char target_hex[65];
+  for (size_t i = 0; i < 32; i++) {
+    snprintf(target_hex + (i * 2), 3, "%02x", target.bytes[31 - i]);
+  }
+
   json_builder_append(builder, ",\"target\":");
-  /* TODO: calculate proper target from bits */
-  json_builder_string(
-      builder, "00000000ffffffffffffffffffffffffffffffffffffffffffffffff");
+  json_builder_string(builder, target_hex);
+
+  /*
+   * Calculate minimum time (MTP + 1).
+   * For regtest with empty chain, use 0.
+   * For proper operation, would query block index for MTP.
+   */
+  uint32_t mintime = 0;
+  if (tip.height > 0) {
+    /* Simple approximation: use tip timestamp as mintime.
+     * Full implementation would calculate actual MTP. */
+    mintime = (uint32_t)(plat_time_ms() / 1000) - 600; /* Rough estimate */
+  }
 
   json_builder_append(builder, ",\"mintime\":");
-  json_builder_uint(builder, 0); /* TODO: MTP + 1 */
+  json_builder_uint(builder, mintime);
 
   json_builder_append(builder, ",\"curtime\":");
   json_builder_uint(builder, (uint64_t)(plat_time_ms() / 1000));
 
   json_builder_append(builder, ",\"bits\":");
   char bits_hex[9];
-  snprintf(bits_hex, sizeof(bits_hex), "%08x",
-           0x1d00ffff); /* TODO: actual bits */
+  snprintf(bits_hex, sizeof(bits_hex), "%08x", bits);
   json_builder_string(builder, bits_hex);
 
   json_builder_append(builder, ",\"height\":");
-  json_builder_uint(builder, tip.height + 1);
+  json_builder_uint(builder, next_height);
+
+  /* Add sigoplimit and sizelimit for completeness */
+  json_builder_append(builder, ",\"sigoplimit\":");
+  json_builder_uint(builder, BLOCK_MAX_SIGOPS);
+
+  json_builder_append(builder, ",\"weightlimit\":");
+  json_builder_uint(builder, BLOCK_MAX_WEIGHT);
 
   json_builder_append(builder, "}");
 
