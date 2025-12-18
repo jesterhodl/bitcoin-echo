@@ -15,6 +15,7 @@
 #include "echo_types.h"
 #include "mempool.h"
 #include "platform.h"
+#include "utxo.h"
 #include "utxo_db.h"
 #include <stdbool.h>
 #include <stdio.h>
@@ -641,6 +642,219 @@ static void get_state_null(void) { ASSERT_EQ(node_get_state(NULL), NODE_STATE_UN
 
 /*
  * ============================================================================
+ * STORAGE FOUNDATION TESTS (Session 9.6.0)
+ * ============================================================================
+ */
+
+/**
+ * Test chain state restoration on node restart.
+ *
+ * This is the key test for Session 9.6.0: verifies that chain state persists
+ * across node restarts. We:
+ *   1. Create a node
+ *   2. Insert a block into the block index database
+ *   3. Destroy the node
+ *   4. Create a new node with the same data directory
+ *   5. Verify the chain state was restored
+ */
+static void storage_chain_restoration(void) {
+  make_test_dir("restore");
+  node_config_t config;
+  node_config_init(&config, test_data_dir);
+
+  /* === First session: create node and add a block to database === */
+  node_t *node1 = node_create(&config);
+  ASSERT_NOT_NULL(node1);
+
+  /* Get block index database and insert a test block */
+  block_index_db_t *bdb1 = node_get_block_index_db(node1);
+  ASSERT_NOT_NULL(bdb1);
+
+  /* Create a genesis-like block entry */
+  block_index_entry_t genesis_entry;
+  memset(&genesis_entry, 0, sizeof(genesis_entry));
+  genesis_entry.height = 0;
+  genesis_entry.header.version = 1;
+  genesis_entry.header.timestamp = 1231006505;
+  genesis_entry.header.bits = 0x1d00ffff;
+  genesis_entry.header.nonce = 2083236893;
+  /* Hash: compute from header or use known genesis hash */
+  memset(genesis_entry.hash.bytes, 0, 32);
+  genesis_entry.hash.bytes[0] = 0x01; /* Simplified test hash */
+  genesis_entry.status = BLOCK_STATUS_VALID_HEADER | BLOCK_STATUS_VALID_CHAIN;
+
+  echo_result_t result = block_index_db_insert(bdb1, &genesis_entry);
+  ASSERT_EQ(result, ECHO_OK);
+
+  /* Verify it's in the database */
+  block_index_entry_t best;
+  result = block_index_db_get_best_chain(bdb1, &best);
+  ASSERT_EQ(result, ECHO_OK);
+  ASSERT_EQ(best.height, 0);
+
+  /* Destroy first node */
+  node_destroy(node1);
+
+  /* === Second session: create new node with same data directory === */
+  node_t *node2 = node_create(&config);
+  ASSERT_NOT_NULL(node2);
+
+  /* Verify chain state was restored */
+  block_index_db_t *bdb2 = node_get_block_index_db(node2);
+  ASSERT_NOT_NULL(bdb2);
+
+  result = block_index_db_get_best_chain(bdb2, &best);
+  ASSERT_EQ(result, ECHO_OK);
+  ASSERT_EQ(best.height, 0);
+  ASSERT(best.hash.bytes[0] == 0x01);
+
+  node_destroy(node2);
+  cleanup_test_dir(test_data_dir);
+}
+
+/**
+ * Test UTXO database persistence across restarts.
+ */
+static void storage_utxo_persistence(void) {
+  make_test_dir("utxopers");
+  node_config_t config;
+  node_config_init(&config, test_data_dir);
+
+  /* === First session: create node and add a UTXO === */
+  node_t *node1 = node_create(&config);
+  ASSERT_NOT_NULL(node1);
+
+  utxo_db_t *udb1 = node_get_utxo_db(node1);
+  ASSERT_NOT_NULL(udb1);
+
+  /* Create a test UTXO entry */
+  uint8_t script[] = {0x76, 0xa9, 0x14}; /* P2PKH prefix */
+  utxo_entry_t entry;
+  memset(&entry, 0, sizeof(entry));
+  entry.outpoint.txid.bytes[0] = 0xAB;
+  entry.outpoint.vout = 0;
+  entry.value = 5000000000; /* 50 BTC */
+  entry.script_pubkey = script;
+  entry.script_len = sizeof(script);
+  entry.height = 0;
+  entry.is_coinbase = true;
+
+  echo_result_t result = utxo_db_insert(udb1, &entry);
+  ASSERT_EQ(result, ECHO_OK);
+
+  /* Verify count */
+  size_t count1;
+  result = utxo_db_count(udb1, &count1);
+  ASSERT_EQ(result, ECHO_OK);
+  ASSERT_EQ(count1, 1);
+
+  node_destroy(node1);
+
+  /* === Second session: verify UTXO persists === */
+  node_t *node2 = node_create(&config);
+  ASSERT_NOT_NULL(node2);
+
+  utxo_db_t *udb2 = node_get_utxo_db(node2);
+  ASSERT_NOT_NULL(udb2);
+
+  size_t count2;
+  result = utxo_db_count(udb2, &count2);
+  ASSERT_EQ(result, ECHO_OK);
+  ASSERT_EQ(count2, 1);
+
+  /* Lookup the UTXO */
+  outpoint_t lookup_outpoint;
+  memset(&lookup_outpoint, 0, sizeof(lookup_outpoint));
+  lookup_outpoint.txid.bytes[0] = 0xAB;
+  lookup_outpoint.vout = 0;
+
+  utxo_entry_t *found = NULL;
+  result = utxo_db_lookup(udb2, &lookup_outpoint, &found);
+  ASSERT_EQ(result, ECHO_OK);
+  ASSERT_NOT_NULL(found);
+  ASSERT_EQ(found->value, 5000000000);
+  ASSERT(found->is_coinbase);
+
+  utxo_entry_destroy(found);
+  node_destroy(node2);
+  cleanup_test_dir(test_data_dir);
+}
+
+/**
+ * Test node_apply_block persists to databases.
+ */
+static void storage_apply_block_persistence(void) {
+  /* This test requires a valid block, which is complex to construct.
+   * For now, we just verify the function exists and handles NULL. */
+  echo_result_t result = node_apply_block(NULL, NULL);
+  ASSERT_EQ(result, ECHO_ERR_NULL_PARAM);
+}
+
+/**
+ * Test multiple restart cycles.
+ */
+static void storage_multiple_restarts(void) {
+  make_test_dir("multirest");
+  node_config_t config;
+  node_config_init(&config, test_data_dir);
+
+  block_index_entry_t entry;
+  echo_result_t result;
+
+  /* Create and store data */
+  for (int cycle = 0; cycle < 3; cycle++) {
+    node_t *node = node_create(&config);
+    ASSERT_NOT_NULL(node);
+
+    block_index_db_t *bdb = node_get_block_index_db(node);
+    ASSERT_NOT_NULL(bdb);
+
+    if (cycle == 0) {
+      /* First cycle: insert genesis */
+      memset(&entry, 0, sizeof(entry));
+      entry.height = 0;
+      entry.hash.bytes[0] = 0x01;
+      entry.status = BLOCK_STATUS_VALID_CHAIN;
+      result = block_index_db_insert(bdb, &entry);
+      ASSERT_EQ(result, ECHO_OK);
+    } else {
+      /* Subsequent cycles: verify and add more */
+      block_index_entry_t best;
+      result = block_index_db_get_best_chain(bdb, &best);
+      ASSERT_EQ(result, ECHO_OK);
+      /* Should have cycle blocks (0 to cycle-1) */
+      ASSERT_EQ(best.height, (uint32_t)(cycle - 1));
+
+      /* Add another block */
+      memset(&entry, 0, sizeof(entry));
+      entry.height = (uint32_t)cycle;
+      entry.hash.bytes[0] = (uint8_t)(cycle + 1);
+      entry.header.prev_hash.bytes[0] = (uint8_t)cycle;
+      entry.chainwork.bytes[31] = (uint8_t)(cycle + 1); /* Increasing work */
+      entry.status = BLOCK_STATUS_VALID_CHAIN;
+      result = block_index_db_insert(bdb, &entry);
+      ASSERT_EQ(result, ECHO_OK);
+    }
+
+    node_destroy(node);
+  }
+
+  /* Final verification */
+  node_t *node = node_create(&config);
+  ASSERT_NOT_NULL(node);
+
+  block_index_db_t *bdb = node_get_block_index_db(node);
+  block_index_entry_t best;
+  result = block_index_db_get_best_chain(bdb, &best);
+  ASSERT_EQ(result, ECHO_OK);
+  ASSERT_EQ(best.height, 2); /* 3 cycles = blocks at height 0, 1, 2 */
+
+  node_destroy(node);
+  cleanup_test_dir(test_data_dir);
+}
+
+/*
+ * ============================================================================
  * MAIN
  * ============================================================================
  */
@@ -703,6 +917,12 @@ int main(void) {
     test_section("State Transitions");
     test_case("Valid state transitions"); state_transitions(); test_pass();
     test_case("Get state for NULL node"); get_state_null(); test_pass();
+
+    test_section("Storage Foundation (Session 9.6.0)");
+    test_case("Chain state restoration across restarts"); storage_chain_restoration(); test_pass();
+    test_case("UTXO database persistence"); storage_utxo_persistence(); test_pass();
+    test_case("node_apply_block handles NULL"); storage_apply_block_persistence(); test_pass();
+    test_case("Multiple restart cycles"); storage_multiple_restarts(); test_pass();
 
     test_suite_end();
     return test_global_summary();

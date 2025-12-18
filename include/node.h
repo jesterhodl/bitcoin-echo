@@ -474,6 +474,28 @@ echo_result_t node_process_peers(node_t *node);
 echo_result_t node_process_blocks(node_t *node);
 
 /**
+ * Apply a validated block to the node.
+ *
+ * This function performs full block application with persistence:
+ *   1. Apply block to consensus engine (UTXO set, chain tip)
+ *   2. Store block in block files (blk*.dat)
+ *   3. Update block index database
+ *   4. Update UTXO database atomically
+ *
+ * The block must have been validated first via consensus_validate_block().
+ *
+ * Session 9.6.0: Storage Foundation & Chain Restoration
+ *
+ * Parameters:
+ *   node  - The node
+ *   block - The validated block to apply
+ *
+ * Returns:
+ *   ECHO_OK on success, error code on failure
+ */
+echo_result_t node_apply_block(node_t *node, const block_t *block);
+
+/**
  * Perform periodic maintenance tasks.
  *
  * This handles timer-based operations:

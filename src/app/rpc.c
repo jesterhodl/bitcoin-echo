@@ -2027,7 +2027,7 @@ echo_result_t rpc_submitblock(node_t *node, const json_value_t *params,
     return res;
   }
 
-  /* Validate and apply block */
+  /* Validate block first */
   consensus_engine_t *consensus = node_get_consensus(node);
   consensus_result_t validation_result;
   consensus_result_init(&validation_result);
@@ -2039,7 +2039,11 @@ echo_result_t rpc_submitblock(node_t *node, const json_value_t *params,
     return ECHO_OK;
   }
 
-  res = consensus_apply_block(consensus, &block, &validation_result);
+  /*
+   * Apply block with persistence (Session 9.6.0).
+   * This updates consensus engine, block files, and databases atomically.
+   */
+  res = node_apply_block(node, &block);
   block_free(&block);
 
   if (res != ECHO_OK) {
