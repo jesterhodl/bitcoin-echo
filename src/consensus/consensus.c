@@ -993,6 +993,9 @@ void consensus_get_stats(const consensus_engine_t *engine,
 
   memset(stats, 0, sizeof(consensus_stats_t));
 
+  /* Always report block_index_count - we may have headers before blocks */
+  stats->block_index_count = consensus_block_index_count(engine);
+
   if (!engine->initialized) {
     return;
   }
@@ -1003,7 +1006,6 @@ void consensus_get_stats(const consensus_engine_t *engine,
   stats->height = tip.height;
   stats->total_work = tip.chainwork;
   stats->utxo_count = consensus_utxo_count(engine);
-  stats->block_index_count = consensus_block_index_count(engine);
 
   /* Total coins is calculated from subsidy schedule */
   /* For simplicity, we don't track this precisely */

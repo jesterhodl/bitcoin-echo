@@ -935,15 +935,67 @@ echo_result_t msg_headers_deserialize(const uint8_t *buf, size_t buf_len,
   }
 
   msg->count = (size_t)count;
-  msg->headers = NULL; /* Caller must allocate */
 
-  if (consumed) {
-    /* Each header is 80 bytes + 1 byte varint (0) = 81 bytes */
-    size_t headers_bytes = msg->count * 81;
-    if (ptr + headers_bytes > end) {
+  if (count == 0) {
+    msg->headers = NULL;
+    if (consumed) {
+      *consumed = (size_t)(ptr - buf);
+    }
+    return ECHO_OK;
+  }
+
+  /* Allocate headers array */
+  msg->headers = malloc(count * sizeof(block_header_t));
+  if (!msg->headers) {
+    return ECHO_ERR_NOMEM;
+  }
+
+  /* Parse each header: 80 bytes header + 1 byte varint (tx_count, always 0) */
+  for (size_t i = 0; i < count; i++) {
+    /* Check we have enough data for header (80 bytes) + tx_count varint (1 byte) */
+    if (ptr + 81 > end) {
+      free(msg->headers);
+      msg->headers = NULL;
       return ECHO_ERR_TRUNCATED;
     }
-    *consumed = (size_t)(ptr - buf) + headers_bytes;
+
+    /* Parse block header (80 bytes) */
+    block_header_t *hdr = &msg->headers[i];
+
+    /* Version (4 bytes, little-endian) */
+    hdr->version = (int32_t)(ptr[0] | ((uint32_t)ptr[1] << 8) |
+                             ((uint32_t)ptr[2] << 16) | ((uint32_t)ptr[3] << 24));
+    ptr += 4;
+
+    /* Previous block hash (32 bytes) */
+    memcpy(hdr->prev_hash.bytes, ptr, 32);
+    ptr += 32;
+
+    /* Merkle root (32 bytes) */
+    memcpy(hdr->merkle_root.bytes, ptr, 32);
+    ptr += 32;
+
+    /* Timestamp (4 bytes, little-endian) */
+    hdr->timestamp = ptr[0] | ((uint32_t)ptr[1] << 8) |
+                     ((uint32_t)ptr[2] << 16) | ((uint32_t)ptr[3] << 24);
+    ptr += 4;
+
+    /* Bits (4 bytes, little-endian) */
+    hdr->bits = ptr[0] | ((uint32_t)ptr[1] << 8) |
+                ((uint32_t)ptr[2] << 16) | ((uint32_t)ptr[3] << 24);
+    ptr += 4;
+
+    /* Nonce (4 bytes, little-endian) */
+    hdr->nonce = ptr[0] | ((uint32_t)ptr[1] << 8) |
+                 ((uint32_t)ptr[2] << 16) | ((uint32_t)ptr[3] << 24);
+    ptr += 4;
+
+    /* Skip tx_count varint (always 0 in headers message, 1 byte) */
+    ptr += 1;
+  }
+
+  if (consumed) {
+    *consumed = (size_t)(ptr - buf);
   }
 
   return ECHO_OK;

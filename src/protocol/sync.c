@@ -304,8 +304,14 @@ echo_result_t sync_build_locator(const chainstate_t *state, hash256_t *locator,
 
   block_index_t *tip = chainstate_get_tip_index(state);
   if (!tip) {
-    /* No blocks yet - return empty locator */
-    *locator_len = 0;
+    /*
+     * No blocks yet - return genesis hash as the only locator entry.
+     * This tells peers we want headers starting from block 1.
+     */
+    block_header_t genesis;
+    block_genesis_header(&genesis);
+    block_header_hash(&genesis, &locator[0]);
+    *locator_len = 1;
     return ECHO_OK;
   }
 
@@ -951,7 +957,18 @@ void sync_tick(sync_manager_t *mgr) {
           if (mgr->callbacks.send_getheaders) {
             hash256_t locator[SYNC_MAX_LOCATOR_HASHES];
             size_t locator_len = 0;
-            sync_build_locator(mgr->chainstate, locator, &locator_len);
+
+            /* For headers-first sync, use best_header if we have received any
+             * headers. Otherwise fall back to chainstate tip (genesis). */
+            if (mgr->best_header != NULL) {
+              block_index_map_t *map =
+                  chainstate_get_block_index_map(mgr->chainstate);
+              sync_build_locator_from(map, mgr->best_header, locator,
+                                      &locator_len);
+            } else {
+              sync_build_locator(mgr->chainstate, locator, &locator_len);
+            }
+
             mgr->callbacks.send_getheaders(ps->peer, locator, locator_len, NULL,
                                            mgr->callbacks.ctx);
           }

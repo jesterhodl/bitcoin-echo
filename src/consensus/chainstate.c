@@ -26,7 +26,8 @@
 #define MAX_HEIGHT_INDEX 1000000
 
 /* Default size for block index map hash table */
-#define BLOCK_INDEX_MAP_DEFAULT_SIZE 4096
+/* Bitcoin mainnet has 800k+ blocks. Need room for headers + fork blocks. */
+#define BLOCK_INDEX_MAP_DEFAULT_SIZE (1024 * 1024)
 
 /**
  * Block index map implementation (hash table)

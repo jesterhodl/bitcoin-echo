@@ -370,8 +370,44 @@ static echo_result_t node_restore_chain_state(node_t *node) {
   result = block_index_db_get_best_chain(&node->block_index_db, &best_entry);
 
   if (result == ECHO_ERR_NOT_FOUND) {
-    /* Empty database - fresh start, no restoration needed */
+    /* Empty database - fresh start, add genesis to block index */
     log_info(LOG_COMP_MAIN, "No existing chain state found, starting fresh");
+
+    /*
+     * Add genesis block header to the block_index_map.
+     * This is required for sync_handle_headers to connect incoming headers
+     * (block 1's prev_hash is the genesis hash).
+     */
+    chainstate_t *chainstate = consensus_get_chainstate(node->consensus);
+    if (chainstate != NULL) {
+      block_header_t genesis;
+      block_genesis_header(&genesis);
+
+      block_index_t *genesis_index = NULL;
+      echo_result_t add_result =
+          consensus_add_header(node->consensus, &genesis, &genesis_index);
+
+      if (add_result == ECHO_OK || add_result == ECHO_ERR_EXISTS) {
+        /* If ECHO_ERR_EXISTS, look up the existing genesis index */
+        if (genesis_index == NULL && add_result == ECHO_ERR_EXISTS) {
+          hash256_t genesis_hash;
+          block_header_hash(&genesis, &genesis_hash);
+          block_index_map_t *map = chainstate_get_block_index_map(chainstate);
+          genesis_index = block_index_map_lookup(map, &genesis_hash);
+        }
+
+        /* Set genesis as the chain tip so sync_add_peer calculates
+         * our_height correctly and peers become sync candidates */
+        if (genesis_index != NULL) {
+          chainstate_set_tip_index(chainstate, genesis_index);
+          log_info(LOG_COMP_MAIN, "Genesis block set as chain tip (height 0)");
+        }
+      } else {
+        log_error(LOG_COMP_MAIN, "Failed to add genesis block: %d", add_result);
+        return add_result;
+      }
+    }
+
     return ECHO_OK;
   }
 
@@ -1093,8 +1129,8 @@ static void sync_cb_send_getheaders(peer_t *peer, const hash256_t *locator,
 
   peer_queue_message(peer, &msg);
 
-  log_debug(LOG_COMP_SYNC, "Sent getheaders with %zu locator hashes to peer",
-            locator_len);
+  log_info(LOG_COMP_SYNC, "Sent getheaders with %zu locator hashes to peer",
+           locator_len);
 }
 
 /**
@@ -1707,9 +1743,19 @@ static void node_handle_peer_message(node_t *node, peer_t *peer,
 
   case MSG_HEADERS:
     /* Forward to sync manager */
+    log_info(LOG_COMP_SYNC, "Received MSG_HEADERS with %zu headers",
+             msg->payload.headers.count);
     if (node->sync_mgr != NULL && msg->payload.headers.count > 0) {
-      sync_handle_headers(node->sync_mgr, peer, msg->payload.headers.headers,
-                          msg->payload.headers.count);
+      echo_result_t hdr_result = sync_handle_headers(
+          node->sync_mgr, peer, msg->payload.headers.headers,
+          msg->payload.headers.count);
+      if (hdr_result != ECHO_OK) {
+        log_warn(LOG_COMP_SYNC, "sync_handle_headers returned: %d", hdr_result);
+      }
+    }
+    /* Free the allocated headers array */
+    if (msg->payload.headers.headers != NULL) {
+      free(msg->payload.headers.headers);
     }
     break;
 
