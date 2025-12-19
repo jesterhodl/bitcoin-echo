@@ -1,0 +1,20 @@
+# LeakSanitizer suppressions for Bitcoin Echo
+#
+# SQLite maintains internal page cache and memory pools that are intentionally
+# kept allocated for performance. These are not real leaks - they're cleaned up
+# when the process exits, but LSAN sees them as leaks because sqlite3_shutdown()
+# is not called (and shouldn't be called in normal usage).
+#
+# See: https://sqlite.org/c3ref/initialize.html
+
+# SQLite memory allocator
+leak:sqlite3MemMalloc
+leak:sqlite3MemRealloc
+
+# SQLite page cache
+leak:pcache1InitBulk
+leak:pcache1AllocPage
+
+# SQLite internal allocations
+leak:sqlite3Malloc
+leak:sqlite3DbMallocRaw

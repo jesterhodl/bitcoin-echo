@@ -19,6 +19,9 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and test with AddressSanitizer
+        env:
+          # Suppress known SQLite memory allocations that LSAN misreports as leaks
+          LSAN_OPTIONS: suppressions=${{ github.workspace }}/lsan.supp
         run: |
           make clean
           make test \
