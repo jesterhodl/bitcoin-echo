@@ -1064,6 +1064,53 @@ void sync_tick(sync_manager_t *mgr) {
              block_queue_pending_count(mgr->block_queue),
              block_queue_inflight_count(mgr->block_queue));
 
+    /*
+     * Continue requesting headers from peers that may have more.
+     *
+     * A peer may have responded with fewer than 2000 headers (causing us to
+     * transition to BLOCKS mode) but be behind the network. We should request
+     * headers from any peer whose advertised start_height exceeds our
+     * best_header height. This handles:
+     * - The original peer being behind the network tip
+     * - New peers connecting with higher heights
+     * - Peers that caught up since initial connection
+     */
+    uint32_t our_best_height =
+        mgr->best_header ? mgr->best_header->height : 0;
+    for (size_t i = 0; i < mgr->peer_count; i++) {
+      peer_sync_state_t *ps = &mgr->peers[i];
+      if (ps->sync_candidate && !ps->headers_in_flight &&
+          peer_is_ready(ps->peer) &&
+          ps->start_height > (int32_t)our_best_height) {
+        uint64_t now = plat_time_ms();
+        if (now - ps->headers_sent_time >= SYNC_HEADER_RETRY_INTERVAL_MS) {
+          log_info(LOG_COMP_SYNC,
+                   "Requesting more headers: our_best=%u, peer_height=%d",
+                   our_best_height, ps->start_height);
+          ps->headers_in_flight = true;
+          ps->headers_sent_time = now;
+
+          /* Build block locator and send getheaders */
+          if (mgr->callbacks.send_getheaders) {
+            hash256_t locator[SYNC_MAX_LOCATOR_HASHES];
+            size_t locator_len = 0;
+
+            if (mgr->best_header != NULL) {
+              block_index_map_t *map =
+                  chainstate_get_block_index_map(mgr->chainstate);
+              sync_build_locator_from(map, mgr->best_header, locator,
+                                      &locator_len);
+            } else {
+              sync_build_locator(mgr->chainstate, locator, &locator_len);
+            }
+
+            mgr->callbacks.send_getheaders(ps->peer, locator, locator_len, NULL,
+                                           mgr->callbacks.ctx);
+          }
+        }
+      }
+    }
+
     /* Queue blocks from headers */
     queue_blocks_from_headers(mgr);
 
