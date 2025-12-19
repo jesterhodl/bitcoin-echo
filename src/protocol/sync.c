@@ -10,6 +10,7 @@
 #include "block.h"
 #include "chainstate.h"
 #include "echo_types.h"
+#include "log.h"
 #include "peer.h"
 #include "platform.h"
 #include <stdbool.h>
@@ -452,16 +453,24 @@ find_best_header_peer(sync_manager_t *mgr) {
 static peer_sync_state_t *find_best_block_peer(sync_manager_t *mgr) {
   peer_sync_state_t *best = NULL;
   size_t min_inflight = SIZE_MAX;
+  size_t candidates = 0;
 
   for (size_t i = 0; i < mgr->peer_count; i++) {
     peer_sync_state_t *ps = &mgr->peers[i];
-    if (ps->sync_candidate && peer_is_ready(ps->peer) &&
-        ps->blocks_in_flight_count < SYNC_MAX_BLOCKS_PER_PEER) {
+    bool ready = peer_is_ready(ps->peer);
+    bool has_capacity = ps->blocks_in_flight_count < SYNC_MAX_BLOCKS_PER_PEER;
+    if (ps->sync_candidate && ready && has_capacity) {
+      candidates++;
       if (ps->blocks_in_flight_count < min_inflight) {
         min_inflight = ps->blocks_in_flight_count;
         best = ps;
       }
     }
+  }
+
+  if (candidates == 0) {
+    log_debug(LOG_COMP_SYNC, "find_best_block_peer: no candidates (peers=%zu)",
+              mgr->peer_count);
   }
   return best;
 }
@@ -835,20 +844,41 @@ void sync_process_timeouts(sync_manager_t *mgr) {
  */
 static void queue_blocks_from_headers(sync_manager_t *mgr) {
   if (!mgr->best_header) {
+    log_debug(LOG_COMP_SYNC, "queue_blocks: no best_header");
     return;
   }
 
   uint32_t tip_height = chainstate_get_height(mgr->chainstate);
 
-  /* Walk back from best header to find blocks we need */
+  /*
+   * We need to queue blocks starting from tip+1, not from best_header.
+   * Since block_index only has prev pointers, we:
+   * 1. Walk back from best_header collecting all blocks from tip+1 to tip+window
+   * 2. The target starting height is tip+1
+   * 3. We want blocks at heights: tip+1, tip+2, ..., tip+WINDOW
+   */
+
+  /* Calculate target range */
+  uint32_t start_height = tip_height + 1;
+  uint32_t end_height = tip_height + SYNC_BLOCK_DOWNLOAD_WINDOW;
+  if (end_height > mgr->best_header->height) {
+    end_height = mgr->best_header->height;
+  }
+
+  /* Walk back from best_header to find blocks in our target range */
   block_index_t *idx = mgr->best_header;
 
-  /* Collect blocks to queue (we need to reverse the order) */
+  /* First, walk back to reach our target range (skip higher blocks) */
+  while (idx && idx->height > end_height) {
+    idx = idx->prev;
+  }
+
+  /* Collect blocks to queue (walking backward, we'll reverse later) */
   hash256_t to_queue[SYNC_BLOCK_DOWNLOAD_WINDOW];
   uint32_t heights[SYNC_BLOCK_DOWNLOAD_WINDOW];
   size_t to_queue_count = 0;
 
-  while (idx && idx->height > tip_height &&
+  while (idx && idx->height >= start_height &&
          to_queue_count < SYNC_BLOCK_DOWNLOAD_WINDOW) {
     /* Check if we already have this block (in queue or storage) */
     if (!block_queue_contains(mgr->block_queue, &idx->hash)) {
@@ -867,7 +897,12 @@ static void queue_blocks_from_headers(sync_manager_t *mgr) {
     idx = idx->prev;
   }
 
-  /* Add to queue in height order (lowest first) */
+  if (to_queue_count > 0) {
+    log_info(LOG_COMP_SYNC, "Queueing %zu blocks (heights %u-%u)",
+             to_queue_count, heights[to_queue_count - 1], heights[0]);
+  }
+
+  /* Add to queue in height order (lowest first - reverse our collection) */
   for (size_t i = to_queue_count; i > 0; i--) {
     block_queue_add(mgr->block_queue, &to_queue[i - 1], heights[i - 1]);
   }
@@ -882,6 +917,14 @@ static void request_blocks(sync_manager_t *mgr) {
   size_t blocks_count = 0;
   peer_sync_state_t *current_peer = NULL;
 
+  /* Log entry state */
+  size_t pending = block_queue_pending_count(mgr->block_queue);
+  size_t inflight = block_queue_inflight_count(mgr->block_queue);
+  if (pending > 0 && inflight < SYNC_MAX_PARALLEL_BLOCKS) {
+    log_debug(LOG_COMP_SYNC, "request_blocks: pending=%zu, inflight=%zu, max=%d",
+              pending, inflight, SYNC_MAX_PARALLEL_BLOCKS);
+  }
+
   /* Request blocks from queue */
   while (block_queue_pending_count(mgr->block_queue) > 0 &&
          block_queue_inflight_count(mgr->block_queue) <
@@ -889,6 +932,7 @@ static void request_blocks(sync_manager_t *mgr) {
     /* Find peer with capacity */
     peer_sync_state_t *ps = find_best_block_peer(mgr);
     if (!ps) {
+      log_debug(LOG_COMP_SYNC, "request_blocks: no peer with capacity");
       break;
     }
 
@@ -928,6 +972,7 @@ static void request_blocks(sync_manager_t *mgr) {
   /* Send any remaining accumulated requests */
   if (current_peer != NULL && blocks_count > 0) {
     if (mgr->callbacks.send_getdata_blocks) {
+      log_info(LOG_COMP_SYNC, "Sending getdata for %zu blocks", blocks_count);
       mgr->callbacks.send_getdata_blocks(current_peer->peer, blocks_for_peer,
                                          blocks_count, mgr->callbacks.ctx);
     }
@@ -979,6 +1024,12 @@ void sync_tick(sync_manager_t *mgr) {
   }
 
   case SYNC_MODE_BLOCKS: {
+    log_info(LOG_COMP_SYNC,
+             "SYNC_MODE_BLOCKS: best_header=%p, pending=%zu, inflight=%zu",
+             (void *)mgr->best_header,
+             block_queue_pending_count(mgr->block_queue),
+             block_queue_inflight_count(mgr->block_queue));
+
     /* Queue blocks from headers */
     queue_blocks_from_headers(mgr);
 

@@ -1153,9 +1153,10 @@ static void sync_cb_send_getdata_blocks(peer_t *peer, const hash256_t *hashes,
     return;
   }
 
-  /* Build inventory - request witness blocks for SegWit support */
+  /* Build inventory - request regular blocks
+   * TODO: Add NODE_WITNESS to services and use INV_WITNESS_BLOCK for SegWit */
   for (size_t i = 0; i < count; i++) {
-    inventory[i].type = INV_WITNESS_BLOCK;
+    inventory[i].type = INV_BLOCK;
     inventory[i].hash = hashes[i];
   }
 
