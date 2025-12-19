@@ -1238,9 +1238,9 @@ static void test_stress_many_blocks(void) {
     passed = false;
   }
 
-  /* Verify count */
+  /* Verify count (1000 stress entries + 1 genesis block) */
   size_t count;
-  if (block_index_db_count(bdb, &count) != ECHO_OK || count != 1000) {
+  if (block_index_db_count(bdb, &count) != ECHO_OK || count != 1001) {
     passed = false;
   }
 
@@ -1409,13 +1409,14 @@ static void test_stress_restart_cycles(void) {
 
     if (bdb == NULL || udb == NULL) { passed = false; node_destroy(node); break; }
 
-    /* Verify previous cycle's data */
+    /* Verify previous cycle's data (includes genesis block) */
     if (cycle > 0) {
       size_t block_count, utxo_count;
       block_index_db_count(bdb, &block_count);
       utxo_db_count(udb, &utxo_count);
 
-      if (block_count != (size_t)cycle * 10) { passed = false; node_destroy(node); break; }
+      /* +1 for genesis block that node_create persists */
+      if (block_count != (size_t)cycle * 10 + 1) { passed = false; node_destroy(node); break; }
       if (utxo_count != (size_t)cycle * 10) { passed = false; node_destroy(node); break; }
     }
 
@@ -1463,7 +1464,8 @@ static void test_stress_restart_cycles(void) {
         block_index_db_count(bdb, &block_count);
         utxo_db_count(udb, &utxo_count);
 
-        if (block_count != 50 || utxo_count != 50) {
+        /* 50 stress entries + 1 genesis block = 51 */
+        if (block_count != 51 || utxo_count != 50) {
           passed = false;
         }
       } else {
