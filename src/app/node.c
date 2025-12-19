@@ -2313,9 +2313,18 @@ echo_result_t node_maintenance(node_t *node) {
   /* Task 5: Cleanup disconnected peers */
   for (size_t i = 0; i < NODE_MAX_PEERS; i++) {
     peer_t *peer = &node->peers[i];
-    if (peer->state == PEER_STATE_DISCONNECTED && peer->socket != NULL) {
-      /* Ensure socket is fully cleaned up */
-      peer_init(peer); /* Re-initialize to clean state */
+    /*
+     * Check for disconnected peers that need cleanup.
+     * peer->address[0] != '\0' indicates this slot was previously used.
+     * The socket may already be NULL (cleaned up by peer_disconnect).
+     */
+    if (peer->state == PEER_STATE_DISCONNECTED && peer->address[0] != '\0') {
+      /* Remove from sync manager before cleaning up */
+      if (node->sync_mgr != NULL) {
+        sync_remove_peer(node->sync_mgr, peer);
+      }
+      /* Re-initialize to clean state (clears address, making slot available) */
+      peer_init(peer);
     }
   }
 

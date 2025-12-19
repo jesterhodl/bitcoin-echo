@@ -456,6 +456,8 @@ echo_result_t peer_receive(peer_t *peer, msg_t *msg) {
   }
 
   if (result != ECHO_SUCCESS) {
+    log_info(LOG_COMP_NET, "Failed to parse %s payload (type=%d, len=%u, err=%d)",
+             msg_command_string(type), type, header.length, result);
     peer_disconnect(peer, PEER_DISCONNECT_PROTOCOL_ERROR,
                     "Failed to parse message payload");
     return ECHO_ERR_PROTOCOL;
@@ -724,6 +726,10 @@ void peer_disconnect(peer_t *peer, peer_disconnect_reason_t reason,
   if (peer->state == PEER_STATE_DISCONNECTED) {
     return; /* Already disconnected */
   }
+
+  log_info(LOG_COMP_NET, "Peer %s disconnecting: reason=%s, message=%s",
+           peer->address, peer_disconnect_reason_string(reason),
+           message ? message : "(none)");
 
   peer->state = PEER_STATE_DISCONNECTED;
   peer->disconnect_reason = reason;

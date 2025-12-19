@@ -1048,14 +1048,16 @@ echo_result_t msg_tx_deserialize(const uint8_t *buf, size_t buf_len,
     return ECHO_ERR_NULL_PARAM;
   }
 
-  (void)buf_len; /* Unused for now */
-
-  /* Transaction deserialization - to be implemented when needed */
-  /* For now, just indicate invalid format */
+  /*
+   * Transaction deserialization is not implemented yet.
+   * For now, accept and ignore TX messages - we don't need TX relay during
+   * initial sync. Just consume the entire buffer and return success.
+   */
+  memset(msg, 0, sizeof(*msg));
   if (consumed) {
-    *consumed = 0;
+    *consumed = buf_len; /* Consume entire payload */
   }
-  return ECHO_ERR_INVALID_FORMAT;
+  return ECHO_SUCCESS;
 }
 
 /* ========================================================================

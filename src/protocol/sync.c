@@ -468,6 +468,9 @@ static peer_sync_state_t *find_best_block_peer(sync_manager_t *mgr) {
       not_sync_candidate++;
     } else if (!ready) {
       not_ready++;
+      /* Debug: log why peer is not ready */
+      log_debug(LOG_COMP_SYNC, "Peer %s not_ready: state=%s",
+                ps->peer->address, peer_state_string(ps->peer->state));
     } else if (!has_capacity) {
       no_capacity++;
     } else {
@@ -561,6 +564,12 @@ void sync_add_peer(sync_manager_t *mgr, peer_t *peer, int32_t height) {
   /* Peer is sync candidate if they have blocks we need */
   uint32_t our_height = chainstate_get_height(mgr->chainstate);
   ps->sync_candidate = (height > (int32_t)our_height);
+
+  log_info(LOG_COMP_SYNC, "Added peer %s to sync_mgr: height=%d, our_height=%u, "
+           "sync_candidate=%s, state=%s",
+           peer->address, height, our_height,
+           ps->sync_candidate ? "yes" : "no",
+           peer_state_string(peer->state));
 }
 
 void sync_remove_peer(sync_manager_t *mgr, peer_t *peer) {
@@ -570,6 +579,9 @@ void sync_remove_peer(sync_manager_t *mgr, peer_t *peer) {
 
   for (size_t i = 0; i < mgr->peer_count; i++) {
     if (mgr->peers[i].peer == peer) {
+      log_info(LOG_COMP_SYNC, "Removing peer %s from sync_mgr (state=%s)",
+               peer->address, peer_state_string(peer->state));
+
       /* Unassign any blocks from this peer */
       block_queue_unassign_peer(mgr->block_queue, peer);
 
