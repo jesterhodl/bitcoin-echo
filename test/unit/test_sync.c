@@ -765,6 +765,85 @@ static void test_sync_find_locator_fork_null(void) {
 
 }
 
+/**
+ * Test locator bounds check with a very long chain.
+ *
+ * Regression test: stack buffer overflow in sync_build_locator_from when chain
+ * is long enough to fill all SYNC_MAX_LOCATOR_HASHES entries and genesis is
+ * reached, the code would write past the array bounds.
+ *
+ * This test creates a chain longer than what's needed to fill all 32 locator
+ * slots, verifying:
+ * 1. No buffer overflow (would crash with ASan)
+ * 2. locator_len never exceeds SYNC_MAX_LOCATOR_HASHES
+ * 3. Function returns successfully
+ */
+static void test_sync_build_locator_bounds_check(void) {
+  /* Create a chain of 10000 block_index_t nodes - more than enough to fill
+   * all 32 locator slots with the exponential step algorithm */
+  const size_t chain_len = 10000;
+  block_index_t *chain = calloc(chain_len, sizeof(block_index_t));
+  if (!chain) {
+    test_fail("Failed to allocate chain");
+    return;
+  }
+
+  /* Build linked list: chain[0] is genesis (prev=NULL), chain[N-1] is tip */
+  for (size_t i = 0; i < chain_len; i++) {
+    chain[i].height = (uint32_t)i;
+    chain[i].on_main_chain = true;
+    /* Set a unique hash for each block */
+    memset(&chain[i].hash, 0, sizeof(hash256_t));
+    chain[i].hash.bytes[0] = (uint8_t)(i & 0xFF);
+    chain[i].hash.bytes[1] = (uint8_t)((i >> 8) & 0xFF);
+
+    if (i > 0) {
+      chain[i].prev = &chain[i - 1];
+      chain[i].prev_hash = chain[i - 1].hash;
+    } else {
+      chain[i].prev = NULL; /* Genesis has no prev */
+    }
+  }
+
+  /* Build locator from the tip */
+  hash256_t locator[SYNC_MAX_LOCATOR_HASHES];
+  size_t locator_len = 0;
+
+  echo_result_t result =
+      sync_build_locator_from(NULL, &chain[chain_len - 1], locator, &locator_len);
+
+  /* Verify success */
+  if (result != ECHO_OK) {
+    free(chain);
+    test_fail("sync_build_locator_from failed");
+    return;
+  }
+
+  /* Verify locator_len doesn't exceed max (the key bounds check) */
+  if (locator_len > SYNC_MAX_LOCATOR_HASHES) {
+    free(chain);
+    test_fail("locator_len exceeds SYNC_MAX_LOCATOR_HASHES");
+    return;
+  }
+
+  /* With 10000 blocks, we should fill all 32 slots */
+  if (locator_len != SYNC_MAX_LOCATOR_HASHES) {
+    free(chain);
+    test_fail("Expected full locator");
+    return;
+  }
+
+  /* First entry should be the tip */
+  if (memcmp(&locator[0], &chain[chain_len - 1].hash, sizeof(hash256_t)) != 0) {
+    free(chain);
+    test_fail("First locator entry should be tip");
+    return;
+  }
+
+  free(chain);
+
+}
+
 /* ============================================================================
  * Sync Mode String Tests
  * ============================================================================
@@ -1131,6 +1210,7 @@ int main(void) {
     test_case("Sync build locator empty"); test_sync_build_locator_empty(); test_pass();
     test_case("Sync build locator null params"); test_sync_build_locator_null_params(); test_pass();
     test_case("Sync find locator fork null"); test_sync_find_locator_fork_null(); test_pass();
+    test_case("Sync build locator bounds check"); test_sync_build_locator_bounds_check(); test_pass();
     test_case("Sync mode string"); test_sync_mode_string(); test_pass();
     test_case("Sync estimate remaining time idle"); test_sync_estimate_remaining_time_idle(); test_pass();
     test_case("Sync estimate remaining time done"); test_sync_estimate_remaining_time_done(); test_pass();

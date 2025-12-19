@@ -363,7 +363,7 @@ echo_result_t sync_build_locator_from(const block_index_map_t *index_map,
 
     /* If we've moved to genesis or same block, we're done */
     if (!idx->prev) {
-      if (count > 0 &&
+      if (count > 0 && count < SYNC_MAX_LOCATOR_HASHES &&
           memcmp(&locator[count - 1], &idx->hash, sizeof(hash256_t)) != 0) {
         /* Add genesis if not already added */
         locator[count++] = idx->hash;
