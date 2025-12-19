@@ -92,11 +92,20 @@ static echo_result_t prepare_statements(block_index_db_t *bdb) {
   if (result != ECHO_OK)
     return result;
 
-  /* Best chain (highest chainwork) */
+  /*
+   * Best chain tip (highest height with VALID_CHAIN status).
+   *
+   * Note: We use ORDER BY height DESC rather than chainwork DESC because
+   * chainwork is stored in little-endian format which doesn't sort correctly
+   * in SQLite's byte-by-byte blob comparison. For headers-first sync where
+   * all headers are on the main chain, height ordering is equivalent.
+   *
+   * TODO: For proper fork handling, store chainwork in big-endian format.
+   */
   result =
       db_prepare(&bdb->db,
                  "SELECT hash, height, header, chainwork, status FROM blocks "
-                 "ORDER BY chainwork DESC LIMIT 1",
+                 "WHERE (status & ?) != 0 ORDER BY height DESC LIMIT 1",
                  &bdb->best_chain_stmt);
   if (result != ECHO_OK)
     return result;
@@ -432,6 +441,11 @@ echo_result_t block_index_db_get_best_chain(block_index_db_t *bdb,
 
   /* Reset statement */
   result = db_stmt_reset(&bdb->best_chain_stmt);
+  if (result != ECHO_OK)
+    return result;
+
+  /* Bind BLOCK_STATUS_VALID_CHAIN filter (parameter 1) */
+  result = db_bind_int(&bdb->best_chain_stmt, 1, BLOCK_STATUS_VALID_CHAIN);
   if (result != ECHO_OK)
     return result;
 

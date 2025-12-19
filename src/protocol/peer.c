@@ -18,6 +18,7 @@
 
 #include "peer.h"
 #include "echo_types.h"
+#include "log.h"
 #include "platform.h"
 #include "protocol.h"
 #include "protocol_serialize.h"
@@ -415,8 +416,13 @@ echo_result_t peer_receive(peer_t *peer, msg_t *msg) {
     break;
 
   case MSG_BLOCK:
+    log_info(LOG_COMP_NET, "RECV block message: %u bytes from %s:%u",
+             header.length, peer->address, peer->port);
     result = msg_block_deserialize(payload, header.length, &msg->payload.block,
                                    &consumed);
+    if (result != ECHO_SUCCESS) {
+      log_error(LOG_COMP_NET, "Block deserialize failed: %d", result);
+    }
     break;
 
   case MSG_TX:
@@ -642,6 +648,13 @@ static echo_result_t peer_send_message_internal(peer_t *peer,
   peer->last_send = plat_time_ms();
   peer->bytes_sent += 24 + payload_len;
   peer->messages_sent++;
+
+  /* Debug: Log when getdata is actually sent */
+  if (msg->type == MSG_GETDATA) {
+    log_info(LOG_COMP_NET, "SENT getdata: %zu items, %zu bytes to %s:%u",
+             msg->payload.getdata.count, 24 + payload_len, peer->address,
+             peer->port);
+  }
 
   return ECHO_SUCCESS;
 }

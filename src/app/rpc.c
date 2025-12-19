@@ -27,6 +27,7 @@
 #include "mining.h"
 #include "node.h"
 #include "platform.h"
+#include "sync.h"
 #include "tx.h"
 #include "tx_validate.h"
 #include "utxo.h"
@@ -1585,6 +1586,13 @@ echo_result_t rpc_getblockchaininfo(node_t *node, const json_value_t *params,
   node_stats_t node_stats;
   node_get_stats(node, &node_stats);
 
+  /* Get sync progress for accurate block/header counts */
+  sync_progress_t sync_progress = {0};
+  sync_manager_t *sync_mgr = node_get_sync_manager(node);
+  if (sync_mgr != NULL) {
+    sync_get_progress(sync_mgr, &sync_progress);
+  }
+
   /* Format block hash */
   char hash_hex[65];
   rpc_format_hash(&tip.hash, hash_hex);
@@ -1599,11 +1607,26 @@ echo_result_t rpc_getblockchaininfo(node_t *node, const json_value_t *params,
   json_builder_append(builder, "\"chain\":");
   json_builder_string(builder, ECHO_NETWORK_NAME);
 
+  /*
+   * blocks = number of blocks fully validated (with transaction data)
+   * During headers-first sync, this is 0 until block download begins.
+   */
   json_builder_append(builder, ",\"blocks\":");
-  json_builder_uint(builder, tip.height);
+  json_builder_uint(builder, sync_progress.blocks_validated);
 
+  /*
+   * headers = height of best header chain
+   * We use MAX of:
+   *   - tip.height (from restored headers / validated blocks)
+   *   - sync_progress.best_header_height (current session's header progress)
+   * This ensures we show accurate count during both restore and active sync.
+   */
+  uint32_t header_height = tip.height;
+  if (sync_progress.best_header_height > header_height) {
+    header_height = sync_progress.best_header_height;
+  }
   json_builder_append(builder, ",\"headers\":");
-  json_builder_uint(builder, stats.block_index_count);
+  json_builder_uint(builder, header_height);
 
   json_builder_append(builder, ",\"bestblockhash\":");
   json_builder_string(builder, hash_hex);

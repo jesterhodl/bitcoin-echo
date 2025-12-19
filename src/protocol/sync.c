@@ -698,6 +698,18 @@ echo_result_t sync_handle_headers(sync_manager_t *mgr, peer_t *peer,
       return result;
     }
 
+    /* Persist header to disk if callback provided */
+    if (new_index && mgr->callbacks.store_header) {
+      echo_result_t store_result =
+          mgr->callbacks.store_header(header, new_index, mgr->callbacks.ctx);
+      if (store_result != ECHO_OK && store_result != ECHO_ERR_EXISTS) {
+        /* Log but don't fail - header is in memory which is what matters for
+         * sync */
+        log_warn(LOG_COMP_SYNC, "Failed to persist header at height %u: %d",
+                 new_index->height, store_result);
+      }
+    }
+
     /* Update best header if this has more work */
     if (new_index && (!mgr->best_header ||
                       work256_compare(&new_index->chainwork,

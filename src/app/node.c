@@ -123,6 +123,8 @@ static echo_result_t sync_cb_store_block(const block_t *block, void *ctx);
 static echo_result_t sync_cb_validate_header(const block_header_t *header,
                                              const block_index_t *prev_index,
                                              void *ctx);
+static echo_result_t sync_cb_store_header(const block_header_t *header,
+                                          const block_index_t *index, void *ctx);
 static echo_result_t sync_cb_validate_and_apply_block(const block_t *block,
                                                       const block_index_t *index,
                                                       void *ctx);
@@ -401,6 +403,21 @@ static echo_result_t node_restore_chain_state(node_t *node) {
         if (genesis_index != NULL) {
           chainstate_set_tip_index(chainstate, genesis_index);
           log_info(LOG_COMP_MAIN, "Genesis block set as chain tip (height 0)");
+
+          /* Persist genesis to database so it can be restored on restart */
+          if (node->block_index_db_open) {
+            block_index_entry_t genesis_entry = {
+                .hash = genesis_index->hash,
+                .height = 0,
+                .header = genesis,
+                .chainwork = genesis_index->chainwork,
+                .status = BLOCK_STATUS_VALID_HEADER | BLOCK_STATUS_VALID_CHAIN};
+            echo_result_t db_result =
+                block_index_db_insert(&node->block_index_db, &genesis_entry);
+            if (db_result != ECHO_OK && db_result != ECHO_ERR_EXISTS) {
+              log_warn(LOG_COMP_MAIN, "Failed to persist genesis: %d", db_result);
+            }
+          }
         }
       } else {
         log_error(LOG_COMP_MAIN, "Failed to add genesis block: %d", add_result);
@@ -953,6 +970,49 @@ static echo_result_t sync_cb_validate_header(const block_header_t *header,
 }
 
 /**
+ * Store/persist a validated header to disk.
+ *
+ * Called by sync manager immediately after header validation.
+ * This ensures headers are persisted during sync, not just when
+ * full blocks are validated.
+ */
+static echo_result_t sync_cb_store_header(const block_header_t *header,
+                                          const block_index_t *index,
+                                          void *ctx) {
+  node_t *node = (node_t *)ctx;
+  if (node == NULL || header == NULL || index == NULL) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  /* Only persist if database is open */
+  if (!node->block_index_db_open) {
+    return ECHO_OK;
+  }
+
+  /* Build database entry
+   * For headers-first sync, headers form a chain but blocks aren't validated yet.
+   * Set VALID_HEADER (PoW validated) and VALID_CHAIN (on main chain) so they
+   * can be loaded on restart. Full block validation will add VALID_SCRIPTS etc.
+   */
+  block_index_entry_t entry = {
+      .hash = index->hash,
+      .height = index->height,
+      .header = *header,
+      .chainwork = index->chainwork,
+      .status = BLOCK_STATUS_VALID_HEADER | BLOCK_STATUS_VALID_CHAIN};
+
+  /* Insert into database */
+  echo_result_t result = block_index_db_insert(&node->block_index_db, &entry);
+
+  if (result == ECHO_ERR_EXISTS) {
+    /* Already stored - not an error */
+    return ECHO_OK;
+  }
+
+  return result;
+}
+
+/**
  * Mark a block as invalid (add to invalid blocks list).
  */
 static void node_mark_block_invalid(node_t *node, const hash256_t *hash) {
@@ -1194,6 +1254,7 @@ static echo_result_t node_init_sync(node_t *node) {
       .get_block = sync_cb_get_block,
       .store_block = sync_cb_store_block,
       .validate_header = sync_cb_validate_header,
+      .store_header = sync_cb_store_header,
       .validate_and_apply_block = sync_cb_validate_and_apply_block,
       .send_getheaders = sync_cb_send_getheaders,
       .send_getdata_blocks = sync_cb_send_getdata_blocks,

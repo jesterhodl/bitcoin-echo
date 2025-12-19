@@ -165,6 +165,25 @@ typedef struct {
                                    const block_index_t *prev_index, void *ctx);
 
   /**
+   * Store/persist a validated header to disk.
+   *
+   * Called immediately after a header is validated and added to the chain.
+   * This allows headers to be persisted during sync, not just when full
+   * blocks are validated.
+   *
+   * Parameters:
+   *   header - The block header
+   *   index  - The block index entry (contains hash, height, chainwork)
+   *   ctx    - User context
+   *
+   * Returns:
+   *   ECHO_OK on success
+   *   ECHO_ERR_EXISTS if already stored (not an error)
+   */
+  echo_result_t (*store_header)(const block_header_t *header,
+                                const block_index_t *index, void *ctx);
+
+  /**
    * Validate and apply a full block.
    *
    * Returns:
