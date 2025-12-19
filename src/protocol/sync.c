@@ -642,7 +642,20 @@ echo_result_t sync_handle_headers(sync_manager_t *mgr, peer_t *peer,
   ps->headers_in_flight = false;
 
   if (count == 0) {
-    /* No more headers from this peer */
+    /* No more headers from this peer - check if we should transition to blocks */
+    log_info(LOG_COMP_SYNC,
+             "0 headers: mode=%d, best_header=%p, tip_height=%u",
+             mgr->mode, (void *)mgr->best_header,
+             chainstate_get_height(mgr->chainstate));
+    if (mgr->mode == SYNC_MODE_HEADERS && mgr->best_header) {
+      uint32_t tip_height = chainstate_get_height(mgr->chainstate);
+      if (mgr->best_header->height > tip_height) {
+        log_info(LOG_COMP_SYNC,
+                 "Transitioning to BLOCKS mode (best_header=%u, validated=%u)",
+                 mgr->best_header->height, tip_height);
+        mgr->mode = SYNC_MODE_BLOCKS;
+      }
+    }
     return ECHO_OK;
   }
 
@@ -874,14 +887,6 @@ static void queue_blocks_from_headers(sync_manager_t *mgr) {
 
   uint32_t tip_height = chainstate_get_height(mgr->chainstate);
 
-  /*
-   * We need to queue blocks starting from tip+1, not from best_header.
-   * Since block_index only has prev pointers, we:
-   * 1. Walk back from best_header collecting all blocks from tip+1 to tip+window
-   * 2. The target starting height is tip+1
-   * 3. We want blocks at heights: tip+1, tip+2, ..., tip+WINDOW
-   */
-
   /* Calculate target range */
   uint32_t start_height = tip_height + 1;
   uint32_t end_height = tip_height + SYNC_BLOCK_DOWNLOAD_WINDOW;
@@ -889,46 +894,91 @@ static void queue_blocks_from_headers(sync_manager_t *mgr) {
     end_height = mgr->best_header->height;
   }
 
-  /* Walk back from best_header to find blocks in our target range */
-  block_index_t *idx = mgr->best_header;
-
-  /* First, walk back to reach our target range (skip higher blocks) */
-  while (idx && idx->height > end_height) {
-    idx = idx->prev;
+  if (start_height > end_height) {
+    /* Already fully synced */
+    return;
   }
 
-  /* Collect blocks to queue (walking backward, we'll reverse later) */
+  /*
+   * Use direct height lookup via callback if available (much faster for
+   * large height gaps). Falls back to walking prev pointers if not.
+   */
   hash256_t to_queue[SYNC_BLOCK_DOWNLOAD_WINDOW];
   uint32_t heights[SYNC_BLOCK_DOWNLOAD_WINDOW];
   size_t to_queue_count = 0;
 
-  while (idx && idx->height >= start_height &&
-         to_queue_count < SYNC_BLOCK_DOWNLOAD_WINDOW) {
-    /* Check if we already have this block (in queue or storage) */
-    if (!block_queue_contains(mgr->block_queue, &idx->hash)) {
-      /* Check storage */
-      block_t stored;
-      block_init(&stored);
-      if (!mgr->callbacks.get_block ||
-          mgr->callbacks.get_block(&idx->hash, &stored, mgr->callbacks.ctx) !=
-              ECHO_OK) {
-        to_queue[to_queue_count] = idx->hash;
-        heights[to_queue_count] = idx->height;
-        to_queue_count++;
+  if (mgr->callbacks.get_block_hash_at_height) {
+    /* Fast path: query database by height directly */
+    for (uint32_t h = start_height;
+         h <= end_height && to_queue_count < SYNC_BLOCK_DOWNLOAD_WINDOW; h++) {
+      hash256_t hash;
+      echo_result_t cb_result = mgr->callbacks.get_block_hash_at_height(
+          h, &hash, mgr->callbacks.ctx);
+      if (cb_result != ECHO_OK) {
+        continue;
       }
-      block_free(&stored);
+      /* Check if we already have this block in queue or storage */
+      if (!block_queue_contains(mgr->block_queue, &hash)) {
+        block_t stored;
+        block_init(&stored);
+        bool in_storage = mgr->callbacks.get_block &&
+                          mgr->callbacks.get_block(&hash, &stored,
+                                                   mgr->callbacks.ctx) ==
+                              ECHO_OK;
+        if (!in_storage) {
+          to_queue[to_queue_count] = hash;
+          heights[to_queue_count] = h;
+          to_queue_count++;
+        }
+        block_free(&stored);
+      }
     }
-    idx = idx->prev;
+  } else {
+    /* Slow path: walk back from best_header (for very old code) */
+    block_index_t *idx = mgr->best_header;
+
+    /* First, walk back to reach our target range (skip higher blocks) */
+    while (idx && idx->height > end_height) {
+      idx = idx->prev;
+    }
+
+    /* Collect blocks to queue (walking backward, we'll reverse later) */
+    while (idx && idx->height >= start_height &&
+           to_queue_count < SYNC_BLOCK_DOWNLOAD_WINDOW) {
+      if (!block_queue_contains(mgr->block_queue, &idx->hash)) {
+        block_t stored;
+        block_init(&stored);
+        if (!mgr->callbacks.get_block ||
+            mgr->callbacks.get_block(&idx->hash, &stored,
+                                      mgr->callbacks.ctx) != ECHO_OK) {
+          to_queue[to_queue_count] = idx->hash;
+          heights[to_queue_count] = idx->height;
+          to_queue_count++;
+        }
+        block_free(&stored);
+      }
+      idx = idx->prev;
+    }
+
+    /* Reverse the order (slow path collects in descending height order) */
+    for (size_t i = 0; i < to_queue_count / 2; i++) {
+      hash256_t tmp_hash = to_queue[i];
+      uint32_t tmp_height = heights[i];
+      to_queue[i] = to_queue[to_queue_count - 1 - i];
+      heights[i] = heights[to_queue_count - 1 - i];
+      to_queue[to_queue_count - 1 - i] = tmp_hash;
+      heights[to_queue_count - 1 - i] = tmp_height;
+    }
   }
 
   if (to_queue_count > 0) {
     log_info(LOG_COMP_SYNC, "Queueing %zu blocks (heights %u-%u)",
-             to_queue_count, heights[to_queue_count - 1], heights[0]);
+             to_queue_count, heights[0], heights[to_queue_count - 1]);
   }
 
-  /* Add to queue in height order (lowest first - reverse our collection) */
-  for (size_t i = to_queue_count; i > 0; i--) {
-    block_queue_add(mgr->block_queue, &to_queue[i - 1], heights[i - 1]);
+  /* Add to queue in height order (lowest first) */
+  for (size_t i = 0; i < to_queue_count; i++) {
+    block_queue_add(mgr->block_queue, &to_queue[i], heights[i]);
   }
 }
 

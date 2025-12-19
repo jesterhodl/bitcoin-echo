@@ -134,6 +134,9 @@ static void sync_cb_send_getheaders(peer_t *peer, const hash256_t *locator,
                                     const hash256_t *stop_hash, void *ctx);
 static void sync_cb_send_getdata_blocks(peer_t *peer, const hash256_t *hashes,
                                         size_t count, void *ctx);
+static echo_result_t sync_cb_get_block_hash_at_height(uint32_t height,
+                                                       hash256_t *hash,
+                                                       void *ctx);
 
 /*
  * ============================================================================
@@ -483,14 +486,25 @@ static echo_result_t node_restore_chain_state(node_t *node) {
     }
   }
 
-  /* Set the chain tip in the consensus engine */
+  /* Set the best header index for sync locator building.
+   *
+   * IMPORTANT: We use chainstate_set_best_header_index() rather than
+   * chainstate_set_tip_index() because we're loading HEADERS, not validated
+   * blocks. The chainstate tip (state->tip) should remain at the last
+   * validated block (genesis if blocks=0), while tip_index points to
+   * the best header for building getheaders locators.
+   *
+   * chainstate_get_height() returns state->tip.height (validated blocks).
+   * chainstate_get_tip_index() returns state->tip_index (best header).
+   */
   block_index_map_t *map = chainstate_get_block_index_map(chainstate);
   block_index_t *tip_index = block_index_map_lookup(map, &best_entry.hash);
 
   if (tip_index != NULL) {
-    chainstate_set_tip_index(chainstate, tip_index);
+    chainstate_set_best_header_index(chainstate, tip_index);
     log_info(LOG_COMP_MAIN,
-             "Chain tip restored: height=%u", tip_index->height);
+             "Best header restored: height=%u (validated blocks=0)",
+             tip_index->height);
   }
 
   /* Verify UTXO database consistency - check count */
@@ -904,16 +918,20 @@ static echo_result_t sync_cb_get_block(const hash256_t *hash, block_t *block_out
     return ECHO_ERR_NULL_PARAM;
   }
 
-  /* Check if block is in our block index (header known) */
-  const block_index_t *index = consensus_lookup_block_index(node->consensus, hash);
-  if (index == NULL) {
-    return ECHO_ERR_NOT_FOUND;
+  /* Check if block data exists in the database by looking at status flags.
+   * on_main_chain is not sufficient - it's set for all headers on the chain,
+   * but we need to know if we have the actual block DATA. */
+  block_index_entry_t entry;
+  echo_result_t result =
+      block_index_db_lookup_by_hash(&node->block_index_db, hash, &entry);
+  if (result != ECHO_OK) {
+    return result;
   }
 
-  /* For now, we don't store full blocks in memory after validation.
-   * Return success if we have validated it (on main chain). */
-  if (index->on_main_chain) {
-    /* Block is on main chain - we have it */
+  /* Check if we have the block data (not just the header) */
+  if ((entry.status & BLOCK_STATUS_HAVE_DATA) &&
+      !(entry.status & BLOCK_STATUS_PRUNED)) {
+    /* We have unpruned block data */
     /* TODO: Load from block file storage if needed */
     return ECHO_OK;
   }
@@ -1233,6 +1251,34 @@ static void sync_cb_send_getdata_blocks(peer_t *peer, const hash256_t *hashes,
 }
 
 /**
+ * Get block hash at height from the database.
+ *
+ * Used for efficient block queueing - avoids walking back through
+ * prev pointers when there's a large height gap between tip and target.
+ */
+static echo_result_t sync_cb_get_block_hash_at_height(uint32_t height,
+                                                       hash256_t *hash,
+                                                       void *ctx) {
+  node_t *node = (node_t *)ctx;
+  if (node == NULL || hash == NULL) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  block_index_entry_t entry;
+  /* Use lookup_by_height (not get_chain_block) because we need to query
+   * headers that haven't been validated yet. get_chain_block only returns
+   * blocks with BLOCK_STATUS_VALID_CHAIN, which is 0 during IBD. */
+  echo_result_t result =
+      block_index_db_lookup_by_height(&node->block_index_db, height, &entry);
+  if (result != ECHO_OK) {
+    return result;
+  }
+
+  *hash = entry.hash;
+  return ECHO_OK;
+}
+
+/**
  * Initialize sync manager with callbacks.
  *
  * Session 9.6.1: Block Processing Pipeline
@@ -1258,6 +1304,7 @@ static echo_result_t node_init_sync(node_t *node) {
       .validate_and_apply_block = sync_cb_validate_and_apply_block,
       .send_getheaders = sync_cb_send_getheaders,
       .send_getdata_blocks = sync_cb_send_getdata_blocks,
+      .get_block_hash_at_height = sync_cb_get_block_hash_at_height,
       .ctx = node};
 
   /* Create sync manager */
@@ -1804,10 +1851,10 @@ static void node_handle_peer_message(node_t *node, peer_t *peer,
     break;
 
   case MSG_HEADERS:
-    /* Forward to sync manager */
+    /* Forward to sync manager (even with 0 headers to trigger mode transition) */
     log_info(LOG_COMP_SYNC, "Received MSG_HEADERS with %zu headers",
              msg->payload.headers.count);
-    if (node->sync_mgr != NULL && msg->payload.headers.count > 0) {
+    if (node->sync_mgr != NULL) {
       echo_result_t hdr_result = sync_handle_headers(
           node->sync_mgr, peer, msg->payload.headers.headers,
           msg->payload.headers.count);
@@ -2186,6 +2233,16 @@ echo_result_t node_maintenance(node_t *node) {
       echo_result_t start_result = sync_start(node->sync_mgr);
       if (start_result == ECHO_OK) {
         log_info(LOG_COMP_SYNC, "Starting headers-first sync");
+      } else {
+        static uint64_t last_sync_fail_log = 0;
+        if (now - last_sync_fail_log > 10000) {
+          sync_progress_t prog;
+          sync_get_progress(node->sync_mgr, &prog);
+          log_info(LOG_COMP_SYNC,
+                   "sync_start failed: %d (mode=%s, sync_peers=%zu)",
+                   start_result, sync_mode_string(prog.mode), prog.sync_peers);
+          last_sync_fail_log = now;
+        }
       }
     }
     sync_tick(node->sync_mgr);

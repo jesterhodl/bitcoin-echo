@@ -493,6 +493,19 @@ block_index_t *chainstate_get_tip_index(const chainstate_t *state);
 void chainstate_set_tip_index(chainstate_t *state, block_index_t *index);
 
 /**
+ * Set the best header index without updating the validated tip.
+ *
+ * This is used when loading headers from the database. It sets tip_index
+ * (used for sync locator building) without updating tip (the validated
+ * chain tip used for block validation).
+ *
+ * @param state Chain state
+ * @param index Best header block index
+ */
+void chainstate_set_best_header_index(chainstate_t *state,
+                                      block_index_t *index);
+
+/**
  * Check if a block should trigger a reorganization.
  * Returns true if the new block has more work than current tip.
  *

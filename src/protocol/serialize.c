@@ -1021,14 +1021,11 @@ echo_result_t msg_block_deserialize(const uint8_t *buf, size_t buf_len,
     return ECHO_ERR_NULL_PARAM;
   }
 
-  (void)buf_len; /* Unused for now */
+  /* Initialize block structure before parsing */
+  block_init(&msg->block);
 
-  /* Block deserialization - to be implemented when needed */
-  /* For now, just indicate invalid format */
-  if (consumed) {
-    *consumed = 0;
-  }
-  return ECHO_ERR_INVALID_FORMAT;
+  /* Parse block from wire format */
+  return block_parse(buf, buf_len, &msg->block, consumed);
 }
 
 /* ========================================================================

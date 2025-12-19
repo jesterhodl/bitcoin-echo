@@ -1209,6 +1209,14 @@ void chainstate_set_tip_index(chainstate_t *state, block_index_t *index) {
   }
 }
 
+void chainstate_set_best_header_index(chainstate_t *state,
+                                      block_index_t *index) {
+  ECHO_ASSERT(state != NULL);
+  /* Only set tip_index (for sync locator building).
+   * Does NOT update state->tip - that remains the validated chain tip. */
+  state->tip_index = index;
+}
+
 bool chainstate_should_reorg(const chainstate_t *state,
                              const block_index_t *new_index) {
   ECHO_ASSERT(state != NULL);

@@ -225,6 +225,24 @@ typedef struct {
   void (*send_getdata_blocks)(peer_t *peer, const hash256_t *hashes,
                               size_t count, void *ctx);
 
+  /**
+   * Get block hash by height from the database.
+   *
+   * Used for efficient block queueing - avoids walking back through
+   * prev pointers when there's a large height gap.
+   *
+   * Parameters:
+   *   height - Block height
+   *   hash   - Output: block hash at that height
+   *   ctx    - User context
+   *
+   * Returns:
+   *   ECHO_OK on success
+   *   ECHO_ERR_NOT_FOUND if no block at that height
+   */
+  echo_result_t (*get_block_hash_at_height)(uint32_t height, hash256_t *hash,
+                                            void *ctx);
+
   /* Context pointer passed to all callbacks */
   void *ctx;
 } sync_callbacks_t;
