@@ -871,6 +871,11 @@ static void queue_blocks_from_headers(sync_manager_t *mgr) {
  * Request blocks from peers.
  */
 static void request_blocks(sync_manager_t *mgr) {
+  /* Track blocks to request per peer for batched getdata */
+  hash256_t blocks_for_peer[SYNC_MAX_BLOCKS_PER_PEER];
+  size_t blocks_count = 0;
+  peer_sync_state_t *current_peer = NULL;
+
   /* Request blocks from queue */
   while (block_queue_pending_count(mgr->block_queue) > 0 &&
          block_queue_inflight_count(mgr->block_queue) <
@@ -880,6 +885,16 @@ static void request_blocks(sync_manager_t *mgr) {
     if (!ps) {
       break;
     }
+
+    /* If we're switching peers, send accumulated requests to previous peer */
+    if (current_peer != NULL && current_peer != ps && blocks_count > 0) {
+      if (mgr->callbacks.send_getdata_blocks) {
+        mgr->callbacks.send_getdata_blocks(current_peer->peer, blocks_for_peer,
+                                           blocks_count, mgr->callbacks.ctx);
+      }
+      blocks_count = 0;
+    }
+    current_peer = ps;
 
     /* Get next block to download */
     hash256_t hash;
@@ -898,9 +913,18 @@ static void request_blocks(sync_manager_t *mgr) {
       ps->blocks_in_flight_count++;
     }
 
-    /* Note: Actual getdata message sending would be done by the application
-     * layer.
-     * This module just manages what to request and from whom. */
+    /* Collect for batched getdata */
+    if (blocks_count < SYNC_MAX_BLOCKS_PER_PEER) {
+      blocks_for_peer[blocks_count++] = hash;
+    }
+  }
+
+  /* Send any remaining accumulated requests */
+  if (current_peer != NULL && blocks_count > 0) {
+    if (mgr->callbacks.send_getdata_blocks) {
+      mgr->callbacks.send_getdata_blocks(current_peer->peer, blocks_for_peer,
+                                         blocks_count, mgr->callbacks.ctx);
+    }
   }
 }
 
@@ -922,7 +946,15 @@ void sync_tick(sync_manager_t *mgr) {
         if (now - ps->headers_sent_time >= SYNC_HEADER_RETRY_INTERVAL_MS) {
           ps->headers_in_flight = true;
           ps->headers_sent_time = now;
-          /* Note: Actual getheaders message would be sent by app layer */
+
+          /* Build block locator and send getheaders */
+          if (mgr->callbacks.send_getheaders) {
+            hash256_t locator[SYNC_MAX_LOCATOR_HASHES];
+            size_t locator_len = 0;
+            sync_build_locator(mgr->chainstate, locator, &locator_len);
+            mgr->callbacks.send_getheaders(ps->peer, locator, locator_len, NULL,
+                                           mgr->callbacks.ctx);
+          }
         }
       }
     }

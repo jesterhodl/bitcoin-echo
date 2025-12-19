@@ -38,6 +38,14 @@ typedef struct {
   /* Counters */
   size_t headers_validated;
   size_t blocks_validated;
+
+  /* Send callback tracking (Session 9.6.6) */
+  size_t getheaders_sent;
+  size_t getdata_blocks_sent;
+  peer_t *last_getheaders_peer;
+  peer_t *last_getdata_peer;
+  size_t last_locator_len;
+  size_t last_getdata_count;
 } test_ctx_t;
 
 /* Mock callback: get block */
@@ -102,6 +110,30 @@ static echo_result_t mock_validate_and_apply_block(const block_t *block,
   }
 
   return ECHO_OK;
+}
+
+/* Mock callback: send getheaders (Session 9.6.6) */
+static void mock_send_getheaders(peer_t *peer, const hash256_t *locator,
+                                 size_t locator_len, const hash256_t *stop_hash,
+                                 void *ctx) {
+  test_ctx_t *tctx = (test_ctx_t *)ctx;
+  (void)locator;
+  (void)stop_hash;
+
+  tctx->getheaders_sent++;
+  tctx->last_getheaders_peer = peer;
+  tctx->last_locator_len = locator_len;
+}
+
+/* Mock callback: send getdata for blocks (Session 9.6.6) */
+static void mock_send_getdata_blocks(peer_t *peer, const hash256_t *hashes,
+                                     size_t count, void *ctx) {
+  test_ctx_t *tctx = (test_ctx_t *)ctx;
+  (void)hashes;
+
+  tctx->getdata_blocks_sent++;
+  tctx->last_getdata_peer = peer;
+  tctx->last_getdata_count = count;
 }
 
 /* Create test peer */
@@ -958,6 +990,119 @@ static void test_sync_process_timeouts(void) {
 }
 
 /* ============================================================================
+ * Send Callback Tests (Session 9.6.6)
+ * ============================================================================
+ */
+
+static void test_sync_send_getheaders_callback(void) {
+  chainstate_t *chainstate = chainstate_create();
+  test_ctx_t tctx = {0};
+  tctx.accept_headers = true;
+
+  sync_callbacks_t callbacks = {
+      .get_block = mock_get_block,
+      .store_block = mock_store_block,
+      .validate_header = mock_validate_header,
+      .validate_and_apply_block = mock_validate_and_apply_block,
+      .send_getheaders = mock_send_getheaders,
+      .send_getdata_blocks = mock_send_getdata_blocks,
+      .ctx = &tctx,
+  };
+
+  sync_manager_t *mgr = sync_create(chainstate, &callbacks);
+  peer_t *peer = create_test_peer("192.168.1.1", 8333, 100000);
+  sync_add_peer(mgr, peer, 100000);
+
+  /* Start sync - should be in headers mode */
+  echo_result_t result = sync_start(mgr);
+  if (result != ECHO_OK) {
+    sync_destroy(mgr);
+    chainstate_destroy(chainstate);
+    free(peer);
+    test_fail("Failed to start sync");
+    return;
+  }
+
+  /* Tick should trigger getheaders send */
+  sync_tick(mgr);
+
+  /* Verify callback was called */
+  if (tctx.getheaders_sent != 1) {
+    sync_destroy(mgr);
+    chainstate_destroy(chainstate);
+    free(peer);
+    test_fail("Expected getheaders to be sent once");
+    return;
+  }
+
+  if (tctx.last_getheaders_peer != peer) {
+    sync_destroy(mgr);
+    chainstate_destroy(chainstate);
+    free(peer);
+    test_fail("Expected getheaders sent to correct peer");
+    return;
+  }
+
+  sync_destroy(mgr);
+  chainstate_destroy(chainstate);
+  free(peer);
+
+}
+
+static void test_sync_send_getheaders_not_called_when_no_callback(void) {
+  chainstate_t *chainstate = chainstate_create();
+  test_ctx_t tctx = {0};
+
+  /* No send_getheaders callback */
+  sync_callbacks_t callbacks = {
+      .ctx = &tctx,
+  };
+
+  sync_manager_t *mgr = sync_create(chainstate, &callbacks);
+  peer_t *peer = create_test_peer("192.168.1.1", 8333, 100000);
+  sync_add_peer(mgr, peer, 100000);
+
+  sync_start(mgr);
+
+  /* Should not crash without callback */
+  sync_tick(mgr);
+
+  sync_destroy(mgr);
+  chainstate_destroy(chainstate);
+  free(peer);
+
+}
+
+static void test_sync_callbacks_with_all_fields(void) {
+  chainstate_t *chainstate = chainstate_create();
+  test_ctx_t tctx = {0};
+  tctx.accept_headers = true;
+  tctx.accept_blocks = true;
+
+  /* Test with all callbacks set */
+  sync_callbacks_t callbacks = {
+      .get_block = mock_get_block,
+      .store_block = mock_store_block,
+      .validate_header = mock_validate_header,
+      .validate_and_apply_block = mock_validate_and_apply_block,
+      .send_getheaders = mock_send_getheaders,
+      .send_getdata_blocks = mock_send_getdata_blocks,
+      .ctx = &tctx,
+  };
+
+  sync_manager_t *mgr = sync_create(chainstate, &callbacks);
+  if (!mgr) {
+    chainstate_destroy(chainstate);
+    test_fail("Failed to create sync manager with all callbacks");
+    return;
+  }
+
+  sync_destroy(mgr);
+  chainstate_destroy(chainstate);
+
+}
+
+/* ============================================================================
  * Test Runner
  * ============================================================================
  */
@@ -996,6 +1141,9 @@ int main(void) {
     test_case("Sync tick idle"); test_sync_tick_idle(); test_pass();
     test_case("Sync tick headers mode"); test_sync_tick_headers_mode(); test_pass();
     test_case("Sync process timeouts"); test_sync_process_timeouts(); test_pass();
+    test_case("Sync send getheaders callback"); test_sync_send_getheaders_callback(); test_pass();
+    test_case("Sync send getheaders not called without callback"); test_sync_send_getheaders_not_called_when_no_callback(); test_pass();
+    test_case("Sync callbacks with all fields"); test_sync_callbacks_with_all_fields(); test_pass();
 
     test_suite_end();
     return test_global_summary();

@@ -175,6 +175,37 @@ typedef struct {
                                             const block_index_t *index,
                                             void *ctx);
 
+  /**
+   * Send getheaders message to peer.
+   *
+   * Called by sync manager to request headers from a peer.
+   * The locator is built by the sync manager.
+   *
+   * Parameters:
+   *   peer         - Peer to send to
+   *   locator      - Block locator hashes (most recent first)
+   *   locator_len  - Number of locator hashes
+   *   stop_hash    - Hash to stop at (NULL for as many as possible)
+   *   ctx          - User context
+   */
+  void (*send_getheaders)(peer_t *peer, const hash256_t *locator,
+                          size_t locator_len, const hash256_t *stop_hash,
+                          void *ctx);
+
+  /**
+   * Send getdata message for blocks to peer.
+   *
+   * Called by sync manager to request block downloads.
+   *
+   * Parameters:
+   *   peer   - Peer to send to
+   *   hashes - Array of block hashes to request
+   *   count  - Number of hashes
+   *   ctx    - User context
+   */
+  void (*send_getdata_blocks)(peer_t *peer, const hash256_t *hashes,
+                              size_t count, void *ctx);
+
   /* Context pointer passed to all callbacks */
   void *ctx;
 } sync_callbacks_t;

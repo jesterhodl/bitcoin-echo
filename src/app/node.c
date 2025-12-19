@@ -126,6 +126,12 @@ static echo_result_t sync_cb_validate_header(const block_header_t *header,
 static echo_result_t sync_cb_validate_and_apply_block(const block_t *block,
                                                       const block_index_t *index,
                                                       void *ctx);
+/* Sync manager send callbacks (Session 9.6.6) */
+static void sync_cb_send_getheaders(peer_t *peer, const hash256_t *locator,
+                                    size_t locator_len,
+                                    const hash256_t *stop_hash, void *ctx);
+static void sync_cb_send_getdata_blocks(peer_t *peer, const hash256_t *hashes,
+                                        size_t count, void *ctx);
 
 /*
  * ============================================================================
@@ -1006,6 +1012,15 @@ static echo_result_t sync_cb_validate_and_apply_block(const block_t *block,
     return result;
   }
 
+  /* Step 4: Prune old blocks if pruning enabled (Session 9.6.6) */
+  if (node_is_pruning_enabled(node)) {
+    result = node_maybe_prune(node);
+    if (result != ECHO_OK && result != ECHO_ERR_INVALID_STATE) {
+      /* Log but don't fail - pruning is best-effort during sync */
+      log_debug(LOG_COMP_STORE, "Pruning check returned: %d", result);
+    }
+  }
+
   /* Step 5: Announce valid block to peers */
   /* Send INV to all connected peers except the sender */
   for (size_t i = 0; i < NODE_MAX_PEERS; i++) {
@@ -1035,6 +1050,92 @@ static echo_result_t sync_cb_validate_and_apply_block(const block_t *block,
 }
 
 /**
+ * Send getheaders message to peer.
+ *
+ * Session 9.6.6: Headers-First Sync Integration
+ */
+static void sync_cb_send_getheaders(peer_t *peer, const hash256_t *locator,
+                                    size_t locator_len,
+                                    const hash256_t *stop_hash, void *ctx) {
+  (void)ctx; /* Node context not needed for simple message send */
+
+  if (peer == NULL || !peer_is_ready(peer)) {
+    return;
+  }
+
+  /* Build getheaders message */
+  msg_t msg;
+  memset(&msg, 0, sizeof(msg));
+  msg.type = MSG_GETHEADERS;
+  msg.payload.getheaders.version = ECHO_PROTOCOL_VERSION;
+  msg.payload.getheaders.hash_count = locator_len;
+
+  /* Allocate and copy locator - will be freed by peer after sending */
+  if (locator_len > 0 && locator != NULL) {
+    msg.payload.getheaders.block_locator =
+        malloc(locator_len * sizeof(hash256_t));
+    if (msg.payload.getheaders.block_locator == NULL) {
+      log_error(LOG_COMP_SYNC, "Failed to allocate block locator");
+      return;
+    }
+    memcpy(msg.payload.getheaders.block_locator, locator,
+           locator_len * sizeof(hash256_t));
+  } else {
+    msg.payload.getheaders.block_locator = NULL;
+  }
+
+  /* Set stop hash (all zeros means "give me as many as you can") */
+  if (stop_hash != NULL) {
+    msg.payload.getheaders.hash_stop = *stop_hash;
+  } else {
+    memset(&msg.payload.getheaders.hash_stop, 0, sizeof(hash256_t));
+  }
+
+  peer_queue_message(peer, &msg);
+
+  log_debug(LOG_COMP_SYNC, "Sent getheaders with %zu locator hashes to peer",
+            locator_len);
+}
+
+/**
+ * Send getdata message for blocks to peer.
+ *
+ * Session 9.6.6: Headers-First Sync Integration
+ */
+static void sync_cb_send_getdata_blocks(peer_t *peer, const hash256_t *hashes,
+                                        size_t count, void *ctx) {
+  (void)ctx; /* Node context not needed for simple message send */
+
+  if (peer == NULL || !peer_is_ready(peer) || hashes == NULL || count == 0) {
+    return;
+  }
+
+  /* Allocate inventory vectors */
+  inv_vector_t *inventory = malloc(count * sizeof(inv_vector_t));
+  if (inventory == NULL) {
+    log_error(LOG_COMP_SYNC, "Failed to allocate getdata inventory");
+    return;
+  }
+
+  /* Build inventory - request witness blocks for SegWit support */
+  for (size_t i = 0; i < count; i++) {
+    inventory[i].type = INV_WITNESS_BLOCK;
+    inventory[i].hash = hashes[i];
+  }
+
+  /* Build getdata message */
+  msg_t msg;
+  memset(&msg, 0, sizeof(msg));
+  msg.type = MSG_GETDATA;
+  msg.payload.getdata.count = count;
+  msg.payload.getdata.inventory = inventory;
+
+  peer_queue_message(peer, &msg);
+
+  log_debug(LOG_COMP_SYNC, "Sent getdata for %zu blocks to peer", count);
+}
+
+/**
  * Initialize sync manager with callbacks.
  *
  * Session 9.6.1: Block Processing Pipeline
@@ -1057,6 +1158,8 @@ static echo_result_t node_init_sync(node_t *node) {
       .store_block = sync_cb_store_block,
       .validate_header = sync_cb_validate_header,
       .validate_and_apply_block = sync_cb_validate_and_apply_block,
+      .send_getheaders = sync_cb_send_getheaders,
+      .send_getdata_blocks = sync_cb_send_getdata_blocks,
       .ctx = node};
 
   /* Create sync manager */
@@ -1739,9 +1842,79 @@ static void node_handle_peer_message(node_t *node, peer_t *peer,
     /* Feature negotiation messages - acknowledged but not implemented */
     break;
 
-  case MSG_GETHEADERS:
+  case MSG_GETHEADERS: {
+    /* Peer requesting headers from us */
+    if (node->consensus == NULL || !node->block_index_db_open) {
+      break;
+    }
+
+    /* Find common point using block locator */
+    chainstate_t *chainstate = consensus_get_chainstate(node->consensus);
+    const msg_getheaders_t *req = &msg->payload.getheaders;
+    uint32_t start_height = 0;
+
+    if (req->hash_count > 0 && req->block_locator != NULL) {
+      block_index_t *fork_point =
+          sync_find_locator_fork(chainstate, req->block_locator, req->hash_count);
+      if (fork_point != NULL) {
+        start_height = fork_point->height;
+      }
+    }
+
+    /* Get our current chain tip height */
+    uint32_t tip_height = consensus_get_height(node->consensus);
+    if (start_height >= tip_height) {
+      break; /* No headers to send */
+    }
+
+    /* Collect headers to send (up to 2000) */
+    #define MAX_HEADERS_TO_SEND 2000
+    block_header_t *headers = malloc(MAX_HEADERS_TO_SEND * sizeof(block_header_t));
+    if (headers == NULL) {
+      break;
+    }
+
+    size_t header_count = 0;
+    static const hash256_t zero_hash = {{0}};
+    block_index_db_t *bdb = &node->block_index_db;
+
+    /* Query headers by height from database */
+    for (uint32_t h = start_height + 1;
+         h <= tip_height && header_count < MAX_HEADERS_TO_SEND; h++) {
+      block_index_entry_t entry;
+      if (block_index_db_get_chain_block(bdb, h, &entry) != ECHO_OK) {
+        break;
+      }
+
+      /* Stop if we've reached the stop hash (if specified) */
+      if (memcmp(&req->hash_stop, &zero_hash, sizeof(hash256_t)) != 0 &&
+          memcmp(&entry.hash, &req->hash_stop, sizeof(hash256_t)) == 0) {
+        break;
+      }
+
+      headers[header_count++] = entry.header;
+    }
+
+    /* Send headers response */
+    if (header_count > 0) {
+      msg_t response;
+      memset(&response, 0, sizeof(response));
+      response.type = MSG_HEADERS;
+      response.payload.headers.count = header_count;
+      response.payload.headers.headers = headers;
+      peer_queue_message(peer, &response);
+
+      log_debug(LOG_COMP_SYNC, "Sent %zu headers to peer (heights %u-%u)",
+                header_count, start_height + 1, start_height + (uint32_t)header_count);
+    } else {
+      free(headers);
+    }
+    #undef MAX_HEADERS_TO_SEND
+    break;
+  }
+
   case MSG_GETBLOCKS:
-    /* Peer requesting headers/blocks from us - not yet implemented */
+    /* Peer requesting block inventory - not yet implemented */
     break;
 
   default:
@@ -1899,9 +2072,15 @@ echo_result_t node_maintenance(node_t *node) {
   }
 
   /* Task 2: Tick sync manager for timeout processing and retries */
-  if (node->sync_mgr != NULL) {
+  if (node->sync_mgr != NULL && !node->config.observer_mode) {
+    /* Start sync if not already syncing and not fully synced */
+    if (!sync_is_ibd(node->sync_mgr) && !sync_is_complete(node->sync_mgr)) {
+      echo_result_t start_result = sync_start(node->sync_mgr);
+      if (start_result == ECHO_OK) {
+        log_info(LOG_COMP_SYNC, "Starting headers-first sync");
+      }
+    }
     sync_tick(node->sync_mgr);
-    sync_process_timeouts(node->sync_mgr);
   }
 
   /* Task 3: Evict stale mempool transactions (future session) */
