@@ -52,6 +52,9 @@
 /* Minimum time between header sync attempts with same peer (5 seconds) */
 #define SYNC_HEADER_RETRY_INTERVAL_MS 5000
 
+/* Periodic header refresh during block sync to catch new blocks (30 seconds) */
+#define SYNC_HEADER_REFRESH_INTERVAL_MS 30000
+
 /* Block download window - how far ahead of validated tip to download */
 #define SYNC_BLOCK_DOWNLOAD_WINDOW 1024
 

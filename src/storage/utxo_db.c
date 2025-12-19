@@ -47,7 +47,7 @@ static const char *SQL_LOOKUP =
     "SELECT value, script, height, coinbase FROM utxo WHERE outpoint = ?";
 
 static const char *SQL_INSERT =
-    "INSERT INTO utxo (outpoint, value, script, height, coinbase) "
+    "INSERT OR IGNORE INTO utxo (outpoint, value, script, height, coinbase) "
     "VALUES (?, ?, ?, ?, ?)";
 
 static const char *SQL_DELETE = "DELETE FROM utxo WHERE outpoint = ?";

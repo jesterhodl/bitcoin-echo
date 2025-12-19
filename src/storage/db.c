@@ -268,8 +268,12 @@ echo_result_t db_step(db_stmt_t *stmt) {
     return ECHO_OK; /* Row available */
   } else if (rc == SQLITE_DONE) {
     return ECHO_DONE; /* No more rows */
+  } else if ((rc & 0xFF) == SQLITE_CONSTRAINT) {
+    /* SQLite returns extended error codes like SQLITE_CONSTRAINT_PRIMARYKEY.
+     * Mask with 0xFF to get the primary error code. */
+    return ECHO_ERR_EXISTS; /* Constraint violation (e.g., duplicate key) */
   } else {
-    return ECHO_ERR_DB; /* Error */
+    return ECHO_ERR_DB; /* Other database error */
   }
 }
 

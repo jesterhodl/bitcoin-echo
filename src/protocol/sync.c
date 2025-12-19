@@ -75,6 +75,7 @@ struct sync_manager {
   /* Sync timing */
   uint64_t start_time;
   uint64_t last_progress_time;
+  uint64_t last_header_refresh_time; /* For periodic header refresh in blocks mode */
 
   /* Stats */
   uint32_t headers_received_total;
@@ -793,10 +794,7 @@ echo_result_t sync_handle_block(sync_manager_t *mgr, peer_t *peer,
     /* Unsolicited block - might still be useful */
   }
 
-  /* Complete in queue */
-  block_queue_complete(mgr->block_queue, &block_hash);
-
-  /* Store block if callback provided */
+  /* Store block if callback provided (before validation - we need the data) */
   if (mgr->callbacks.store_block) {
     mgr->callbacks.store_block(block, mgr->callbacks.ctx);
   }
@@ -811,10 +809,19 @@ echo_result_t sync_handle_block(sync_manager_t *mgr, peer_t *peer,
     echo_result_t result = mgr->callbacks.validate_and_apply_block(
         block, block_index, mgr->callbacks.ctx);
     if (result != ECHO_OK) {
+      /*
+       * Block validation failed - likely out of order (parent not yet applied).
+       * Re-queue the block to try again later instead of discarding.
+       * The block_queue_unassign() puts it back in pending state.
+       */
+      block_queue_unassign(mgr->block_queue, &block_hash);
       return ECHO_ERR_INVALID;
     }
     mgr->blocks_validated_total++;
   }
+
+  /* Only mark complete in queue AFTER successful validation */
+  block_queue_complete(mgr->block_queue, &block_hash);
 
   mgr->blocks_received_total++;
   ps->blocks_received++;
@@ -1114,6 +1121,10 @@ void sync_tick(sync_manager_t *mgr) {
              block_queue_pending_count(mgr->block_queue),
              block_queue_inflight_count(mgr->block_queue));
 
+    uint64_t now = plat_time_ms();
+    uint32_t our_best_height =
+        mgr->best_header ? mgr->best_header->height : 0;
+
     /*
      * Continue requesting headers from peers that may have more.
      *
@@ -1125,14 +1136,11 @@ void sync_tick(sync_manager_t *mgr) {
      * - New peers connecting with higher heights
      * - Peers that caught up since initial connection
      */
-    uint32_t our_best_height =
-        mgr->best_header ? mgr->best_header->height : 0;
     for (size_t i = 0; i < mgr->peer_count; i++) {
       peer_sync_state_t *ps = &mgr->peers[i];
       if (ps->sync_candidate && !ps->headers_in_flight &&
           peer_is_ready(ps->peer) &&
           ps->start_height > (int32_t)our_best_height) {
-        uint64_t now = plat_time_ms();
         if (now - ps->headers_sent_time >= SYNC_HEADER_RETRY_INTERVAL_MS) {
           log_info(LOG_COMP_SYNC,
                    "Requesting more headers: our_best=%u, peer_height=%d",
@@ -1157,6 +1165,47 @@ void sync_tick(sync_manager_t *mgr) {
             mgr->callbacks.send_getheaders(ps->peer, locator, locator_len, NULL,
                                            mgr->callbacks.ctx);
           }
+        }
+      }
+    }
+
+    /*
+     * Periodic header refresh: Request headers from any available peer
+     * every SYNC_HEADER_REFRESH_INTERVAL_MS to catch newly mined blocks.
+     * This handles the case where all connected peers had the same height
+     * as us when they connected, but the network has since advanced.
+     */
+    if (now - mgr->last_header_refresh_time >= SYNC_HEADER_REFRESH_INTERVAL_MS) {
+      /* Find a sync candidate peer that's not currently fetching headers */
+      for (size_t i = 0; i < mgr->peer_count; i++) {
+        peer_sync_state_t *ps = &mgr->peers[i];
+        if (ps->sync_candidate && !ps->headers_in_flight &&
+            peer_is_ready(ps->peer)) {
+          log_info(LOG_COMP_SYNC,
+                   "Periodic header refresh: requesting from peer (our_best=%u)",
+                   our_best_height);
+          ps->headers_in_flight = true;
+          ps->headers_sent_time = now;
+          mgr->last_header_refresh_time = now;
+
+          /* Build block locator and send getheaders */
+          if (mgr->callbacks.send_getheaders) {
+            hash256_t locator[SYNC_MAX_LOCATOR_HASHES];
+            size_t locator_len = 0;
+
+            if (mgr->best_header != NULL) {
+              block_index_map_t *map =
+                  chainstate_get_block_index_map(mgr->chainstate);
+              sync_build_locator_from(map, mgr->best_header, locator,
+                                      &locator_len);
+            } else {
+              sync_build_locator(mgr->chainstate, locator, &locator_len);
+            }
+
+            mgr->callbacks.send_getheaders(ps->peer, locator, locator_len, NULL,
+                                           mgr->callbacks.ctx);
+          }
+          break; /* Only request from one peer per tick */
         }
       }
     }

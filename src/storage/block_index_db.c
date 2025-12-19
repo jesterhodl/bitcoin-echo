@@ -78,10 +78,10 @@ static echo_result_t prepare_statements(block_index_db_t *bdb) {
   if (result != ECHO_OK)
     return result;
 
-  /* Insert */
+  /* Insert (OR IGNORE to silently skip duplicates on hash primary key) */
   result = db_prepare(&bdb->db,
-                      "INSERT INTO blocks (hash, height, header, chainwork, "
-                      "status) VALUES (?, ?, ?, ?, ?)",
+                      "INSERT OR IGNORE INTO blocks (hash, height, header, "
+                      "chainwork, status) VALUES (?, ?, ?, ?, ?)",
                       &bdb->insert_stmt);
   if (result != ECHO_OK)
     return result;
