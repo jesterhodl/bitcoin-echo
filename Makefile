@@ -189,13 +189,13 @@ $(TEST_PROTOCOL): test/unit/test_protocol.c src/protocol/messages.c src/crypto/s
 $(TEST_PROTOCOL_SERIALIZE): test/unit/test_protocol_serialize.c src/protocol/serialize.c src/protocol/messages.c src/consensus/serialize.c src/consensus/block.c src/consensus/tx.c src/crypto/sha256.c  $(TEST_UTILS_OBJ)
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(TEST_PEER): test/unit/test_peer.c src/protocol/peer.c src/protocol/serialize.c src/protocol/messages.c src/consensus/serialize.c src/consensus/block.c src/consensus/tx.c src/crypto/sha256.c src/platform/posix.c  $(TEST_UTILS_OBJ)
+$(TEST_PEER): test/unit/test_peer.c src/protocol/peer.c src/protocol/serialize.c src/protocol/messages.c src/consensus/serialize.c src/consensus/block.c src/consensus/tx.c src/crypto/sha256.c src/platform/posix.c src/app/log.c  $(TEST_UTILS_OBJ)
 	$(CC) $(CFLAGS) -o $@ $^
 
 $(TEST_DISCOVERY): test/unit/test_discovery.c src/protocol/discovery.c src/platform/posix.c src/app/log.c  $(TEST_UTILS_OBJ)
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(TEST_RELAY): test/unit/test_relay.c src/protocol/relay.c src/protocol/peer.c src/protocol/serialize.c src/protocol/messages.c src/consensus/serialize.c src/consensus/block.c src/consensus/tx.c src/crypto/sha256.c src/platform/posix.c  $(TEST_UTILS_OBJ)
+$(TEST_RELAY): test/unit/test_relay.c src/protocol/relay.c src/protocol/peer.c src/protocol/serialize.c src/protocol/messages.c src/consensus/serialize.c src/consensus/block.c src/consensus/tx.c src/crypto/sha256.c src/platform/posix.c src/app/log.c  $(TEST_UTILS_OBJ)
 	$(CC) $(CFLAGS) -o $@ $^
 
 $(TEST_SYNC): test/unit/test_sync.c src/protocol/sync.c src/protocol/peer.c src/protocol/serialize.c src/protocol/messages.c src/consensus/chainstate.c src/consensus/utxo.c src/consensus/block.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c src/platform/posix.c src/app/log.c $(TEST_UTILS_OBJ)
