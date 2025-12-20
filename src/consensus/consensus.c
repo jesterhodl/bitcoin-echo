@@ -23,6 +23,7 @@
 #include "block_validate.h"
 #include "chainstate.h"
 #include "echo_assert.h"
+#include "echo_config.h"
 #include "echo_types.h"
 #include "script.h"
 #include "tx.h"
@@ -609,8 +610,15 @@ bool consensus_validate_block(const consensus_engine_t *engine,
   satoshi_t total_fees = 0;
 
   /* Validate all non-coinbase transactions */
-  /* Note: script_flags used when full script validation is performed */
-  (void)consensus_get_script_flags(height);
+  uint32_t script_flags = consensus_get_script_flags(height);
+
+  /*
+   * AssumeValid: Skip script validation for blocks at or before the
+   * assumevalid height. This is the Bitcoin Core default behavior since v0.14.0.
+   * We still validate PoW, merkle roots, UTXO values, and all other consensus
+   * rules - only script execution is skipped.
+   */
+  bool assume_valid = (height <= ECHO_ASSUME_VALID_HEIGHT);
 
   for (size_t tx_idx = 1; tx_idx < block->tx_count; tx_idx++) {
     const tx_t *tx = &block->txs[tx_idx];
@@ -635,6 +643,10 @@ bool consensus_validate_block(const consensus_engine_t *engine,
       const outpoint_t *outpoint = &tx->inputs[in_idx].prevout;
       const utxo_entry_t *utxo = consensus_lookup_utxo(engine, outpoint);
 
+      /* UTXO info for script validation */
+      utxo_info_t utxo_info;
+      memset(&utxo_info, 0, sizeof(utxo_info));
+
       if (utxo == NULL) {
         /* Check if this input references an output from earlier in this block
          */
@@ -645,8 +657,17 @@ bool consensus_validate_block(const consensus_engine_t *engine,
           if (memcmp(outpoint->txid.bytes, prev_txid.bytes, 32) == 0 &&
               outpoint->vout < block->txs[prev_tx].output_count) {
             /* Found it in this block */
-            tx_input_total += block->txs[prev_tx].outputs[outpoint->vout].value;
+            const tx_output_t *prev_out =
+                &block->txs[prev_tx].outputs[outpoint->vout];
+            tx_input_total += prev_out->value;
             found_in_block = true;
+
+            /* Build UTXO info for script validation */
+            utxo_info.value = prev_out->value;
+            utxo_info.script_pubkey = prev_out->script_pubkey;
+            utxo_info.script_pubkey_len = prev_out->script_pubkey_len;
+            utxo_info.height = height; /* Same block */
+            utxo_info.is_coinbase = (prev_tx == 0) ? ECHO_TRUE : ECHO_FALSE;
             break;
           }
         }
@@ -673,6 +694,32 @@ bool consensus_validate_block(const consensus_engine_t *engine,
         }
 
         tx_input_total += utxo->value;
+
+        /* Build UTXO info for script validation */
+        utxo_info.value = utxo->value;
+        utxo_info.script_pubkey = utxo->script_pubkey;
+        utxo_info.script_pubkey_len = utxo->script_len;
+        utxo_info.height = utxo->height;
+        utxo_info.is_coinbase = utxo->is_coinbase ? ECHO_TRUE : ECHO_FALSE;
+      }
+
+      /* Script validation (skip for AssumeValid blocks) */
+      if (!assume_valid) {
+        tx_validate_result_t script_result;
+        tx_validate_result_init(&script_result);
+
+        echo_result_t script_res =
+            tx_validate_input(tx, in_idx, &utxo_info, script_flags,
+                              &script_result);
+        if (script_res != ECHO_OK) {
+          if (result != NULL) {
+            result->error = CONSENSUS_ERR_TX_SCRIPT;
+            result->failing_index = tx_idx;
+            result->failing_input_index = in_idx;
+            result->script_error = script_result.script_error;
+          }
+          return false;
+        }
       }
     }
 
