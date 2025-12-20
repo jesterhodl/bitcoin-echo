@@ -163,6 +163,11 @@ uint32_t consensus_get_height(const consensus_engine_t *engine) {
   return chainstate_get_height(engine->chainstate);
 }
 
+void consensus_mark_initialized(consensus_engine_t *engine) {
+  ECHO_ASSERT(engine != NULL);
+  engine->initialized = true;
+}
+
 echo_result_t consensus_get_block_hash(const consensus_engine_t *engine,
                                        uint32_t height, hash256_t *hash) {
   ECHO_ASSERT(engine != NULL);

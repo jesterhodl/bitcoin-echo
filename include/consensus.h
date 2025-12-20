@@ -234,6 +234,15 @@ echo_result_t consensus_get_chain_tip(const consensus_engine_t *engine,
 uint32_t consensus_get_height(const consensus_engine_t *engine);
 
 /*
+ * Mark the consensus engine as initialized after restoring from database.
+ * This should be called after loading a validated tip from persistent storage.
+ *
+ * Parameters:
+ *   engine - The consensus engine
+ */
+void consensus_mark_initialized(consensus_engine_t *engine);
+
+/*
  * Get the block hash at a specific height.
  *
  * Parameters:

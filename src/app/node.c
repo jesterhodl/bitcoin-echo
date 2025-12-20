@@ -545,6 +545,10 @@ static echo_result_t node_restore_chain_state(node_t *node) {
       if (validated_index != NULL) {
         /* Set the chainstate validated tip (also modifies tip_index) */
         chainstate_set_tip_index(chainstate, validated_index);
+
+        /* Mark consensus engine as initialized so consensus_get_height works */
+        consensus_mark_initialized(node->consensus);
+
         log_info(LOG_COMP_MAIN, "Validated tip restored: height=%u",
                  validated_height);
       }
