@@ -90,6 +90,13 @@ struct sync_manager {
 
   /* Download window size (configured at creation based on pruning mode) */
   uint32_t download_window;
+
+  /* Parallel request rate limiting */
+  hash256_t last_parallel_request_hash;
+  uint64_t last_parallel_request_time;
+
+  /* Last time we checked for stored blocks to validate */
+  uint64_t last_stored_block_check_time;
 };
 
 /* ============================================================================
@@ -1223,8 +1230,8 @@ static void request_blocks(sync_manager_t *mgr) {
 
   /*
    * CRITICAL PATH OPTIMIZATION: If the next needed block (validated_height+1)
-   * is in-flight and taking >1 second, request it from ALL other peers too.
-   * First response wins. This dramatically reduces stall time.
+   * is in-flight and taking >1 second, request it from other peers.
+   * Rate-limited: only send parallel request once per block, and only every 2s.
    */
   uint32_t next_needed = validated_height + 1;
   hash256_t next_hash;
@@ -1232,34 +1239,47 @@ static void request_blocks(sync_manager_t *mgr) {
       ECHO_OK) {
     uint64_t now = plat_time_ms();
 
-    /* Find if this block is in-flight and stalling */
-    for (size_t i = 0; i < mgr->peer_count; i++) {
-      peer_sync_state_t *ps = &mgr->peers[i];
-      for (size_t j = 0; j < ps->blocks_in_flight_count; j++) {
-        if (memcmp(&ps->blocks_in_flight[j], &next_hash, sizeof(hash256_t)) ==
-            0) {
-          /* Found it - check if stalling (>500ms) */
-          if (now - ps->block_request_time[j] > 500) {
-            /* Request from ALL other peers immediately */
-            for (size_t k = 0; k < mgr->peer_count; k++) {
-              if (k == i)
-                continue; /* Skip the original peer */
-              peer_sync_state_t *other = &mgr->peers[k];
-              if (other->peer && other->peer->state == PEER_STATE_READY &&
-                  other->blocks_in_flight_count < SYNC_MAX_BLOCKS_PER_PEER) {
-                /* Request the blocking block from this peer too */
-                if (mgr->callbacks.send_getdata_blocks) {
-                  log_info(
-                      LOG_COMP_SYNC,
-                      "Parallel request for blocking block %u from extra peer",
-                      next_needed);
-                  mgr->callbacks.send_getdata_blocks(other->peer, &next_hash, 1,
-                                                     mgr->callbacks.ctx);
+    /* Check if we already sent a parallel request for this block recently */
+    bool already_requested =
+        (memcmp(&mgr->last_parallel_request_hash, &next_hash,
+                sizeof(hash256_t)) == 0) &&
+        (now - mgr->last_parallel_request_time < 2000);
+
+    if (!already_requested) {
+      /* Find if this block is in-flight and stalling */
+      for (size_t i = 0; i < mgr->peer_count; i++) {
+        peer_sync_state_t *ps = &mgr->peers[i];
+        for (size_t j = 0; j < ps->blocks_in_flight_count; j++) {
+          if (memcmp(&ps->blocks_in_flight[j], &next_hash, sizeof(hash256_t)) ==
+              0) {
+            /* Found it - check if stalling (>1000ms) */
+            if (now - ps->block_request_time[j] > 1000) {
+              /* Request from up to 3 other peers (not all) */
+              size_t extra_requests = 0;
+              for (size_t k = 0; k < mgr->peer_count && extra_requests < 3;
+                   k++) {
+                if (k == i)
+                  continue; /* Skip the original peer */
+                peer_sync_state_t *other = &mgr->peers[k];
+                if (other->peer && other->peer->state == PEER_STATE_READY &&
+                    other->blocks_in_flight_count < SYNC_MAX_BLOCKS_PER_PEER) {
+                  if (mgr->callbacks.send_getdata_blocks) {
+                    mgr->callbacks.send_getdata_blocks(other->peer, &next_hash,
+                                                       1, mgr->callbacks.ctx);
+                    extra_requests++;
+                  }
                 }
               }
+              if (extra_requests > 0) {
+                log_info(LOG_COMP_SYNC,
+                         "Parallel request for blocking block %u to %zu peers",
+                         next_needed, extra_requests);
+                mgr->last_parallel_request_hash = next_hash;
+                mgr->last_parallel_request_time = now;
+              }
             }
+            goto done_parallel_check;
           }
-          goto done_parallel_check;
         }
       }
     }
@@ -1494,6 +1514,80 @@ void sync_tick(sync_manager_t *mgr) {
 
     /* Queue blocks from headers */
     queue_blocks_from_headers(mgr);
+
+    /*
+     * PERIODIC STORED BLOCK VALIDATION: Check if next-needed blocks are
+     * already stored on disk and validate them. This handles the case where
+     * blocks arrive out of order, get stored, and the "next" block never
+     * arrives from the network because we already have it.
+     *
+     * Only check every 100ms to avoid excessive disk reads.
+     */
+    if (now - mgr->last_stored_block_check_time >= 100) {
+      mgr->last_stored_block_check_time = now;
+
+      uint32_t validated_height = chainstate_get_height(mgr->chainstate);
+      uint32_t blocks_validated_this_tick = 0;
+      const uint32_t max_per_tick = 100; /* Limit to avoid blocking */
+
+      while (blocks_validated_this_tick < max_per_tick) {
+        uint32_t next_height = validated_height + 1;
+        hash256_t next_hash;
+
+        /* Find the next block in queue */
+        if (block_queue_find_by_height(mgr->block_queue, next_height,
+                                       &next_hash) != ECHO_OK) {
+          break; /* Not in queue */
+        }
+
+        /* Check if it's already stored */
+        block_index_map_t *idx_map =
+            chainstate_get_block_index_map(mgr->chainstate);
+        block_index_t *next_index = block_index_map_lookup(idx_map, &next_hash);
+
+        if (next_index == NULL ||
+            next_index->data_file == BLOCK_DATA_NOT_STORED) {
+          break; /* Not stored yet */
+        }
+
+        /* Load and validate */
+        block_t stored_block;
+        block_init(&stored_block);
+        echo_result_t load_result = mgr->callbacks.get_block(
+            &next_hash, &stored_block, mgr->callbacks.ctx);
+
+        if (load_result != ECHO_OK) {
+          block_free(&stored_block);
+          break;
+        }
+
+        echo_result_t val_result = mgr->callbacks.validate_and_apply_block(
+            &stored_block, next_index, mgr->callbacks.ctx);
+
+        block_free(&stored_block);
+
+        if (val_result != ECHO_OK) {
+          log_warn(LOG_COMP_SYNC,
+                   "Stored block at height %u failed validation: %d",
+                   next_height, val_result);
+          break;
+        }
+
+        /* Success! */
+        block_queue_complete(mgr->block_queue, &next_hash);
+        mgr->blocks_validated_total++;
+        mgr->last_progress_time = now;
+        validated_height = next_height;
+        blocks_validated_this_tick++;
+
+        if (blocks_validated_this_tick == 1 ||
+            blocks_validated_this_tick % 10 == 0) {
+          log_info(LOG_COMP_SYNC,
+                   "Validated stored block at height %u (periodic check)",
+                   next_height);
+        }
+      }
+    }
 
     /* Request blocks from peers */
     request_blocks(mgr);
