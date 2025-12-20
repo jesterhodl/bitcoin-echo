@@ -1060,10 +1060,15 @@ static void queue_blocks_from_headers(sync_manager_t *mgr) {
       echo_result_t cb_result = mgr->callbacks.get_block_hash_at_height(
           h, &hash, mgr->callbacks.ctx);
       if (cb_result != ECHO_OK) {
+        if (h <= 5) {
+          log_warn(LOG_COMP_SYNC, "queue_blocks: height %u hash lookup failed: %d",
+                   h, cb_result);
+        }
         continue;
       }
       /* Check if we already have this block in queue or storage */
-      if (!block_queue_contains(mgr->block_queue, &hash)) {
+      bool in_queue = block_queue_contains(mgr->block_queue, &hash);
+      if (!in_queue) {
         block_t stored;
         block_init(&stored);
         bool in_storage = mgr->callbacks.get_block &&
@@ -1074,8 +1079,15 @@ static void queue_blocks_from_headers(sync_manager_t *mgr) {
           to_queue[to_queue_count] = hash;
           heights[to_queue_count] = h;
           to_queue_count++;
+          if (h <= 5) {
+            log_info(LOG_COMP_SYNC, "queue_blocks: queuing height %u", h);
+          }
+        } else if (h <= 5) {
+          log_info(LOG_COMP_SYNC, "queue_blocks: height %u already in storage", h);
         }
         block_free(&stored);
+      } else if (h <= 5) {
+        log_info(LOG_COMP_SYNC, "queue_blocks: height %u already in queue", h);
       }
     }
   } else {
@@ -1146,15 +1158,12 @@ static void request_blocks(sync_manager_t *mgr) {
   }
 
   /*
-   * Only request blocks within a small window of the validated tip.
-   * This prevents downloading blocks far ahead that will arrive out of order,
-   * get re-queued (because parent isn't validated), and need re-downloading.
-   *
-   * With 8 peers and 16 blocks per peer, we can have 128 in flight.
-   * A window of 16 gives enough parallelism while minimizing re-downloads.
+   * Request blocks within a tight window of the validated tip.
+   * 64 = 8² gives good parallelism (8 blocks per peer average) while
+   * keeping blocks sequential enough for efficient stored-block chaining.
    */
   uint32_t validated_height = chainstate_get_height(mgr->chainstate);
-  uint32_t max_request_height = validated_height + 16;
+  uint32_t max_request_height = validated_height + 64;
 
   /* Request blocks from queue */
   size_t iteration = 0;
