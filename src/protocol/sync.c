@@ -861,6 +861,15 @@ echo_result_t sync_handle_block(sync_manager_t *mgr, peer_t *peer,
     return ECHO_ERR_NOT_FOUND;
   }
 
+  /* Successful block delivery - decay timeout counter to reward good behavior.
+   * This prevents peers from being disconnected if they're usually responsive
+   * but occasionally slow. Combined with the 6-event threshold, gives peers
+   * multiple chances before disconnection.
+   */
+  if (ps->timeout_count > 0) {
+    ps->timeout_count--;
+  }
+
   /* Compute block hash */
   hash256_t block_hash;
   if (block_header_hash(&block->header, &block_hash) != ECHO_OK) {
@@ -1084,8 +1093,11 @@ void sync_process_timeouts(sync_manager_t *mgr) {
                "Peer stall: %zu blocks timed out (total stall events: %u)",
                stalled_this_tick, ps->timeout_count);
 
-      /* After 3 stall EVENTS (not blocks), disconnect slow peer */
-      if (ps->timeout_count >= 3 && ps->peer) {
+      /* After 6 stall EVENTS (not blocks), disconnect slow peer.
+       * More tolerant than before (was 3) to maintain stable peer count.
+       * Combined with 5s timeout, gives peers 30s+ before disconnect.
+       */
+      if (ps->timeout_count >= 6 && ps->peer) {
         log_info(LOG_COMP_SYNC,
                  "Disconnecting slow peer after %u stall events",
                  ps->timeout_count);

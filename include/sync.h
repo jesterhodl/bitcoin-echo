@@ -37,22 +37,26 @@
 /* Maximum block locator hashes to include in getheaders */
 #define SYNC_MAX_LOCATOR_HASHES 32
 
-/* Maximum parallel block downloads per peer
- * Increased from 16 to 128 for faster IBD.
- * Libbitcoin uses 500, Bitcoin Core uses 16.
+/* Maximum parallel block downloads per peer.
+ * 32 blocks per peer × 32 peers = 1024 blocks in flight max.
+ * Tighter window = fewer gaps, faster recovery if blocks missing.
  */
-#define SYNC_MAX_BLOCKS_PER_PEER 128
+#define SYNC_MAX_BLOCKS_PER_PEER 32
 
-/* Maximum total parallel block downloads
- * Increased from 128 to 1024 for faster IBD.
+/* Maximum total parallel block downloads.
+ * 1024 = 32 blocks × 32 peers for full parallelism.
  */
 #define SYNC_MAX_PARALLEL_BLOCKS 1024
 
 /* Timeout for getheaders response (30 seconds) */
 #define SYNC_HEADERS_TIMEOUT_MS 30000
 
-/* Initial block stalling timeout (2 seconds - matches Bitcoin Core) */
-#define SYNC_BLOCK_STALLING_TIMEOUT_MS 2000
+/* Initial block stalling timeout (5 seconds)
+ * Bitcoin Core uses 2s, but that's too aggressive for IBD where blocks
+ * get larger. 5s gives peers more time to deliver while still catching
+ * truly unresponsive nodes.
+ */
+#define SYNC_BLOCK_STALLING_TIMEOUT_MS 5000
 
 /* Maximum block stalling timeout (16 seconds - more aggressive than Bitcoin Core's 64s)
  * Lower timeout = faster recovery from slow/unresponsive peers during IBD.
