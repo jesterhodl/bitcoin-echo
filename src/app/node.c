@@ -2437,52 +2437,82 @@ echo_result_t node_maintenance(node_t *node) {
 
   static uint64_t last_peer_log = 0;
   if (now - last_peer_log > 5000) { /* Log every 5 seconds */
-    log_info(LOG_COMP_NET, "Outbound peers: %zu/%d", outbound_count, ECHO_MAX_OUTBOUND_PEERS);
+    log_info(LOG_COMP_NET, "Outbound peers: %zu/%d", outbound_count,
+             ECHO_MAX_OUTBOUND_PEERS);
     last_peer_log = now;
   }
-  if (outbound_count < ECHO_MAX_OUTBOUND_PEERS) {
-    /* Try to make one new outbound connection */
+
+  /*
+   * Try multiple connections per cycle when far below target.
+   * This helps ramp up quickly at startup and during IBD.
+   * - Below 25%: try up to 8 connections per cycle
+   * - Below 50%: try up to 4 connections per cycle
+   * - Otherwise: try 1 connection per cycle
+   */
+  size_t max_attempts = 1;
+  if (outbound_count < (size_t)ECHO_MAX_OUTBOUND_PEERS / 4) {
+    max_attempts = 8;
+  } else if (outbound_count < (size_t)ECHO_MAX_OUTBOUND_PEERS / 2) {
+    max_attempts = 4;
+  }
+
+  size_t attempts = 0;
+  while (outbound_count + attempts < (size_t)ECHO_MAX_OUTBOUND_PEERS &&
+         attempts < max_attempts) {
     net_addr_t addr;
     echo_result_t addr_result =
         discovery_select_outbound_address(&node->addr_manager, &addr);
-    if (addr_result == ECHO_OK) {
-      /* Find empty slot */
-      for (size_t i = 0; i < NODE_MAX_PEERS; i++) {
-        peer_t *peer = &node->peers[i];
-        if (!peer_is_connected(peer)) {
-          /* Convert IPv4-mapped IPv6 address to string */
-          char ip_str[64];
-          snprintf(ip_str, sizeof(ip_str), "%d.%d.%d.%d", addr.ip[12],
-                   addr.ip[13], addr.ip[14], addr.ip[15]);
-
-          log_info(LOG_COMP_NET, "Attempting outbound connection to %s:%u", ip_str, addr.port);
-
-          /* Mark address as in-use BEFORE connecting to prevent duplicate connections */
-          discovery_mark_address_in_use(&node->addr_manager, &addr);
-
-          uint64_t nonce = generate_nonce();
-          echo_result_t result = peer_connect(peer, ip_str, addr.port, nonce);
-          if (result == ECHO_OK) {
-            log_info(LOG_COMP_NET, "Connected to peer %s:%u", ip_str, addr.port);
-
-            /* Send version message to start handshake */
-            uint32_t our_height = 0;
-            if (node->consensus != NULL) {
-              our_height = consensus_get_height(node->consensus);
-            }
-
-            /* Service flags: NODE_NETWORK (1) only if we're not pruned
-             * Pruned nodes cannot serve historical blocks */
-            uint64_t services = node_is_pruning_enabled(node) ? 0 : 1;
-            peer_send_version(peer, services, (int32_t)our_height, true);
-          } else {
-            log_warn(LOG_COMP_NET, "Failed to connect to %s:%u: error %d", ip_str, addr.port, result);
-          }
-          break; /* Only one connection attempt per maintenance cycle */
-        }
+    if (addr_result != ECHO_OK) {
+      if (attempts == 0) {
+        log_debug(LOG_COMP_NET,
+                  "No addresses available for outbound connection (have %zu "
+                  "peers)",
+                  outbound_count);
       }
-    } else {
-      log_debug(LOG_COMP_NET, "No addresses available for outbound connection (have %zu peers)", outbound_count);
+      break;
+    }
+
+    /* Find empty slot */
+    bool connected = false;
+    for (size_t i = 0; i < NODE_MAX_PEERS; i++) {
+      peer_t *peer = &node->peers[i];
+      if (!peer_is_connected(peer)) {
+        /* Convert IPv4-mapped IPv6 address to string */
+        char ip_str[64];
+        snprintf(ip_str, sizeof(ip_str), "%d.%d.%d.%d", addr.ip[12],
+                 addr.ip[13], addr.ip[14], addr.ip[15]);
+
+        log_info(LOG_COMP_NET, "Attempting outbound connection to %s:%u",
+                 ip_str, addr.port);
+
+        /* Mark address as in-use BEFORE connecting */
+        discovery_mark_address_in_use(&node->addr_manager, &addr);
+
+        uint64_t nonce = generate_nonce();
+        echo_result_t result = peer_connect(peer, ip_str, addr.port, nonce);
+        if (result == ECHO_OK) {
+          log_info(LOG_COMP_NET, "Connected to peer %s:%u", ip_str, addr.port);
+
+          /* Send version message to start handshake */
+          uint32_t our_height = 0;
+          if (node->consensus != NULL) {
+            our_height = consensus_get_height(node->consensus);
+          }
+
+          /* Service flags: NODE_NETWORK (1) only if we're not pruned */
+          uint64_t services = node_is_pruning_enabled(node) ? 0 : 1;
+          peer_send_version(peer, services, (int32_t)our_height, true);
+          connected = true;
+        } else {
+          log_warn(LOG_COMP_NET, "Failed to connect to %s:%u: error %d",
+                   ip_str, addr.port, result);
+        }
+        break;
+      }
+    }
+    attempts++;
+    if (!connected) {
+      break; /* No empty slots available */
     }
   }
 
