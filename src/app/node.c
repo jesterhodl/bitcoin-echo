@@ -2771,11 +2771,12 @@ echo_result_t node_apply_block(node_t *node, const block_t *block) {
     /*
      * IBD OPTIMIZATION: Skip UTXO persistence during initial sync except at
      * checkpoints. The in-memory UTXO set is sufficient for validation.
-     * We only persist every 10,000 blocks to avoid data loss on crash.
+     * We persist every 5,000 blocks to limit crash recovery time.
      *
      * This gives ~10x speedup during IBD by eliminating SQLite writes.
+     * On graceful shutdown, we also save the exact validated tip (see node_stop).
      */
-#define UTXO_PERSIST_INTERVAL 10000
+#define UTXO_PERSIST_INTERVAL 5000
     bool should_persist =
         !node->ibd_mode ||
         (height - node->last_utxo_persist_height >= UTXO_PERSIST_INTERVAL);
