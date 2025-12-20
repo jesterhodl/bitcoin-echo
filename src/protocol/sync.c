@@ -87,6 +87,9 @@ struct sync_manager {
 
   /* Adaptive stalling timeout (in ms) - starts at 2s, grows on stalls */
   uint64_t stalling_timeout_ms;
+
+  /* Download window size (configured at creation based on pruning mode) */
+  uint32_t download_window;
 };
 
 /* ============================================================================
@@ -525,9 +528,15 @@ static size_t count_sync_peers(const sync_manager_t *mgr) {
 }
 
 sync_manager_t *sync_create(chainstate_t *chainstate,
-                            const sync_callbacks_t *callbacks) {
+                            const sync_callbacks_t *callbacks,
+                            uint32_t download_window) {
   if (!chainstate || !callbacks) {
     return NULL;
+  }
+
+  /* Use default if 0 passed */
+  if (download_window == 0) {
+    download_window = SYNC_BLOCK_DOWNLOAD_WINDOW;
   }
 
   sync_manager_t *mgr = calloc(1, sizeof(sync_manager_t));
@@ -535,7 +544,7 @@ sync_manager_t *sync_create(chainstate_t *chainstate,
     return NULL;
   }
 
-  mgr->block_queue = block_queue_create(SYNC_BLOCK_DOWNLOAD_WINDOW);
+  mgr->block_queue = block_queue_create(download_window);
   if (!mgr->block_queue) {
     free(mgr);
     return NULL;
@@ -545,6 +554,7 @@ sync_manager_t *sync_create(chainstate_t *chainstate,
   mgr->callbacks = *callbacks;
   mgr->mode = SYNC_MODE_IDLE;
   mgr->peer_count = 0;
+  mgr->download_window = download_window;
 
   /* Initialize adaptive stalling timeout to 2 seconds */
   mgr->stalling_timeout_ms = SYNC_BLOCK_STALLING_TIMEOUT_MS;
@@ -1060,9 +1070,9 @@ static void queue_blocks_from_headers(sync_manager_t *mgr) {
 
   uint32_t tip_height = chainstate_get_height(mgr->chainstate);
 
-  /* Calculate target range */
+  /* Calculate target range (use configured download window) */
   uint32_t start_height = tip_height + 1;
-  uint32_t end_height = tip_height + SYNC_BLOCK_DOWNLOAD_WINDOW;
+  uint32_t end_height = tip_height + mgr->download_window;
   if (end_height > mgr->best_header->height) {
     end_height = mgr->best_header->height;
   }
@@ -1075,15 +1085,18 @@ static void queue_blocks_from_headers(sync_manager_t *mgr) {
   /*
    * Use direct height lookup via callback if available (much faster for
    * large height gaps). Falls back to walking prev pointers if not.
+   *
+   * Array sized for max possible window (archival), but iteration limited
+   * to configured window.
    */
-  hash256_t to_queue[SYNC_BLOCK_DOWNLOAD_WINDOW];
-  uint32_t heights[SYNC_BLOCK_DOWNLOAD_WINDOW];
+  hash256_t to_queue[SYNC_BLOCK_DOWNLOAD_WINDOW_ARCHIVAL];
+  uint32_t heights[SYNC_BLOCK_DOWNLOAD_WINDOW_ARCHIVAL];
   size_t to_queue_count = 0;
 
   if (mgr->callbacks.get_block_hash_at_height) {
     /* Fast path: query database by height directly */
     for (uint32_t h = start_height;
-         h <= end_height && to_queue_count < SYNC_BLOCK_DOWNLOAD_WINDOW; h++) {
+         h <= end_height && to_queue_count < mgr->download_window; h++) {
       hash256_t hash;
       echo_result_t cb_result = mgr->callbacks.get_block_hash_at_height(
           h, &hash, mgr->callbacks.ctx);
@@ -1159,7 +1172,7 @@ static void queue_blocks_from_headers(sync_manager_t *mgr) {
 
     /* Collect blocks to queue (walking backward, we'll reverse later) */
     while (idx && idx->height >= start_height &&
-           to_queue_count < SYNC_BLOCK_DOWNLOAD_WINDOW) {
+           to_queue_count < mgr->download_window) {
       if (!block_queue_contains(mgr->block_queue, &idx->hash)) {
         block_t stored;
         block_init(&stored);
@@ -1264,9 +1277,9 @@ done_parallel_check:;  /* Empty statement after label */
 
   /*
    * Request blocks within the download window of the validated tip.
-   * SYNC_BLOCK_DOWNLOAD_WINDOW (1024) matches Bitcoin Core.
+   * Window size is configured at sync_create() based on pruning mode.
    */
-  uint32_t max_request_height = validated_height + SYNC_BLOCK_DOWNLOAD_WINDOW;
+  uint32_t max_request_height = validated_height + mgr->download_window;
 
   /* Request blocks from queue */
   size_t iteration = 0;

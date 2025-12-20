@@ -1478,12 +1478,17 @@ static echo_result_t node_init_sync(node_t *node) {
       .commit_header_batch = sync_cb_commit_header_batch,
       .ctx = node};
 
-  /* Create sync manager */
-  node->sync_mgr = sync_create(chainstate, &callbacks);
+  /* Create sync manager with appropriate download window for mode */
+  uint32_t download_window = node->config.prune_target_mb > 0
+                                 ? SYNC_BLOCK_DOWNLOAD_WINDOW_PRUNED
+                                 : SYNC_BLOCK_DOWNLOAD_WINDOW_ARCHIVAL;
+  node->sync_mgr = sync_create(chainstate, &callbacks, download_window);
   if (node->sync_mgr == NULL) {
     log_error(LOG_COMP_MAIN, "Failed to create sync manager");
     return ECHO_ERR_OUT_OF_MEMORY;
   }
+  log_info(LOG_COMP_MAIN, "Download window: %u blocks (%s mode)", download_window,
+           node->config.prune_target_mb > 0 ? "pruned" : "archival");
 
   /* Initialize invalid block tracking */
   node->invalid_block_count = 0;

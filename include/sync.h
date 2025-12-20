@@ -69,10 +69,19 @@
 #define SYNC_HEADER_REFRESH_INTERVAL_MS 30000
 
 /* Block download window - how far ahead of validated tip to download.
- * Larger window = more parallelism but more memory usage.
- * Bitcoin Core: 1024, Libbitcoin: 50000. We use 16384 as a balance.
+ * Larger window = more parallelism but more memory/storage usage.
+ *
+ * For ARCHIVAL nodes: Use large window (16384) for maximum parallelism.
+ * For PRUNED nodes: Use small window (1024) to bound storage overage.
+ *   At ~1.5 MB/block post-SegWit, 1024 blocks = ~1.5 GB buffer.
+ *
+ * Bitcoin Core: 1024, Libbitcoin: 50000.
  */
-#define SYNC_BLOCK_DOWNLOAD_WINDOW 16384
+#define SYNC_BLOCK_DOWNLOAD_WINDOW_ARCHIVAL 16384
+#define SYNC_BLOCK_DOWNLOAD_WINDOW_PRUNED 1024
+
+/* Default for backward compatibility */
+#define SYNC_BLOCK_DOWNLOAD_WINDOW SYNC_BLOCK_DOWNLOAD_WINDOW_ARCHIVAL
 
 /* Stale tip threshold - consider sync stalled if no progress in this time */
 #define SYNC_STALE_TIP_THRESHOLD_MS (30ULL * 60 * 1000) /* 30 minutes */
@@ -330,14 +339,19 @@ typedef struct {
  * Create a sync manager.
  *
  * Parameters:
- *   chainstate - The chain state to sync
- *   callbacks  - Callback functions for storage/validation
+ *   chainstate      - The chain state to sync
+ *   callbacks       - Callback functions for storage/validation
+ *   download_window - How far ahead of validated tip to download blocks.
+ *                     Use SYNC_BLOCK_DOWNLOAD_WINDOW_PRUNED for pruned nodes,
+ *                     SYNC_BLOCK_DOWNLOAD_WINDOW_ARCHIVAL for archival nodes,
+ *                     or 0 for default (archival).
  *
  * Returns:
  *   Newly allocated sync manager, or NULL on failure
  */
 sync_manager_t *sync_create(chainstate_t *chainstate,
-                            const sync_callbacks_t *callbacks);
+                            const sync_callbacks_t *callbacks,
+                            uint32_t download_window);
 
 /**
  * Destroy sync manager and free resources.
