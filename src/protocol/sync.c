@@ -105,7 +105,69 @@ struct sync_manager {
   /* Peer quality network baseline for adaptive slot allocation */
   uint64_t network_median_latency_ms;  /* Median block latency across all peers */
   uint64_t last_quality_update_time;   /* Last time quality scores recalculated */
+
+  /* Rolling window for accurate block rate calculation (500 blocks = ~30-60s at typical rates) */
+#define RATE_WINDOW_SIZE 500
+  uint64_t rate_window[RATE_WINDOW_SIZE]; /* Ring buffer of validation timestamps */
+  size_t rate_window_idx;                 /* Next write position */
+  size_t rate_window_count;               /* Number of entries (0 to RATE_WINDOW_SIZE) */
 };
+
+/* ============================================================================
+ * Rolling Rate Calculation Helpers
+ * ============================================================================
+ */
+
+/**
+ * Record a block validation timestamp in the rolling window.
+ * Call this each time a block is validated.
+ */
+static void rate_window_record(struct sync_manager *mgr, uint64_t timestamp) {
+  mgr->rate_window[mgr->rate_window_idx] = timestamp;
+  mgr->rate_window_idx = (mgr->rate_window_idx + 1) % RATE_WINDOW_SIZE;
+  if (mgr->rate_window_count < RATE_WINDOW_SIZE) {
+    mgr->rate_window_count++;
+  }
+}
+
+/**
+ * Calculate blocks per second from the rolling window.
+ * Returns 0.0 if insufficient data.
+ */
+static float rate_window_get_rate(const struct sync_manager *mgr) {
+  if (mgr->rate_window_count < 2) {
+    return 0.0f;
+  }
+
+  /* Find oldest and newest timestamps in the window */
+  size_t oldest_idx;
+  if (mgr->rate_window_count < RATE_WINDOW_SIZE) {
+    oldest_idx = 0;
+  } else {
+    oldest_idx = mgr->rate_window_idx; /* Oldest is at current write position */
+  }
+  size_t newest_idx =
+      (mgr->rate_window_idx + RATE_WINDOW_SIZE - 1) % RATE_WINDOW_SIZE;
+
+  uint64_t oldest_ts = mgr->rate_window[oldest_idx];
+  uint64_t newest_ts = mgr->rate_window[newest_idx];
+
+  if (newest_ts <= oldest_ts) {
+    return 0.0f;
+  }
+
+  uint64_t elapsed_ms = newest_ts - oldest_ts;
+  if (elapsed_ms == 0) {
+    return 0.0f;
+  }
+
+  /* Rate = (count - 1) blocks in elapsed_ms milliseconds */
+  /* We have count timestamps, representing count-1 intervals */
+  float blocks = (float)(mgr->rate_window_count - 1);
+  float seconds = (float)elapsed_ms / 1000.0f;
+
+  return blocks / seconds;
+}
 
 /* ============================================================================
  * Block Queue Implementation
@@ -1185,6 +1247,7 @@ echo_result_t sync_handle_block(sync_manager_t *mgr, peer_t *peer,
       return ECHO_ERR_INVALID;
     }
     mgr->blocks_validated_total++;
+    rate_window_record(mgr, plat_time_ms());
 
     /*
      * After successful validation, check if we have the next block already
@@ -1255,6 +1318,7 @@ echo_result_t sync_handle_block(sync_manager_t *mgr, peer_t *peer,
         /* Success! Remove from queue and continue */
         block_queue_complete(mgr->block_queue, &next_index->hash);
         mgr->blocks_validated_total++;
+        rate_window_record(mgr, plat_time_ms());
         mgr->last_progress_time = plat_time_ms();
 
         log_info(LOG_COMP_SYNC,
@@ -1538,6 +1602,7 @@ static void queue_blocks_from_headers(sync_manager_t *mgr) {
 
               if (val_result == ECHO_OK) {
                 mgr->blocks_validated_total++;
+                rate_window_record(mgr, plat_time_ms());
                 mgr->last_progress_time = plat_time_ms();
                 log_info(LOG_COMP_SYNC,
                          "Validated stored block at height %u (kickstart success)", h);
@@ -2047,6 +2112,7 @@ void sync_tick(sync_manager_t *mgr) {
         /* Success! */
         block_queue_complete(mgr->block_queue, &next_hash);
         mgr->blocks_validated_total++;
+        rate_window_record(mgr, now);
         mgr->last_progress_time = now;
         validated_height = next_height;
         blocks_validated_this_tick++;
@@ -2197,15 +2263,8 @@ void sync_get_metrics(const sync_manager_t *mgr, sync_metrics_t *metrics) {
   /* Mode string */
   metrics->mode_string = sync_mode_string(progress.mode);
 
-  /* Calculate blocks per second based on block sync start time (not header sync) */
-  uint64_t now = plat_time_ms();
-  if (mgr->block_sync_start_time > 0 && progress.blocks_validated > 0) {
-    uint64_t block_elapsed_ms = now - mgr->block_sync_start_time;
-    if (block_elapsed_ms > 0) {
-      metrics->blocks_per_second =
-          (float)progress.blocks_validated / ((float)block_elapsed_ms / 1000.0f);
-    }
-  }
+  /* Calculate blocks per second using rolling window for accurate real-time rate */
+  metrics->blocks_per_second = rate_window_get_rate(mgr);
 
   /* ETA in seconds */
   uint64_t eta_ms = sync_estimate_remaining_time(&progress);
