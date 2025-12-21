@@ -3655,34 +3655,16 @@ echo_result_t node_maybe_prune(node_t *node) {
   }
 
   /*
-   * Don't prune during IBD - we download blocks ahead of validation
-   * and need them stored until validated. Pruning during IBD would
-   * delete blocks that are stored but not yet validated, causing
-   * read failures when validation catches up.
+   * Progressive IBD Pruning: We prune validated blocks even during IBD.
    *
-   * Pruning will commence automatically once IBD completes.
+   * The 550-block safety margin in node_prune_blocks() ensures we never
+   * prune blocks needed for reorg. Since consensus_get_height() returns
+   * the VALIDATED height (not downloaded height), we never prune blocks
+   * that are downloaded but not yet validated.
+   *
+   * This keeps disk usage bounded during IBD rather than accumulating
+   * potentially 100GB+ before pruning begins.
    */
-  if (node->ibd_mode) {
-    /* Log warning periodically (every ~10k blocks) when over target during IBD
-     */
-    static uint32_t last_warned_height = 0;
-    uint32_t current_height = node->consensus != NULL
-                                  ? consensus_get_height(node->consensus)
-                                  : 0;
-    uint64_t current_size_bytes = node_get_block_storage_size(node);
-    uint64_t target_size_bytes = node->config.prune_target_mb * 1024 * 1024;
-
-    if (current_size_bytes > target_size_bytes &&
-        current_height >= last_warned_height + 10000) {
-      log_info(LOG_COMP_STORE,
-               "Storage %llu MB exceeds target %llu MB (pruning deferred "
-               "during IBD)",
-               (unsigned long long)(current_size_bytes / (1024ULL * 1024ULL)),
-               (unsigned long long)node->config.prune_target_mb);
-      last_warned_height = current_height;
-    }
-    return ECHO_OK;
-  }
 
   /* Get current storage size */
   uint64_t current_size_bytes = node_get_block_storage_size(node);
@@ -3693,10 +3675,26 @@ echo_result_t node_maybe_prune(node_t *node) {
     return ECHO_OK; /* Under target, nothing to do */
   }
 
-  log_info(LOG_COMP_STORE,
-           "Storage size %llu MB exceeds target %llu MB, pruning...",
-           (unsigned long long)(current_size_bytes / (1024ULL * 1024ULL)),
-           (unsigned long long)node->config.prune_target_mb);
+  /* Log - less frequently during IBD to avoid spam */
+  if (node->ibd_mode) {
+    static uint32_t last_ibd_prune_height = 0;
+    uint32_t current_height = node->consensus != NULL
+                                  ? consensus_get_height(node->consensus)
+                                  : 0;
+    if (current_height >= last_ibd_prune_height + 10000) {
+      log_info(LOG_COMP_STORE,
+               "Storage %llu MB exceeds target %llu MB, progressive IBD "
+               "pruning...",
+               (unsigned long long)(current_size_bytes / (1024ULL * 1024ULL)),
+               (unsigned long long)node->config.prune_target_mb);
+      last_ibd_prune_height = current_height;
+    }
+  } else {
+    log_info(LOG_COMP_STORE,
+             "Storage size %llu MB exceeds target %llu MB, pruning...",
+             (unsigned long long)(current_size_bytes / (1024ULL * 1024ULL)),
+             (unsigned long long)node->config.prune_target_mb);
+  }
 
   /* Calculate how much to prune */
   uint64_t excess_bytes = current_size_bytes - target_size_bytes;
