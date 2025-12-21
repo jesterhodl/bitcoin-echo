@@ -74,6 +74,7 @@ struct sync_manager {
 
   /* Sync timing */
   uint64_t start_time;
+  uint64_t block_sync_start_time; /* When block validation started (0 = not yet) */
   uint64_t last_progress_time;
   uint64_t last_header_refresh_time; /* For periodic header refresh in blocks mode */
 
@@ -873,6 +874,7 @@ echo_result_t sync_start(sync_manager_t *mgr) {
              "best_header=%u, validated=%u)",
              best_header_height, validated_height);
     mgr->mode = SYNC_MODE_BLOCKS;
+    mgr->block_sync_start_time = plat_time_ms();
   } else {
     log_info(LOG_COMP_SYNC,
              "Starting sync in HEADERS mode (best_header=%u, validated=%u)",
@@ -935,6 +937,9 @@ echo_result_t sync_handle_headers(sync_manager_t *mgr, peer_t *peer,
                  "Transitioning to BLOCKS mode (best_header=%u, validated=%u)",
                  mgr->best_header->height, tip_height);
         mgr->mode = SYNC_MODE_BLOCKS;
+        if (mgr->block_sync_start_time == 0) {
+          mgr->block_sync_start_time = plat_time_ms();
+        }
       }
     }
     return ECHO_OK;
@@ -1041,6 +1046,9 @@ echo_result_t sync_handle_headers(sync_manager_t *mgr, peer_t *peer,
       uint32_t tip_height = chainstate_get_height(mgr->chainstate);
       if (mgr->best_header->height > tip_height) {
         mgr->mode = SYNC_MODE_BLOCKS;
+        if (mgr->block_sync_start_time == 0) {
+          mgr->block_sync_start_time = plat_time_ms();
+        }
       }
     }
   }
@@ -2179,12 +2187,14 @@ void sync_get_metrics(const sync_manager_t *mgr, sync_metrics_t *metrics) {
   /* Mode string */
   metrics->mode_string = sync_mode_string(progress.mode);
 
-  /* Calculate blocks per second (same as IBD logging) */
-  uint64_t now = plat_time_ms();  /* Must match start_time timebase */
-  uint64_t elapsed_ms = now - mgr->start_time;
-  if (elapsed_ms > 0 && progress.blocks_validated > 0) {
-    metrics->blocks_per_second =
-        (float)progress.blocks_validated / ((float)elapsed_ms / 1000.0f);
+  /* Calculate blocks per second based on block sync start time (not header sync) */
+  uint64_t now = plat_time_ms();
+  if (mgr->block_sync_start_time > 0 && progress.blocks_validated > 0) {
+    uint64_t block_elapsed_ms = now - mgr->block_sync_start_time;
+    if (block_elapsed_ms > 0) {
+      metrics->blocks_per_second =
+          (float)progress.blocks_validated / ((float)block_elapsed_ms / 1000.0f);
+    }
   }
 
   /* ETA in seconds */
