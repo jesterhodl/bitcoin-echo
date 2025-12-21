@@ -38,15 +38,16 @@
 #define SYNC_MAX_LOCATOR_HASHES 32
 
 /* Maximum parallel block downloads per peer.
- * 32 blocks per peer × 32 peers = 1024 blocks in flight max.
- * Tighter window = fewer gaps, faster recovery if blocks missing.
+ * Bitcoin Core limits serving to 16 blocks at a time (MAX_BLOCKS_IN_TRANSIT_PER_PEER).
+ * Requesting more than 16 just queues on the peer side, inflating our in-flight
+ * count without actually downloading. Match Core's limit for accurate tracking.
  */
-#define SYNC_MAX_BLOCKS_PER_PEER 32
+#define SYNC_MAX_BLOCKS_PER_PEER 16
 
 /* Maximum total parallel block downloads.
- * 1024 = 32 blocks × 32 peers for full parallelism.
+ * 512 = 16 blocks × 32 peers for full parallelism.
  */
-#define SYNC_MAX_PARALLEL_BLOCKS 1024
+#define SYNC_MAX_PARALLEL_BLOCKS 512
 
 /* Timeout for getheaders response (30 seconds) */
 #define SYNC_HEADERS_TIMEOUT_MS 30000
