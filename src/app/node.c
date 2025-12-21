@@ -318,7 +318,9 @@ node_t *node_create(const node_config_t *config) {
     }
 
     /* Record starting height for "blocks this session" metric */
-    node->start_height = consensus_get_height(node->consensus);
+    uint32_t height = consensus_get_height(node->consensus);
+    /* UINT32_MAX means "not initialized" - treat as 0 for fresh starts */
+    node->start_height = (height == UINT32_MAX) ? 0 : height;
 
     /* Step 4: Initialize mempool (full node only) */
     result = node_init_mempool(node);
