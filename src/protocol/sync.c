@@ -1611,11 +1611,15 @@ static void request_blocks(sync_manager_t *mgr) {
       ECHO_OK) {
     uint64_t now = plat_time_ms();
 
-    /* Check if we already sent a parallel request for this block recently */
+    /* Check if we already sent a parallel request for this block recently.
+     * Rate limit to 500ms between parallel requests (was 2000ms).
+     * Aggressive parallel requesting is critical during IBD to avoid
+     * head-of-line blocking where one slow block stalls the entire pipeline.
+     */
     bool already_requested =
         (memcmp(&mgr->last_parallel_request_hash, &next_hash,
                 sizeof(hash256_t)) == 0) &&
-        (now - mgr->last_parallel_request_time < 2000);
+        (now - mgr->last_parallel_request_time < 500);
 
     if (!already_requested) {
       /* Find if this block is in-flight and stalling */
@@ -1624,22 +1628,47 @@ static void request_blocks(sync_manager_t *mgr) {
         for (size_t j = 0; j < ps->blocks_in_flight_count; j++) {
           if (memcmp(&ps->blocks_in_flight[j], &next_hash, sizeof(hash256_t)) ==
               0) {
-            /* Found it - check if stalling (>1000ms) */
-            if (now - ps->block_request_time[j] > 1000) {
-              /* Request from up to 3 other peers (not all) */
-              size_t extra_requests = 0;
-              for (size_t k = 0; k < mgr->peer_count && extra_requests < 3;
-                   k++) {
+            /* Found it - start parallel requests early (400ms vs old 1000ms)
+             * when network latency is high. Whoever responds first wins.
+             */
+            if (now - ps->block_request_time[j] > 400) {
+              /*
+               * Request from peers with the FEWEST blocks in-flight, so they
+               * can serve the blocking block sooner. Sort by in-flight count.
+               */
+              size_t peer_indices[SYNC_MAX_PEERS];
+              size_t peer_count = 0;
+
+              /* Collect eligible peers */
+              for (size_t k = 0; k < mgr->peer_count; k++) {
                 if (k == i)
                   continue; /* Skip the original peer */
                 peer_sync_state_t *other = &mgr->peers[k];
-                if (other->peer && other->peer->state == PEER_STATE_READY &&
-                    other->blocks_in_flight_count < SYNC_MAX_BLOCKS_PER_PEER) {
-                  if (mgr->callbacks.send_getdata_blocks) {
-                    mgr->callbacks.send_getdata_blocks(other->peer, &next_hash,
-                                                       1, mgr->callbacks.ctx);
-                    extra_requests++;
+                if (other->peer && other->peer->state == PEER_STATE_READY) {
+                  peer_indices[peer_count++] = k;
+                }
+              }
+
+              /* Simple selection sort by in-flight count (ascending) */
+              for (size_t a = 0; a < peer_count && a < 8; a++) {
+                for (size_t b = a + 1; b < peer_count; b++) {
+                  if (mgr->peers[peer_indices[b]].blocks_in_flight_count <
+                      mgr->peers[peer_indices[a]].blocks_in_flight_count) {
+                    size_t tmp = peer_indices[a];
+                    peer_indices[a] = peer_indices[b];
+                    peer_indices[b] = tmp;
                   }
+                }
+              }
+
+              /* Request from up to 8 peers with fewest in-flight */
+              size_t extra_requests = 0;
+              for (size_t r = 0; r < peer_count && extra_requests < 8; r++) {
+                peer_sync_state_t *other = &mgr->peers[peer_indices[r]];
+                if (mgr->callbacks.send_getdata_blocks) {
+                  mgr->callbacks.send_getdata_blocks(other->peer, &next_hash,
+                                                     1, mgr->callbacks.ctx);
+                  extra_requests++;
                 }
               }
               if (extra_requests > 0) {
@@ -1670,8 +1699,38 @@ done_parallel_check:;  /* Empty statement after label */
   /*
    * Request blocks within the download window of the validated tip.
    * Window size is configured at sync_create() based on pruning mode.
+   *
+   * STALL MITIGATION: If the blocking block (next_needed) has been in-flight
+   * for >2 seconds, reduce the download window to prevent saturating all
+   * peers with far-ahead blocks. Focus bandwidth near the tip.
    */
   uint32_t max_request_height = validated_height + mgr->download_window;
+  uint32_t stall_check_height = validated_height + 1;
+  uint64_t now_check = plat_time_ms();
+
+  /* Check if blocking block is stalling */
+  bool is_stalling = false;
+  for (size_t i = 0; i < mgr->peer_count && !is_stalling; i++) {
+    peer_sync_state_t *ps = &mgr->peers[i];
+    for (size_t j = 0; j < ps->blocks_in_flight_count; j++) {
+      hash256_t next_hash;
+      if (block_queue_find_by_height(mgr->block_queue, stall_check_height,
+                                       &next_hash) == ECHO_OK) {
+        if (memcmp(&ps->blocks_in_flight[j], &next_hash, sizeof(hash256_t)) ==
+            0) {
+          if (now_check - ps->block_request_time[j] > 2000) {
+            is_stalling = true;
+            /* Reduce window to 128 blocks when stalling */
+            max_request_height = validated_height + 128;
+            log_debug(LOG_COMP_SYNC,
+                      "Stalling on block %u, reducing download window to 128",
+                      stall_check_height);
+          }
+          break;
+        }
+      }
+    }
+  }
 
   /* Request blocks from queue */
   size_t iteration = 0;
