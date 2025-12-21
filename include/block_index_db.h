@@ -514,4 +514,31 @@ echo_result_t block_index_db_get_validated_tip(block_index_db_t *bdb,
                                                 uint32_t *height,
                                                 hash256_t *hash);
 
+/* ========================================================================
+ * Storage Cleanup
+ * ======================================================================== */
+
+/**
+ * Get all block file indices that are referenced by stored blocks.
+ *
+ * Returns an array of file indices (data_file values) that contain
+ * block data we need. Used for orphan file cleanup - any block file
+ * not in this list can be safely deleted.
+ *
+ * Parameters:
+ *   bdb         - Block index database handle
+ *   files_out   - Output: array of file indices (caller must free)
+ *   count_out   - Output: number of file indices
+ *
+ * Returns:
+ *   ECHO_OK on success, error code on failure
+ *
+ * Notes:
+ *   - Allocates files_out with malloc(); caller must free()
+ *   - Returns empty array (count=0) if no blocks have data stored
+ */
+echo_result_t block_index_db_get_referenced_files(block_index_db_t *bdb,
+                                                   uint32_t **files_out,
+                                                   size_t *count_out);
+
 #endif /* ECHO_BLOCK_INDEX_DB_H */

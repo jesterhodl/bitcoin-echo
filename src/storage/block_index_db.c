@@ -14,6 +14,7 @@
 #include "echo_types.h"
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* ========================================================================
@@ -1112,5 +1113,71 @@ echo_result_t block_index_db_get_validated_tip(block_index_db_t *bdb,
   }
 
   db_stmt_finalize(&stmt);
+  return ECHO_OK;
+}
+
+/* ========================================================================
+ * Storage Cleanup
+ * ======================================================================== */
+
+echo_result_t block_index_db_get_referenced_files(block_index_db_t *bdb,
+                                                   uint32_t **files_out,
+                                                   size_t *count_out) {
+  if (bdb == NULL || files_out == NULL || count_out == NULL) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  *files_out = NULL;
+  *count_out = 0;
+
+  echo_result_t result;
+  db_stmt_t stmt;
+
+  /* Query for distinct file indices that have block data */
+  result = db_prepare(
+      &bdb->db,
+      "SELECT DISTINCT data_file FROM blocks WHERE data_file >= 0 ORDER BY "
+      "data_file",
+      &stmt);
+  if (result != ECHO_OK) {
+    return result;
+  }
+
+  /* First pass: count results */
+  size_t count = 0;
+  while ((result = db_step(&stmt)) == ECHO_OK) {
+    count++;
+  }
+
+  if (count == 0) {
+    db_stmt_finalize(&stmt);
+    return ECHO_OK; /* No files referenced - return empty array */
+  }
+
+  /* Allocate array */
+  uint32_t *files = malloc(count * sizeof(uint32_t));
+  if (files == NULL) {
+    db_stmt_finalize(&stmt);
+    return ECHO_ERR_MEMORY;
+  }
+
+  /* Reset and second pass: collect values */
+  result = db_stmt_reset(&stmt);
+  if (result != ECHO_OK) {
+    free(files);
+    db_stmt_finalize(&stmt);
+    return result;
+  }
+
+  size_t i = 0;
+  while ((result = db_step(&stmt)) == ECHO_OK && i < count) {
+    files[i] = (uint32_t)db_column_int(&stmt, 0);
+    i++;
+  }
+
+  db_stmt_finalize(&stmt);
+
+  *files_out = files;
+  *count_out = i;
   return ECHO_OK;
 }

@@ -121,6 +121,7 @@ static echo_result_t node_init_mempool(node_t *node);
 static echo_result_t node_init_discovery(node_t *node);
 static echo_result_t node_init_sync(node_t *node);
 static void node_cleanup(node_t *node);
+static echo_result_t node_cleanup_orphan_block_files(node_t *node);
 
 /* Sync manager callbacks (Session 9.6.1) */
 static echo_result_t sync_cb_get_block(const hash256_t *hash, block_t *block_out,
@@ -144,6 +145,86 @@ static void sync_cb_send_getdata_blocks(peer_t *peer, const hash256_t *hashes,
 static echo_result_t sync_cb_get_block_hash_at_height(uint32_t height,
                                                        hash256_t *hash,
                                                        void *ctx);
+
+/*
+ * ============================================================================
+ * ORPHAN BLOCK FILE CLEANUP
+ * ============================================================================
+ *
+ * After a restart (especially from checkpoint), there may be block files
+ * on disk that are not referenced by any block in the database. This happens
+ * when:
+ *   - The database was reset/restored but block files weren't cleaned up
+ *   - A crash occurred after writing block data but before updating the DB
+ *   - Development/debugging sessions left orphaned data
+ *
+ * This function scans block files and deletes any not referenced by the DB,
+ * ensuring we don't waste disk space on unreachable data.
+ */
+static echo_result_t node_cleanup_orphan_block_files(node_t *node) {
+  if (node == NULL || !node->block_storage_init || !node->block_index_db_open) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  /* Get list of file indices referenced by blocks in the DB */
+  uint32_t *referenced_files = NULL;
+  size_t referenced_count = 0;
+  echo_result_t result = block_index_db_get_referenced_files(
+      &node->block_index_db, &referenced_files, &referenced_count);
+  if (result != ECHO_OK) {
+    log_warn(LOG_COMP_STORE, "Failed to query referenced block files: %d",
+             result);
+    return result;
+  }
+
+  /* Scan all block files on disk */
+  uint32_t files_deleted = 0;
+  uint64_t bytes_freed = 0;
+  uint32_t current_file = block_storage_get_current_file(&node->block_storage);
+
+  for (uint32_t file_idx = 0; file_idx < current_file; file_idx++) {
+    bool exists = false;
+    result = block_storage_file_exists(&node->block_storage, file_idx, &exists);
+    if (result != ECHO_OK || !exists) {
+      continue;
+    }
+
+    /* Check if this file is referenced */
+    bool is_referenced = false;
+    for (size_t i = 0; i < referenced_count; i++) {
+      if (referenced_files[i] == file_idx) {
+        is_referenced = true;
+        break;
+      }
+    }
+
+    if (!is_referenced) {
+      /* Get file size before deleting (for logging) */
+      uint64_t file_size = 0;
+      block_storage_get_file_size(&node->block_storage, file_idx, &file_size);
+
+      /* Delete orphan file */
+      result = block_storage_delete_file(&node->block_storage, file_idx);
+      if (result == ECHO_OK) {
+        files_deleted++;
+        bytes_freed += file_size;
+      } else {
+        log_warn(LOG_COMP_STORE, "Failed to delete orphan block file %u: %d",
+                 file_idx, result);
+      }
+    }
+  }
+
+  free(referenced_files);
+
+  if (files_deleted > 0) {
+    log_info(LOG_COMP_STORE,
+             "Cleaned up %u orphan block files, freed %llu MB",
+             files_deleted, (unsigned long long)(bytes_freed / (1024 * 1024)));
+  }
+
+  return ECHO_OK;
+}
 
 /*
  * ============================================================================
@@ -366,6 +447,17 @@ static echo_result_t node_init_databases(node_t *node) {
     return result;
   }
   node->block_storage_init = true;
+
+  /*
+   * Clean up orphan block files that may have been left behind from
+   * previous runs (e.g., after a crash or checkpoint restore where
+   * the database was reset but block files weren't deleted).
+   */
+  result = node_cleanup_orphan_block_files(node);
+  if (result != ECHO_OK) {
+    log_warn(LOG_COMP_STORE, "Orphan block file cleanup failed: %d", result);
+    /* Non-fatal - continue anyway */
+  }
 
   return ECHO_OK;
 }
