@@ -907,6 +907,15 @@ static void mempool_cb_announce_tx(const hash256_t *txid, void *ctx) {
     return;
   }
 
+  /*
+   * IBD Optimization (Phase 1): During initial block download, don't
+   * announce transactions to peers. We shouldn't have any in our mempool
+   * anyway (we're dropping incoming txs), but this is a safety check.
+   */
+  if (node->ibd_mode) {
+    return;
+  }
+
   /* Send INV to all connected peers */
   for (size_t i = 0; i < NODE_MAX_PEERS; i++) {
     peer_t *peer = &node->peers[i];
@@ -2229,6 +2238,15 @@ static void node_handle_peer_message(node_t *node, peer_t *peer,
     break;
 
   case MSG_TX:
+    /*
+     * IBD Optimization (Phase 1): During initial block download, drop all
+     * incoming transactions. They waste CPU (validation), memory (mempool),
+     * and will be in the blocks we download anyway.
+     */
+    if (node->ibd_mode) {
+      break; /* Silently drop transactions during IBD */
+    }
+
     /* Session 9.6.3: Validate and accept transaction into mempool */
     if (node->mempool != NULL && !node->config.observer_mode) {
       mempool_accept_result_t result;
@@ -2266,8 +2284,16 @@ static void node_handle_peer_message(node_t *node, peer_t *peer,
         for (size_t i = 0; i < msg->payload.inv.count && item_count < MAX_GETDATA_ITEMS; i++) {
           const inv_vector_t *inv = &msg->payload.inv.inventory[i];
 
-          /* For Session 9.2, request all announced items */
-          /* Filtering logic (already have? want?) will be added in later sessions */
+          /*
+           * IBD Optimization (Phase 1): During initial block download, skip
+           * transaction requests entirely. Every byte of bandwidth should go
+           * to block downloads. Transactions will be in the blocks we download.
+           */
+          if (node->ibd_mode &&
+              (inv->type == INV_TX || inv->type == INV_WITNESS_TX)) {
+            continue; /* Skip transactions during IBD */
+          }
+
           memcpy(&items[item_count], inv, sizeof(inv_vector_t));
           item_count++;
         }
@@ -2318,6 +2344,15 @@ static void node_handle_peer_message(node_t *node, peer_t *peer,
           }
           /* Full block serving will be implemented in a later session */
         } else if (inv->type == INV_TX || inv->type == INV_WITNESS_TX) {
+          /*
+           * IBD Optimization (Phase 1): During initial block download,
+           * don't serve transactions to peers. Our mempool is empty anyway
+           * (we're dropping incoming txs), and serving wastes bandwidth.
+           */
+          if (node->ibd_mode) {
+            continue; /* Skip transaction requests during IBD */
+          }
+
           /* Try to send transaction from mempool */
           if (node->mempool != NULL) {
             const mempool_entry_t *entry =
@@ -2599,6 +2634,32 @@ echo_result_t node_maintenance(node_t *node) {
       }
     }
     sync_tick(node->sync_mgr);
+
+    /*
+     * IBD Optimization (Phase 1): Detect IBD completion.
+     *
+     * When sync transitions from HEADERS/BLOCKS mode to DONE, we:
+     * 1. Set ibd_mode = false to enable transaction processing
+     * 2. Switch database to normal mode (safer, slightly slower)
+     *
+     * After this, the node participates in mempool traffic normally.
+     * UTXO persistence continues with the existing batching logic,
+     * just with synchronous writes for safety.
+     */
+    if (node->ibd_mode && sync_is_complete(node->sync_mgr)) {
+      node->ibd_mode = false;
+
+      log_info(LOG_COMP_SYNC,
+               "IBD complete! Transitioning to normal operation. "
+               "Mempool and transaction relay now active.");
+
+      /* Switch UTXO database to normal mode (sync writes for safety) */
+      if (node->utxo_db_open) {
+        db_set_ibd_mode(&node->utxo_db.db, false);
+        log_info(LOG_COMP_SYNC,
+                 "Database mode switched to NORMAL (synchronous writes)");
+      }
+    }
   }
 
   /* Task 3: Evict stale mempool transactions (future session) */
