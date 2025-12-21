@@ -415,15 +415,44 @@ discovery_select_addresses_to_advertise(const peer_addr_manager_t *manager,
   return selected;
 }
 
+/*
+ * Calculate exponential backoff cooldown based on failed attempts.
+ * Base cooldown: 60 seconds, doubles with each attempt, capped at 1 hour.
+ *
+ * 0 attempts: 60 seconds
+ * 1 attempt:  120 seconds (2 min)
+ * 2 attempts: 240 seconds (4 min)
+ * 3 attempts: 480 seconds (8 min)
+ * 4 attempts: 960 seconds (16 min)
+ * 5+ attempts: 3600 seconds (1 hour) cap
+ */
+static uint64_t get_retry_cooldown_ms(uint32_t attempts,
+                                      echo_bool_t previously_reachable) {
+  /* Previously reachable addresses get shorter cooldowns */
+  uint64_t base_ms = previously_reachable ? 30000 : 60000;
+  uint64_t max_ms = 3600000; /* 1 hour */
+
+  if (attempts == 0) {
+    return base_ms;
+  }
+
+  /* Calculate 2^attempts, capped to prevent overflow */
+  uint32_t shift = (attempts > 6) ? 6 : attempts;
+  uint64_t cooldown_ms = base_ms << shift;
+
+  return (cooldown_ms > max_ms) ? max_ms : cooldown_ms;
+}
+
 echo_result_t discovery_select_outbound_address(peer_addr_manager_t *manager,
                                                 net_addr_t *out_addr) {
   uint64_t now_ms = plat_time_ms();
   peer_addr_entry_t *best = NULL;
   uint64_t best_score = 0;
+  size_t skipped_cooldown = 0;
 
   /* Find best address based on:
    * - Not currently in use
-   * - Long time since last attempt
+   * - Exponential backoff since last attempt
    * - Previous success
    * - Freshness
    */
@@ -435,9 +464,16 @@ echo_result_t discovery_select_outbound_address(peer_addr_manager_t *manager,
       continue;
     }
 
-    /* Skip if tried very recently (within last 60 seconds) */
-    if (entry->last_try != 0 && (now_ms - entry->last_try) < 60000) {
-      continue;
+    /* Calculate cooldown based on failed attempts (exponential backoff) */
+    if (entry->last_try != 0) {
+      uint64_t cooldown_ms =
+          get_retry_cooldown_ms(entry->attempts, entry->reachable);
+      uint64_t time_since_try = now_ms - entry->last_try;
+
+      if (time_since_try < cooldown_ms) {
+        skipped_cooldown++;
+        continue;
+      }
     }
 
     /* Calculate score (higher is better) */
@@ -459,8 +495,12 @@ echo_result_t discovery_select_outbound_address(peer_addr_manager_t *manager,
       score += time_since_try / 1000; /* Convert to seconds */
     }
 
-    /* Penalty for failed attempts */
-    if (entry->attempts > 0) {
+    /* Penalty for failed attempts (stronger penalty) */
+    if (entry->attempts > 0 && !entry->reachable) {
+      /* Non-reachable addresses with many attempts get heavy penalty */
+      score -= (uint64_t)entry->attempts * 50000;
+    } else if (entry->attempts > 0) {
+      /* Previously reachable addresses get lighter penalty */
       score -= (uint64_t)entry->attempts * 10000;
     }
 
@@ -472,14 +512,19 @@ echo_result_t discovery_select_outbound_address(peer_addr_manager_t *manager,
   }
 
   if (best == NULL) {
-    log_warn(LOG_COMP_NET, "No suitable outbound address found (checked %zu addresses)", manager->count);
+    log_warn(LOG_COMP_NET,
+             "No suitable outbound address found (checked %zu, %zu in "
+             "cooldown)",
+             manager->count, skipped_cooldown);
     return ECHO_ERR_NOT_FOUND;
   }
 
   *out_addr = best->addr;
-  log_info(LOG_COMP_NET, "Selected address: %d.%d.%d.%d:%u (score=%llu)",
-            best->addr.ip[12], best->addr.ip[13], best->addr.ip[14], best->addr.ip[15],
-            best->addr.port, (unsigned long long)best_score);
+  log_info(LOG_COMP_NET,
+           "Selected address: %d.%d.%d.%d:%u (score=%llu, attempts=%u)",
+           best->addr.ip[12], best->addr.ip[13], best->addr.ip[14],
+           best->addr.ip[15], best->addr.port, (unsigned long long)best_score,
+           best->attempts);
   return ECHO_SUCCESS;
 }
 
@@ -557,4 +602,28 @@ size_t discovery_get_reachable_count(const peer_addr_manager_t *manager) {
     }
   }
   return count;
+}
+
+echo_result_t discovery_parse_address(const char *ip_str, uint16_t port,
+                                      net_addr_t *out_addr) {
+  if (ip_str == NULL || out_addr == NULL) {
+    return ECHO_ERR_INVALID;
+  }
+
+  memset(out_addr, 0, sizeof(*out_addr));
+
+  /* Convert IPv4 string to IPv6-mapped address */
+  ipv4_to_ipv6_mapped(ip_str, out_addr->ip);
+
+  /* Check if conversion succeeded (not all zeros) */
+  if (out_addr->ip[12] == 0 && out_addr->ip[13] == 0 && out_addr->ip[14] == 0 &&
+      out_addr->ip[15] == 0) {
+    return ECHO_ERR_INVALID;
+  }
+
+  out_addr->port = port;
+  out_addr->services = SERVICE_NODE_NETWORK | SERVICE_NODE_WITNESS;
+  out_addr->timestamp = (uint32_t)(plat_time_ms() / 1000);
+
+  return ECHO_SUCCESS;
 }

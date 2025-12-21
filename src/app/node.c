@@ -2723,8 +2723,9 @@ echo_result_t node_maintenance(node_t *node) {
         log_info(LOG_COMP_NET, "Attempting outbound connection to %s:%u",
                  ip_str, addr.port);
 
-        /* Mark address as in-use BEFORE connecting */
+        /* Mark address as in-use and record attempt BEFORE connecting */
         discovery_mark_address_in_use(&node->addr_manager, &addr);
+        discovery_mark_attempt(&node->addr_manager, &addr);
 
         uint64_t nonce = generate_nonce();
         echo_result_t result = peer_connect(peer, ip_str, addr.port, nonce);
@@ -2744,6 +2745,8 @@ echo_result_t node_maintenance(node_t *node) {
         } else {
           log_warn(LOG_COMP_NET, "Failed to connect to %s:%u: error %d",
                    ip_str, addr.port, result);
+          /* Release address back to pool as failed attempt */
+          discovery_mark_address_free(&node->addr_manager, &addr, ECHO_FALSE);
         }
         break;
       }
@@ -2767,6 +2770,41 @@ echo_result_t node_maintenance(node_t *node) {
       if (node->sync_mgr != NULL) {
         sync_remove_peer(node->sync_mgr, peer);
       }
+
+      /* Release address back to discovery pool (for outbound peers only) */
+      if (!peer->inbound) {
+        net_addr_t peer_addr;
+        if (discovery_parse_address(peer->address, peer->port, &peer_addr) ==
+            ECHO_OK) {
+          /*
+           * Determine success based on disconnect reason:
+           * - USER disconnect or long-lived connection = success
+           * - MISBEHAVING, PROTOCOL_ERROR, immediate disconnect = failure
+           */
+          echo_bool_t was_success = ECHO_FALSE;
+          uint64_t connection_duration_ms =
+              plat_time_ms() - peer->connect_time;
+
+          /* Consider successful if connection lasted > 5 minutes */
+          if (connection_duration_ms > 300000) {
+            was_success = ECHO_TRUE;
+          } else if (peer->disconnect_reason == PEER_DISCONNECT_USER) {
+            was_success = ECHO_TRUE;
+          }
+
+          discovery_mark_address_free(&node->addr_manager, &peer_addr,
+                                      was_success);
+
+          if (!was_success) {
+            log_debug(LOG_COMP_NET,
+                      "Released failed address %s:%u (reason=%d, duration=%llu "
+                      "ms)",
+                      peer->address, peer->port, peer->disconnect_reason,
+                      (unsigned long long)connection_duration_ms);
+          }
+        }
+      }
+
       /* Re-initialize to clean state (clears address, making slot available) */
       peer_init(peer);
     }

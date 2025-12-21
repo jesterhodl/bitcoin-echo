@@ -275,4 +275,22 @@ size_t discovery_get_address_count(const peer_addr_manager_t *manager);
  */
 size_t discovery_get_reachable_count(const peer_addr_manager_t *manager);
 
+/**
+ * Parse IPv4 address string to net_addr_t.
+ *
+ * Converts an IPv4 address string (e.g., "192.168.1.1") and port
+ * to a net_addr_t structure with IPv6-mapped IPv4 format.
+ *
+ * Parameters:
+ *   ip_str   - IPv4 address as string (e.g., "192.168.1.1")
+ *   port     - Port number
+ *   out_addr - Output: parsed address
+ *
+ * Returns:
+ *   ECHO_SUCCESS if parsed successfully
+ *   ECHO_ERR_INVALID if address is malformed
+ */
+echo_result_t discovery_parse_address(const char *ip_str, uint16_t port,
+                                      net_addr_t *out_addr);
+
 #endif /* ECHO_DISCOVERY_H */
