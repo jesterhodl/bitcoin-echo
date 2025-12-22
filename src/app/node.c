@@ -136,12 +136,16 @@ static echo_result_t sync_cb_store_header(const block_header_t *header,
 static echo_result_t sync_cb_validate_and_apply_block(const block_t *block,
                                                       const block_index_t *index,
                                                       void *ctx);
+/* Helper functions */
+static uint64_t generate_nonce(void);
+
 /* Sync manager send callbacks (Session 9.6.6) */
 static void sync_cb_send_getheaders(peer_t *peer, const hash256_t *locator,
                                     size_t locator_len,
                                     const hash256_t *stop_hash, void *ctx);
 static void sync_cb_send_getdata_blocks(peer_t *peer, const hash256_t *hashes,
                                         size_t count, void *ctx);
+static void sync_cb_send_ping(peer_t *peer, void *ctx);
 static echo_result_t sync_cb_get_block_hash_at_height(uint32_t height,
                                                        hash256_t *hash,
                                                        void *ctx);
@@ -1706,6 +1710,29 @@ static void sync_cb_send_getdata_blocks(peer_t *peer, const hash256_t *hashes,
 }
 
 /**
+ * Send ping to peer for RTT measurement during ping contest.
+ */
+static void sync_cb_send_ping(peer_t *peer, void *ctx) {
+  (void)ctx;
+
+  if (peer == NULL || !peer_is_ready(peer)) {
+    return;
+  }
+
+  /* Build ping message */
+  msg_t ping;
+  memset(&ping, 0, sizeof(ping));
+  ping.type = MSG_PING;
+  ping.payload.ping.nonce = generate_nonce();
+
+  /* Track ping for RTT measurement */
+  peer->ping_nonce = ping.payload.ping.nonce;
+  peer->ping_sent_time = plat_time_ms();
+
+  peer_queue_message(peer, &ping);
+}
+
+/**
  * Get block hash at height from the database.
  *
  * Used for efficient block queueing - avoids walking back through
@@ -1775,7 +1802,9 @@ static echo_result_t node_init_sync(node_t *node) {
     return ECHO_ERR_INVALID;
   }
 
-  /* Set up sync callbacks */
+  /* Set up sync callbacks.
+   * Note: flush_headers is NULL because the sync manager now handles
+   * deferred header persistence internally using a pending headers queue. */
   sync_callbacks_t callbacks = {
       .get_block = sync_cb_get_block,
       .store_block = sync_cb_store_block,
@@ -1784,9 +1813,11 @@ static echo_result_t node_init_sync(node_t *node) {
       .validate_and_apply_block = sync_cb_validate_and_apply_block,
       .send_getheaders = sync_cb_send_getheaders,
       .send_getdata_blocks = sync_cb_send_getdata_blocks,
+      .send_ping = sync_cb_send_ping,
       .get_block_hash_at_height = sync_cb_get_block_hash_at_height,
       .begin_header_batch = sync_cb_begin_header_batch,
       .commit_header_batch = sync_cb_commit_header_batch,
+      .flush_headers = NULL,
       .ctx = node};
 
   /* Create sync manager with appropriate download window for mode */
@@ -2311,7 +2342,20 @@ static void node_handle_peer_message(node_t *node, peer_t *peer,
     break;
 
   case MSG_PONG:
-    /* Pong received - peer is alive */
+    /* Calculate RTT if this pong matches our outstanding ping */
+    if (peer->ping_nonce != 0 &&
+        msg->payload.pong.nonce == peer->ping_nonce) {
+      uint64_t now = plat_time_ms();
+      peer->last_rtt_ms = now - peer->ping_sent_time;
+      peer->ping_nonce = 0; /* Clear - ping answered */
+      log_debug(LOG_COMP_NET, "Peer %s RTT: %llu ms",
+                peer->address, (unsigned long long)peer->last_rtt_ms);
+
+      /* Notify sync manager for ping contest */
+      if (node->sync_mgr != NULL) {
+        sync_report_pong(node->sync_mgr, peer);
+      }
+    }
     break;
 
   case MSG_ADDR:
@@ -2742,6 +2786,9 @@ echo_result_t node_maintenance(node_t *node) {
       memset(&ping, 0, sizeof(ping));
       ping.type = MSG_PING;
       ping.payload.ping.nonce = generate_nonce();
+      /* Track ping for RTT measurement */
+      peer->ping_nonce = ping.payload.ping.nonce;
+      peer->ping_sent_time = now;
       peer_queue_message(peer, &ping);
     }
   }

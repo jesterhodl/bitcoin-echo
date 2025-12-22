@@ -174,6 +174,22 @@ block_index_t *block_index_create(const block_header_t *header,
                                   block_index_t *prev);
 
 /**
+ * Create a block index entry with a precomputed hash.
+ *
+ * Same as block_index_create but uses the provided hash instead of
+ * computing it internally. This is an optimization for header sync
+ * where the hash is already computed for validation.
+ *
+ * @param header Block header
+ * @param prev Previous block index (NULL for genesis)
+ * @param precomputed_hash Pre-computed block hash (must not be NULL)
+ * @return Newly allocated block index, or NULL on failure
+ */
+block_index_t *block_index_create_with_hash(const block_header_t *header,
+                                            block_index_t *prev,
+                                            const hash256_t *precomputed_hash);
+
+/**
  * Destroy a block index entry.
  * @param index Block index to destroy (may be NULL)
  */
@@ -436,6 +452,24 @@ size_t block_index_map_size(const block_index_map_t *map);
  * @return Pointer to best block index, or NULL if map is empty
  */
 block_index_t *block_index_map_find_best(const block_index_map_t *map);
+
+/**
+ * Callback type for block_index_map_foreach.
+ * @param index The block index entry
+ * @param user_data User-provided context
+ * @return true to continue iteration, false to stop
+ */
+typedef bool (*block_index_foreach_cb)(const block_index_t *index,
+                                       void *user_data);
+
+/**
+ * Iterate over all block indices in the map.
+ * @param map The map
+ * @param callback Function to call for each entry
+ * @param user_data Context passed to callback
+ */
+void block_index_map_foreach(const block_index_map_t *map,
+                             block_index_foreach_cb callback, void *user_data);
 
 /* ========================================================================
  * Chain Selection Operations (Session 6.3)

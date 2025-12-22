@@ -53,6 +53,23 @@ struct block_queue {
 #define SYNC_MAX_PEERS 128
 
 /**
+ * Pending header entry for deferred persistence.
+ *
+ * During SYNC_MODE_HEADERS, we keep headers in memory and defer database
+ * writes until transitioning to SYNC_MODE_BLOCKS. This avoids ~870K
+ * individual SQLite INSERTs, replacing them with a single batched write.
+ */
+typedef struct {
+  block_header_t header; /* The full 80-byte header */
+  block_index_t *index;  /* Pointer to the block_index in chainstate */
+} pending_header_t;
+
+/**
+ * Initial capacity for pending headers (grows as needed)
+ */
+#define PENDING_HEADERS_INITIAL_CAPACITY 4096
+
+/**
  * Sync manager implementation
  */
 struct sync_manager {
@@ -106,11 +123,31 @@ struct sync_manager {
   uint64_t network_median_latency_ms;  /* Median block latency across all peers */
   uint64_t last_quality_update_time;   /* Last time quality scores recalculated */
 
+  /* Headers-first sync: single peer for header download (avoids 8x redundant requests) */
+  size_t headers_sync_peer_idx;        /* Index into peers[] array */
+  bool has_headers_sync_peer;          /* Whether we have a designated peer */
+
+  /* Ping contest: measure RTT to find fastest peer before headers sync */
+#define PING_CONTEST_MIN_PEERS 12      /* Wait for this many peers before countdown */
+#define PING_CONTEST_WAIT_MS 12000     /* Wait this long after hitting min peers */
+#define PING_CONTEST_TIMEOUT_MS 3000   /* Max time to wait for pong responses */
+  uint64_t ping_contest_trigger_time;  /* When we hit min peers (0 = not triggered) */
+  uint64_t ping_contest_start_time;    /* When pings were sent (0 = not started) */
+  size_t ping_contest_responses;       /* How many pongs received */
+  size_t ping_contest_sent;            /* How many pings sent */
+  bool skip_ping_contest;              /* Skip ping contest (for testing) */
+
   /* Rolling window for accurate block rate calculation (500 blocks = ~30-60s at typical rates) */
 #define RATE_WINDOW_SIZE 500
   uint64_t rate_window[RATE_WINDOW_SIZE]; /* Ring buffer of validation timestamps */
   size_t rate_window_idx;                 /* Next write position */
   size_t rate_window_count;               /* Number of entries (0 to RATE_WINDOW_SIZE) */
+
+  /* Deferred header persistence: queue headers during SYNC_MODE_HEADERS,
+   * flush all at once when transitioning to SYNC_MODE_BLOCKS. */
+  pending_header_t *pending_headers;      /* Dynamic array of pending headers */
+  size_t pending_headers_count;           /* Number of queued headers */
+  size_t pending_headers_capacity;        /* Allocated capacity */
 };
 
 /* ============================================================================
@@ -167,6 +204,92 @@ static float rate_window_get_rate(const struct sync_manager *mgr) {
   float seconds = (float)elapsed_ms / 1000.0f;
 
   return blocks / seconds;
+}
+
+/* ============================================================================
+ * Pending Header Queue Helpers
+ * ============================================================================
+ */
+
+/**
+ * Queue a header for deferred database persistence.
+ * Used during SYNC_MODE_HEADERS to avoid per-header INSERTs.
+ */
+static echo_result_t pending_headers_add(sync_manager_t *mgr,
+                                         const block_header_t *header,
+                                         block_index_t *index) {
+  /* Grow array if needed */
+  if (mgr->pending_headers_count >= mgr->pending_headers_capacity) {
+    size_t new_cap = mgr->pending_headers_capacity == 0
+                         ? PENDING_HEADERS_INITIAL_CAPACITY
+                         : mgr->pending_headers_capacity * 2;
+    pending_header_t *new_arr =
+        realloc(mgr->pending_headers, new_cap * sizeof(pending_header_t));
+    if (!new_arr) {
+      return ECHO_ERR_NOMEM;
+    }
+    mgr->pending_headers = new_arr;
+    mgr->pending_headers_capacity = new_cap;
+  }
+
+  /* Add entry */
+  pending_header_t *entry = &mgr->pending_headers[mgr->pending_headers_count++];
+  entry->header = *header;
+  entry->index = index;
+
+  return ECHO_OK;
+}
+
+/**
+ * Flush all pending headers to the database via store_header callback.
+ * Called when transitioning from SYNC_MODE_HEADERS to SYNC_MODE_BLOCKS.
+ */
+static echo_result_t pending_headers_flush(sync_manager_t *mgr) {
+  if (mgr->pending_headers_count == 0) {
+    return ECHO_OK;
+  }
+
+  if (!mgr->callbacks.store_header) {
+    /* No callback - just clear the queue */
+    mgr->pending_headers_count = 0;
+    return ECHO_OK;
+  }
+
+  /* Begin transaction */
+  if (mgr->callbacks.begin_header_batch) {
+    mgr->callbacks.begin_header_batch(mgr->callbacks.ctx);
+  }
+
+  /* Store all pending headers */
+  size_t stored = 0;
+  size_t errors = 0;
+  for (size_t i = 0; i < mgr->pending_headers_count; i++) {
+    pending_header_t *entry = &mgr->pending_headers[i];
+    echo_result_t result = mgr->callbacks.store_header(
+        &entry->header, entry->index, mgr->callbacks.ctx);
+    if (result == ECHO_OK || result == ECHO_ERR_EXISTS) {
+      stored++;
+    } else {
+      errors++;
+      if (errors <= 3) {
+        log_warn(LOG_COMP_SYNC, "Failed to store header at height %u: %d",
+                 entry->index->height, result);
+      }
+    }
+  }
+
+  /* Commit transaction */
+  if (mgr->callbacks.commit_header_batch) {
+    mgr->callbacks.commit_header_batch(mgr->callbacks.ctx);
+  }
+
+  log_info(LOG_COMP_SYNC, "Flushed %zu headers to database (%zu errors)",
+           stored, errors);
+
+  /* Clear the queue */
+  mgr->pending_headers_count = 0;
+
+  return errors > 0 ? ECHO_ERR_IO : ECHO_OK;
 }
 
 /* ============================================================================
@@ -727,6 +850,52 @@ static void update_peer_quality(sync_manager_t *mgr) {
 }
 
 /**
+ * Select or validate the designated headers sync peer.
+ *
+ * During SYNC_MODE_HEADERS, we use a single peer for header download to avoid
+ * redundant requests (previously we asked all peers for the same headers,
+ * wasting 7/8 of bandwidth with 8 peers).
+ *
+ * Returns the peer_sync_state for the headers sync peer, or NULL if none available.
+ * If the current designated peer is no longer suitable, selects a new one.
+ */
+static peer_sync_state_t *get_headers_sync_peer(sync_manager_t *mgr) {
+  /* Check if current designated peer is still valid */
+  if (mgr->has_headers_sync_peer && mgr->headers_sync_peer_idx < mgr->peer_count) {
+    peer_sync_state_t *ps = &mgr->peers[mgr->headers_sync_peer_idx];
+    if (ps->sync_candidate && peer_is_ready(ps->peer)) {
+      return ps;
+    }
+    /* Current peer no longer suitable, need to pick a new one */
+    log_info(LOG_COMP_SYNC, "Headers sync peer no longer suitable, selecting new peer");
+    mgr->has_headers_sync_peer = false;
+  }
+
+  /* Select new headers sync peer: prefer highest start_height (has most chain) */
+  peer_sync_state_t *best = NULL;
+  int32_t best_height = -1;
+
+  for (size_t i = 0; i < mgr->peer_count; i++) {
+    peer_sync_state_t *ps = &mgr->peers[i];
+    if (ps->sync_candidate && peer_is_ready(ps->peer)) {
+      if (ps->start_height > best_height) {
+        best = ps;
+        best_height = ps->start_height;
+        mgr->headers_sync_peer_idx = i;
+      }
+    }
+  }
+
+  if (best) {
+    mgr->has_headers_sync_peer = true;
+    log_info(LOG_COMP_SYNC, "Selected headers sync peer: %s (height=%d)",
+             best->peer->address, best_height);
+  }
+
+  return best;
+}
+
+/**
  * Find best peer for block download based on quality and capacity.
  *
  * Selection criteria (in priority order):
@@ -837,6 +1006,11 @@ sync_manager_t *sync_create(chainstate_t *chainstate,
   /* Initialize adaptive stalling timeout to 2 seconds */
   mgr->stalling_timeout_ms = SYNC_BLOCK_STALLING_TIMEOUT_MS;
 
+  /* Initialize pending headers queue for deferred persistence */
+  mgr->pending_headers = NULL;
+  mgr->pending_headers_count = 0;
+  mgr->pending_headers_capacity = 0;
+
   /* Initialize best header to current tip_index (which should be the best
    * header after restoration, not the validated tip) */
   mgr->best_header = chainstate_get_tip_index(chainstate);
@@ -855,6 +1029,7 @@ void sync_destroy(sync_manager_t *mgr) {
     return;
   }
   block_queue_destroy(mgr->block_queue);
+  free(mgr->pending_headers);
   free(mgr);
 }
 
@@ -888,6 +1063,18 @@ void sync_add_peer(sync_manager_t *mgr, peer_t *peer, int32_t height) {
            peer->address, height, our_height,
            ps->sync_candidate ? "yes" : "no",
            peer_state_string(peer->state));
+
+  /* Check if we should trigger ping contest countdown.
+   * Wait for 12 sync-candidate peers, then wait 12 more seconds. */
+  if (mgr->mode == SYNC_MODE_IDLE && mgr->ping_contest_trigger_time == 0) {
+    size_t sync_candidates = count_sync_peers(mgr);
+    if (sync_candidates >= PING_CONTEST_MIN_PEERS) {
+      mgr->ping_contest_trigger_time = plat_time_ms();
+      log_info(LOG_COMP_SYNC,
+               "Ping contest triggered: %zu sync candidates, waiting %d seconds",
+               sync_candidates, PING_CONTEST_WAIT_MS / 1000);
+    }
+  }
 }
 
 void sync_remove_peer(sync_manager_t *mgr, peer_t *peer) {
@@ -902,6 +1089,18 @@ void sync_remove_peer(sync_manager_t *mgr, peer_t *peer) {
 
       /* Unassign any blocks from this peer */
       block_queue_unassign_peer(mgr->block_queue, peer);
+
+      /* Handle headers sync peer tracking */
+      if (mgr->has_headers_sync_peer) {
+        if (mgr->headers_sync_peer_idx == i) {
+          /* This was our headers sync peer - need to pick a new one */
+          log_info(LOG_COMP_SYNC, "Headers sync peer disconnected, will select new peer");
+          mgr->has_headers_sync_peer = false;
+        } else if (mgr->headers_sync_peer_idx > i) {
+          /* Our headers sync peer is after the removed one - adjust index */
+          mgr->headers_sync_peer_idx--;
+        }
+      }
 
       /* Remove by shifting remaining peers */
       for (size_t j = i; j < mgr->peer_count - 1; j++) {
@@ -926,8 +1125,9 @@ echo_result_t sync_start(sync_manager_t *mgr) {
     return ECHO_ERR_INVALID_STATE;
   }
 
-  mgr->start_time = plat_time_ms();
-  mgr->last_progress_time = mgr->start_time;
+  uint64_t now = plat_time_ms();
+  mgr->start_time = now;
+  mgr->last_progress_time = now;
 
   /*
    * If we already have headers beyond the validated tip (e.g., from a previous
@@ -941,17 +1141,62 @@ echo_result_t sync_start(sync_manager_t *mgr) {
            (void *)mgr->best_header, best_header_height, validated_height);
 
   if (mgr->best_header != NULL && best_header_height > validated_height) {
+    /* Already have headers, go straight to blocks */
     log_info(LOG_COMP_SYNC,
              "Starting sync in BLOCKS mode (already have headers: "
              "best_header=%u, validated=%u)",
              best_header_height, validated_height);
     mgr->mode = SYNC_MODE_BLOCKS;
-    mgr->block_sync_start_time = plat_time_ms();
+    mgr->block_sync_start_time = now;
   } else {
-    log_info(LOG_COMP_SYNC,
-             "Starting sync in HEADERS mode (best_header=%u, validated=%u)",
-             best_header_height, validated_height);
-    mgr->mode = SYNC_MODE_HEADERS;
+    /*
+     * Fresh headers sync - run ping contest to find fastest peer.
+     * Wait for 12 peers, then 12 seconds, then run contest.
+     * (Skip if skip_ping_contest is set, e.g., for testing)
+     */
+    if (!mgr->skip_ping_contest) {
+      if (mgr->ping_contest_trigger_time == 0) {
+        /* Not enough peers yet - caller should retry later */
+        log_info(LOG_COMP_SYNC,
+                 "sync_start: waiting for %d peers (have %zu)",
+                 PING_CONTEST_MIN_PEERS, count_sync_peers(mgr));
+        return ECHO_ERR_INVALID_STATE;
+      }
+
+      uint64_t wait_elapsed = now - mgr->ping_contest_trigger_time;
+      if (wait_elapsed < PING_CONTEST_WAIT_MS) {
+        /* Still in 12-second countdown - caller should retry */
+        return ECHO_ERR_INVALID_STATE;
+      }
+
+      /* Countdown complete - send pings and enter PING_CONTEST mode */
+      log_info(LOG_COMP_SYNC, "Starting ping contest with %zu peers",
+               mgr->peer_count);
+
+      mgr->ping_contest_start_time = now;
+      mgr->ping_contest_sent = 0;
+      mgr->ping_contest_responses = 0;
+
+      /* Send ping to all sync-candidate peers */
+      for (size_t i = 0; i < mgr->peer_count; i++) {
+        peer_sync_state_t *ps = &mgr->peers[i];
+        if (ps->sync_candidate && peer_is_ready(ps->peer)) {
+          if (mgr->callbacks.send_ping) {
+            mgr->callbacks.send_ping(ps->peer, mgr->callbacks.ctx);
+            mgr->ping_contest_sent++;
+          }
+        }
+      }
+
+      log_info(LOG_COMP_SYNC, "Sent pings to %zu peers, waiting for responses",
+               mgr->ping_contest_sent);
+
+      mgr->mode = SYNC_MODE_PING_CONTEST;
+    } else {
+      /* Skip ping contest - go straight to headers mode */
+      log_info(LOG_COMP_SYNC, "Starting headers-first sync (ping contest skipped)");
+      mgr->mode = SYNC_MODE_HEADERS;
+    }
   }
 
   return ECHO_OK;
@@ -995,6 +1240,11 @@ echo_result_t sync_handle_headers(sync_manager_t *mgr, peer_t *peer,
 
   /* Clear in-flight flag */
   ps->headers_in_flight = false;
+
+  /* Reset sent time to allow immediate follow-up request (fixes 5-second throttle bug).
+   * The SYNC_HEADER_RETRY_INTERVAL_MS is meant for retries on timeout, not as a
+   * throttle between successful responses. */
+  ps->headers_sent_time = 0;
 
   if (count == 0) {
     /* No more headers from this peer - check if we should transition to blocks */
@@ -1074,15 +1324,23 @@ echo_result_t sync_handle_headers(sync_manager_t *mgr, peer_t *peer,
       return result;
     }
 
-    /* Persist header to disk if callback provided */
-    if (new_index && mgr->callbacks.store_header) {
-      echo_result_t store_result =
-          mgr->callbacks.store_header(header, new_index, mgr->callbacks.ctx);
-      if (store_result != ECHO_OK && store_result != ECHO_ERR_EXISTS) {
-        /* Log but don't fail - header is in memory which is what matters for
-         * sync */
-        log_warn(LOG_COMP_SYNC, "Failed to persist header at height %u: %d",
-                 new_index->height, store_result);
+    /* Persist or queue header.
+     * OPTIMIZATION: During SYNC_MODE_HEADERS, queue headers for deferred
+     * persistence instead of writing each one immediately. This reduces
+     * ~870K individual SQLite INSERTs to one batched write at mode transition,
+     * cutting header sync time from ~10 min to ~1 min. */
+    if (new_index) {
+      if (mgr->mode == SYNC_MODE_HEADERS) {
+        /* Queue for later flush */
+        pending_headers_add(mgr, header, new_index);
+      } else if (mgr->callbacks.store_header) {
+        /* Immediate persistence */
+        echo_result_t store_result =
+            mgr->callbacks.store_header(header, new_index, mgr->callbacks.ctx);
+        if (store_result != ECHO_OK && store_result != ECHO_ERR_EXISTS) {
+          log_warn(LOG_COMP_SYNC, "Failed to persist header at height %u: %d",
+                   new_index->height, store_result);
+        }
       }
     }
 
@@ -1117,6 +1375,19 @@ echo_result_t sync_handle_headers(sync_manager_t *mgr, peer_t *peer,
     if (mgr->mode == SYNC_MODE_HEADERS && mgr->best_header) {
       uint32_t tip_height = chainstate_get_height(mgr->chainstate);
       if (mgr->best_header->height > tip_height) {
+        /* Flush all queued headers to database before switching modes. */
+        if (mgr->pending_headers_count > 0) {
+          log_info(LOG_COMP_SYNC,
+                   "Flushing %zu queued headers to database...",
+                   mgr->pending_headers_count);
+          echo_result_t flush_result = pending_headers_flush(mgr);
+          if (flush_result != ECHO_OK) {
+            log_error(LOG_COMP_SYNC, "Failed to flush headers: %d",
+                      flush_result);
+            /* Continue anyway - headers are in memory */
+          }
+        }
+
         mgr->mode = SYNC_MODE_BLOCKS;
         if (mgr->block_sync_start_time == 0) {
           mgr->block_sync_start_time = plat_time_ms();
@@ -1382,6 +1653,12 @@ void sync_process_timeouts(sync_manager_t *mgr) {
         (now - ps->headers_sent_time > SYNC_HEADERS_TIMEOUT_MS)) {
       ps->headers_in_flight = false;
       ps->timeout_count++;
+
+      /* If this was our designated headers sync peer, clear it so we pick a new one */
+      if (mgr->has_headers_sync_peer && mgr->headers_sync_peer_idx == i) {
+        log_info(LOG_COMP_SYNC, "Headers sync peer timed out, will select new peer");
+        mgr->has_headers_sync_peer = false;
+      }
     }
 
     /* Process block timeouts - count stalls per peer per tick, not per block */
@@ -1886,6 +2163,20 @@ done_parallel_check:;  /* Empty statement after label */
   }
 }
 
+void sync_report_pong(sync_manager_t *mgr, peer_t *peer) {
+  if (!mgr || !peer) {
+    return;
+  }
+
+  /* Only count during ping contest */
+  if (mgr->mode == SYNC_MODE_PING_CONTEST) {
+    mgr->ping_contest_responses++;
+    log_debug(LOG_COMP_SYNC, "Pong from %s: RTT=%llu ms (%zu/%zu responses)",
+              peer->address, (unsigned long long)peer->last_rtt_ms,
+              mgr->ping_contest_responses, mgr->ping_contest_sent);
+  }
+}
+
 void sync_tick(sync_manager_t *mgr) {
   if (!mgr) {
     return;
@@ -1894,36 +2185,83 @@ void sync_tick(sync_manager_t *mgr) {
   sync_process_timeouts(mgr);
 
   switch (mgr->mode) {
+  case SYNC_MODE_PING_CONTEST: {
+    /* Wait for ping responses or timeout, then pick fastest peer */
+    uint64_t now = plat_time_ms();
+    uint64_t elapsed = now - mgr->ping_contest_start_time;
+
+    bool all_responded = (mgr->ping_contest_responses >= mgr->ping_contest_sent);
+    bool timed_out = (elapsed >= PING_CONTEST_TIMEOUT_MS);
+
+    if (all_responded || timed_out) {
+      /* Contest complete - find fastest peer */
+      peer_sync_state_t *fastest = NULL;
+      uint64_t fastest_rtt = UINT64_MAX;
+
+      for (size_t i = 0; i < mgr->peer_count; i++) {
+        peer_sync_state_t *ps = &mgr->peers[i];
+        if (ps->sync_candidate && peer_is_ready(ps->peer) &&
+            ps->peer->last_rtt_ms > 0 && ps->peer->last_rtt_ms < fastest_rtt) {
+          fastest = ps;
+          fastest_rtt = ps->peer->last_rtt_ms;
+          mgr->headers_sync_peer_idx = i;
+        }
+      }
+
+      if (fastest) {
+        log_info(LOG_COMP_SYNC,
+                 "Ping contest complete: winner=%s (RTT=%llu ms), "
+                 "responses=%zu/%zu",
+                 fastest->peer->address, (unsigned long long)fastest_rtt,
+                 mgr->ping_contest_responses, mgr->ping_contest_sent);
+        mgr->has_headers_sync_peer = true;
+      } else {
+        log_warn(LOG_COMP_SYNC,
+                 "Ping contest: no responses, falling back to height-based selection");
+        mgr->has_headers_sync_peer = false;
+      }
+
+      /* Transition to headers mode */
+      log_info(LOG_COMP_SYNC, "Starting headers-first sync");
+      mgr->mode = SYNC_MODE_HEADERS;
+    }
+    break;
+  }
+
   case SYNC_MODE_HEADERS: {
-    /* Request headers from peers that aren't already syncing */
-    for (size_t i = 0; i < mgr->peer_count; i++) {
-      peer_sync_state_t *ps = &mgr->peers[i];
-      if (ps->sync_candidate && !ps->headers_in_flight &&
-          peer_is_ready(ps->peer)) {
-        uint64_t now = plat_time_ms();
-        if (now - ps->headers_sent_time >= SYNC_HEADER_RETRY_INTERVAL_MS) {
-          ps->headers_in_flight = true;
-          ps->headers_sent_time = now;
+    /* Single-peer header sync: use one designated peer to avoid redundant requests.
+     * Previously we asked ALL peers for the same headers, wasting 7/8 bandwidth. */
+    peer_sync_state_t *ps = get_headers_sync_peer(mgr);
+    if (!ps) {
+      /* No suitable peer available yet */
+      break;
+    }
 
-          /* Build block locator and send getheaders */
-          if (mgr->callbacks.send_getheaders) {
-            hash256_t locator[SYNC_MAX_LOCATOR_HASHES];
-            size_t locator_len = 0;
+    /* Only send if no request in flight and retry interval passed (for timeouts) */
+    if (!ps->headers_in_flight) {
+      uint64_t now = plat_time_ms();
+      if (now - ps->headers_sent_time >= SYNC_HEADER_RETRY_INTERVAL_MS) {
+        ps->headers_in_flight = true;
+        ps->headers_sent_time = now;
 
-            /* For headers-first sync, use best_header if we have received any
-             * headers. Otherwise fall back to chainstate tip (genesis). */
-            if (mgr->best_header != NULL) {
-              block_index_map_t *map =
-                  chainstate_get_block_index_map(mgr->chainstate);
-              sync_build_locator_from(map, mgr->best_header, locator,
-                                      &locator_len);
-            } else {
-              sync_build_locator(mgr->chainstate, locator, &locator_len);
-            }
+        /* Build block locator and send getheaders */
+        if (mgr->callbacks.send_getheaders) {
+          hash256_t locator[SYNC_MAX_LOCATOR_HASHES];
+          size_t locator_len = 0;
 
-            mgr->callbacks.send_getheaders(ps->peer, locator, locator_len, NULL,
-                                           mgr->callbacks.ctx);
+          /* For headers-first sync, use best_header if we have received any
+           * headers. Otherwise fall back to chainstate tip (genesis). */
+          if (mgr->best_header != NULL) {
+            block_index_map_t *map =
+                chainstate_get_block_index_map(mgr->chainstate);
+            sync_build_locator_from(map, mgr->best_header, locator,
+                                    &locator_len);
+          } else {
+            sync_build_locator(mgr->chainstate, locator, &locator_len);
           }
+
+          mgr->callbacks.send_getheaders(ps->peer, locator, locator_len, NULL,
+                                         mgr->callbacks.ctx);
         }
       }
     }
@@ -2189,8 +2527,15 @@ bool sync_is_complete(const sync_manager_t *mgr) {
 }
 
 bool sync_is_ibd(const sync_manager_t *mgr) {
-  return mgr &&
-         (mgr->mode == SYNC_MODE_HEADERS || mgr->mode == SYNC_MODE_BLOCKS);
+  return mgr && (mgr->mode == SYNC_MODE_PING_CONTEST ||
+                 mgr->mode == SYNC_MODE_HEADERS ||
+                 mgr->mode == SYNC_MODE_BLOCKS);
+}
+
+void sync_skip_ping_contest(sync_manager_t *mgr) {
+  if (mgr) {
+    mgr->skip_ping_contest = true;
+  }
 }
 
 /* ============================================================================
@@ -2202,6 +2547,8 @@ const char *sync_mode_string(sync_mode_t mode) {
   switch (mode) {
   case SYNC_MODE_IDLE:
     return "IDLE";
+  case SYNC_MODE_PING_CONTEST:
+    return "PING_CONTEST";
   case SYNC_MODE_HEADERS:
     return "HEADERS";
   case SYNC_MODE_BLOCKS:

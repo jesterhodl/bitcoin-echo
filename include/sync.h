@@ -100,11 +100,12 @@
  * Sync mode
  */
 typedef enum {
-  SYNC_MODE_IDLE,    /* Not syncing */
-  SYNC_MODE_HEADERS, /* Downloading headers */
-  SYNC_MODE_BLOCKS,  /* Downloading and validating blocks */
-  SYNC_MODE_DONE,    /* Sync complete, in steady state */
-  SYNC_MODE_STALLED  /* Sync stalled (no progress) */
+  SYNC_MODE_IDLE,         /* Not syncing */
+  SYNC_MODE_PING_CONTEST, /* Measuring peer latency before headers sync */
+  SYNC_MODE_HEADERS,      /* Downloading headers */
+  SYNC_MODE_BLOCKS,       /* Downloading and validating blocks */
+  SYNC_MODE_DONE,         /* Sync complete, in steady state */
+  SYNC_MODE_STALLED       /* Sync stalled (no progress) */
 } sync_mode_t;
 
 /**
@@ -268,6 +269,18 @@ typedef struct {
                               size_t count, void *ctx);
 
   /**
+   * Send ping to a peer for RTT measurement.
+   *
+   * Called during ping contest to measure peer latency.
+   * The node should track the nonce and sent time in the peer.
+   *
+   * Parameters:
+   *   peer - Peer to send ping to
+   *   ctx  - User context
+   */
+  void (*send_ping)(peer_t *peer, void *ctx);
+
+  /**
    * Get block hash by height from the database.
    *
    * Used for efficient block queueing - avoids walking back through
@@ -306,6 +319,21 @@ typedef struct {
    *   ctx - User context
    */
   void (*commit_header_batch)(void *ctx);
+
+  /**
+   * Flush all in-memory headers to database.
+   *
+   * Called when transitioning from HEADERS to BLOCKS mode.
+   * During header sync, headers are kept in memory only for speed.
+   * This callback persists them all at once in a single transaction.
+   *
+   * Parameters:
+   *   ctx - User context
+   *
+   * Returns:
+   *   ECHO_OK on success
+   */
+  echo_result_t (*flush_headers)(void *ctx);
 
   /* Context pointer passed to all callbacks */
   void *ctx;
@@ -476,6 +504,18 @@ void sync_process_timeouts(sync_manager_t *mgr);
 void sync_tick(sync_manager_t *mgr);
 
 /**
+ * Report a pong received from a peer.
+ *
+ * Called by the node when a pong is received during ping contest.
+ * The peer's last_rtt_ms should already be updated before calling this.
+ *
+ * Parameters:
+ *   mgr  - Sync manager
+ *   peer - Peer that sent the pong
+ */
+void sync_report_pong(sync_manager_t *mgr, peer_t *peer);
+
+/**
  * Get current sync progress.
  */
 void sync_get_progress(const sync_manager_t *mgr, sync_progress_t *progress);
@@ -495,6 +535,14 @@ bool sync_is_complete(const sync_manager_t *mgr);
  *   true if actively downloading headers or blocks
  */
 bool sync_is_ibd(const sync_manager_t *mgr);
+
+/**
+ * Skip ping contest for testing purposes.
+ *
+ * When set, sync_start will go directly to HEADERS mode without
+ * waiting for peers or running a ping contest.
+ */
+void sync_skip_ping_contest(sync_manager_t *mgr);
 
 /* ============================================================================
  * Block Locator

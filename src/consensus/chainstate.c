@@ -242,20 +242,19 @@ echo_result_t work256_from_bits(uint32_t bits, work256_t *work) {
  * Block Index Operations
  * ======================================================================== */
 
-block_index_t *block_index_create(const block_header_t *header,
-                                  block_index_t *prev) {
+block_index_t *block_index_create_with_hash(const block_header_t *header,
+                                            block_index_t *prev,
+                                            const hash256_t *precomputed_hash) {
   ECHO_ASSERT(header != NULL);
+  ECHO_ASSERT(precomputed_hash != NULL);
 
   block_index_t *index = malloc(sizeof(block_index_t));
   if (index == NULL) {
     return NULL;
   }
 
-  /* Compute block hash */
-  if (block_header_hash(header, &index->hash) != ECHO_OK) {
-    free(index);
-    return NULL;
-  }
+  /* Use precomputed hash instead of computing */
+  index->hash = *precomputed_hash;
 
   index->prev_hash = header->prev_hash;
   index->timestamp = header->timestamp;
@@ -288,6 +287,19 @@ block_index_t *block_index_create(const block_header_t *header,
   index->data_pos = 0;
 
   return index;
+}
+
+block_index_t *block_index_create(const block_header_t *header,
+                                  block_index_t *prev) {
+  ECHO_ASSERT(header != NULL);
+
+  /* Compute hash and delegate to _with_hash version */
+  hash256_t hash;
+  if (block_header_hash(header, &hash) != ECHO_OK) {
+    return NULL;
+  }
+
+  return block_index_create_with_hash(header, prev, &hash);
 }
 
 void block_index_destroy(block_index_t *index) {
@@ -943,6 +955,23 @@ block_index_t *block_index_map_find_best(const block_index_map_t *map) {
   return best;
 }
 
+void block_index_map_foreach(const block_index_map_t *map,
+                             block_index_foreach_cb callback, void *user_data) {
+  ECHO_ASSERT(map != NULL);
+  ECHO_ASSERT(callback != NULL);
+
+  for (size_t i = 0; i < map->bucket_count; i++) {
+    block_index_t *index = map->buckets[i];
+    if (index == NULL) {
+      continue;
+    }
+
+    if (!callback(index, user_data)) {
+      break; /* Callback requested stop */
+    }
+  }
+}
+
 /* ========================================================================
  * Chain Selection Implementation (Session 6.3)
  * ======================================================================== */
@@ -1227,8 +1256,8 @@ echo_result_t chainstate_add_header_with_hash(chainstate_t *state,
     /* Note: prev_index may be NULL for orphan blocks */
   }
 
-  /* Create block index */
-  block_index_t *index = block_index_create(header, prev_index);
+  /* Create block index - use precomputed hash to avoid redundant SHA256d */
+  block_index_t *index = block_index_create_with_hash(header, prev_index, hash_ptr);
   if (index == NULL) {
     return ECHO_ERR_NOMEM;
   }

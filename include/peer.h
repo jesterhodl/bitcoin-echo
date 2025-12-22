@@ -91,6 +91,11 @@ typedef struct {
   uint64_t last_send;    /* Last successful send time */
   uint64_t last_recv;    /* Last successful receive time */
 
+  /* Ping/pong RTT measurement */
+  uint64_t ping_nonce;     /* Nonce of outstanding ping (0 = none) */
+  uint64_t ping_sent_time; /* When ping was sent (plat_time_ms) */
+  uint64_t last_rtt_ms;    /* Most recent RTT measurement */
+
   /* Send queue */
   peer_msg_queue_entry_t send_queue[PEER_SEND_QUEUE_SIZE];
   size_t send_queue_head;  /* Next message to send */
