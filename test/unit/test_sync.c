@@ -855,19 +855,19 @@ static void test_sync_build_locator_bounds_check(void) {
 
 static void test_sync_mode_string(void) {
   if (strcmp(sync_mode_string(SYNC_MODE_IDLE), "IDLE") != 0) {
-  
+
   }
   if (strcmp(sync_mode_string(SYNC_MODE_HEADERS), "HEADERS") != 0) {
-  
+
   }
   if (strcmp(sync_mode_string(SYNC_MODE_BLOCKS), "BLOCKS") != 0) {
-  
+
   }
   if (strcmp(sync_mode_string(SYNC_MODE_DONE), "DONE") != 0) {
-  
+
   }
   if (strcmp(sync_mode_string(SYNC_MODE_STALLED), "STALLED") != 0) {
-  
+
   }
 
 }

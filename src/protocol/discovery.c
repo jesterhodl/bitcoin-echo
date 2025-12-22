@@ -11,16 +11,17 @@
 #include <stdio.h>
 #include <string.h>
 
-/* DNS seeds for mainnet (as of December 2025) */
+/* DNS seeds for mainnet (as of December 2025)
+ * Ordered by reliability/speed based on testing. */
 static const char *DNS_SEEDS_MAINNET[] = {
-    "seed.bitcoin.sipa.be",          /* Pieter Wuille */
-    "dnsseed.bluematt.me",           /* Matt Corallo */
-    "seed.bitcoin.jonasschnelli.ch", /* Jonas Schnelli */
-    "seed.btc.petertodd.net",        /* Peter Todd */
-    "seed.bitcoin.sprovoost.nl",     /* Sjors Provoost */
-    "dnsseed.emzy.de",               /* Stephan Oeste */
+    "dnsseed.emzy.de",               /* Stephan Oeste - fast, reliable */
     "seed.bitcoin.wiz.biz",          /* Jason Maurice */
+    "dnsseed.bluematt.me",           /* Matt Corallo */
+    "seed.bitcoin.sprovoost.nl",     /* Sjors Provoost */
+    "seed.btc.petertodd.net",        /* Peter Todd */
     "seed.mainnet.achownodes.xyz",   /* Ava Chow */
+    "seed.bitcoin.jonasschnelli.ch", /* Jonas Schnelli */
+    "seed.bitcoin.sipa.be",          /* Pieter Wuille */
     NULL};
 
 /* DNS seeds for testnet (as of December 2025) */
@@ -32,15 +33,14 @@ static const char *DNS_SEEDS_TESTNET[] = {
     "seed.testnet.achownodes.xyz",
     NULL};
 
-/* Hardcoded seed addresses for mainnet (fallback) */
-static const char *HARDCODED_SEEDS_MAINNET[] = {
-    /* These are stable, long-running nodes */
-    /* Format: "ip:port" */
-    "seed.bitcoin.sipa.be:8333", NULL};
+/* Hardcoded seed addresses for mainnet (fallback)
+ * These should be IP addresses of stable, long-running nodes.
+ * Format: "ip:port"
+ * Currently empty - DNS seeds are reliable enough. */
+static const char *HARDCODED_SEEDS_MAINNET[] = {NULL};
 
-/* Hardcoded seed addresses for testnet */
-static const char *HARDCODED_SEEDS_TESTNET[] = {
-    "testnet-seed.bitcoin.jonasschnelli.ch:18333", NULL};
+/* Hardcoded seed addresses for testnet (currently empty) */
+static const char *HARDCODED_SEEDS_TESTNET[] = {NULL};
 
 /* Default port numbers */
 #define DEFAULT_PORT_MAINNET 8333
@@ -192,9 +192,19 @@ size_t discovery_query_dns_seeds(peer_addr_manager_t *manager) {
 
   size_t total_added = 0;
 
-  /* Query each DNS seed - get up to 50 addresses per seed */
+  /* Query each DNS seed - get up to 50 addresses per seed.
+   * Exit early once we have enough addresses to avoid slow seeds.
+   * 128 addresses = 4x our max outbound peers (32), plenty for selection. */
   #define MAX_ADDRS_PER_SEED 50
+  #define MIN_ADDRESSES_NEEDED 128
   for (size_t i = 0; seeds[i] != NULL; i++) {
+    /* Early exit if we have enough addresses */
+    if (total_added >= MIN_ADDRESSES_NEEDED) {
+      log_info(LOG_COMP_NET, "Have %zu addresses, skipping remaining seeds",
+               total_added);
+      break;
+    }
+
     log_info(LOG_COMP_NET, "Resolving DNS seed: %s", seeds[i]);
 
     /* Allocate buffer for multiple IP strings */

@@ -1141,7 +1141,7 @@ echo_result_t sync_start(sync_manager_t *mgr) {
            (void *)mgr->best_header, best_header_height, validated_height);
 
   if (mgr->best_header != NULL && best_header_height > validated_height) {
-    /* Already have headers, go straight to blocks */
+    /* Already have headers, need to sync blocks */
     log_info(LOG_COMP_SYNC,
              "Starting sync in BLOCKS mode (already have headers: "
              "best_header=%u, validated=%u)",

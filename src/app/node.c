@@ -1585,6 +1585,34 @@ static echo_result_t sync_cb_validate_and_apply_block(const block_t *block,
     }
   }
 
+  /*
+   * IBD checkpoint: Flush UTXO set and save validated tip every 5000 blocks.
+   * This ensures we can resume from a known-good state on restart.
+   */
+#define UTXO_CHECKPOINT_INTERVAL 5000
+  uint32_t height = consensus_get_height(node->consensus);
+  if (node->ibd_mode && node->utxo_db_open &&
+      height % UTXO_CHECKPOINT_INTERVAL == 0 && height > 0) {
+    log_info(LOG_COMP_DB, "IBD checkpoint at height %u - flushing UTXO set...",
+             height);
+
+    echo_result_t flush_result = node_flush_utxo_set_to_db(node, height);
+    if (flush_result == ECHO_OK) {
+      node->last_utxo_persist_height = height;
+
+      /* Also persist validated tip */
+      if (node->block_index_db_open) {
+        block_index_db_set_validated_tip(&node->block_index_db, height, NULL);
+      }
+
+      log_info(LOG_COMP_DB, "Checkpoint saved at height %u (UTXO + validated tip)",
+               height);
+    } else {
+      log_error(LOG_COMP_DB, "Failed to flush UTXO set at checkpoint: %d",
+                flush_result);
+    }
+  }
+
   /* Step 4: Prune old blocks if pruning enabled (Session 9.6.6) */
   if (node_is_pruning_enabled(node)) {
     result = node_maybe_prune(node);
@@ -1614,8 +1642,7 @@ static echo_result_t sync_cb_validate_and_apply_block(const block_t *block,
     }
   }
 
-  /* Log success */
-  uint32_t height = consensus_get_height(node->consensus);
+  /* Log success (height already computed above for checkpoint) */
   log_info(LOG_COMP_CONS, "Block validated and applied: height=%u, txs=%zu",
            height, block->tx_count);
 
