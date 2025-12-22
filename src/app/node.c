@@ -1605,12 +1605,30 @@ static echo_result_t sync_cb_validate_and_apply_block(const block_t *block,
         block_index_db_set_validated_tip(&node->block_index_db, height, NULL);
       }
 
+      /* Checkpoint UTXO WAL right after flush */
+      if (node->utxo_db_open) {
+        db_checkpoint(&node->utxo_db.db);
+      }
+
       log_info(LOG_COMP_DB, "Checkpoint saved at height %u (UTXO + validated tip)",
                height);
     } else {
       log_error(LOG_COMP_DB, "Failed to flush UTXO set at checkpoint: %d",
                 flush_result);
     }
+  }
+
+  /*
+   * WAL checkpoint for block_index_db every 500 blocks.
+   *
+   * Block index is written every validated block, so its WAL grows quickly.
+   * Without checkpointing, WAL grows to 100s of MB and reads slow down.
+   * UTXO WAL is checkpointed above with the 5000-block flush (not here).
+   */
+#define WAL_CHECKPOINT_INTERVAL 500
+  if (node->ibd_mode && node->block_index_db_open &&
+      height % WAL_CHECKPOINT_INTERVAL == 0 && height > 0) {
+    db_checkpoint(&node->block_index_db.db);
   }
 
   /* Step 4: Prune old blocks if pruning enabled (Session 9.6.6) */

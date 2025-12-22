@@ -422,4 +422,22 @@ const char *db_errmsg(db_t *db);
  */
 echo_result_t db_set_ibd_mode(db_t *db, bool ibd_mode);
 
+/**
+ * Checkpoint the WAL (Write-Ahead Log) file.
+ *
+ * Parameters:
+ *   db - Database handle
+ *
+ * Returns:
+ *   ECHO_OK on success, error code on failure
+ *
+ * Notes:
+ *   - In WAL mode, writes go to a separate WAL file
+ *   - Checkpointing merges the WAL back into the main database
+ *   - Without checkpointing, the WAL grows unbounded and reads slow down
+ *   - Call periodically during IBD (every ~500 blocks) for best performance
+ *   - Uses TRUNCATE mode to reclaim WAL space immediately
+ */
+echo_result_t db_checkpoint(db_t *db);
+
 #endif /* ECHO_DB_H */
