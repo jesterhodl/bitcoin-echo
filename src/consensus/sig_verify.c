@@ -35,7 +35,8 @@
  * Dispatches to the appropriate verification function based on type.
  */
 int sig_verify(sig_type_t type, const uint8_t *sig, size_t sig_len,
-               const uint8_t *hash, const uint8_t *pubkey, size_t pubkey_len) {
+               const uint8_t *hash, const uint8_t *pubkey, size_t pubkey_len,
+               uint32_t flags) {
   /* Validate inputs */
   if (sig == NULL || hash == NULL || pubkey == NULL) {
     return 0;
@@ -53,8 +54,12 @@ int sig_verify(sig_type_t type, const uint8_t *sig, size_t sig_len,
     secp256k1_ecdsa_sig_t ecdsa_sig;
     secp256k1_point_t pk_point;
 
-    /* Validate signature length (DER: min 8, max 73 bytes) */
-    if (sig_len < 8 || sig_len > 73) {
+    /* Validate signature length */
+    /* Strict DER: max 73 bytes. Lax: allow longer for extra leading zeros */
+    if (sig_len < 8) {
+      return 0;
+    }
+    if ((flags & SIG_VERIFY_STRICT_DER) && sig_len > 73) {
       return 0;
     }
 
@@ -63,8 +68,18 @@ int sig_verify(sig_type_t type, const uint8_t *sig, size_t sig_len,
       return 0;
     }
 
-    /* Parse DER-encoded signature */
-    if (!secp256k1_ecdsa_sig_parse_der(&ecdsa_sig, sig, sig_len)) {
+    /*
+     * Parse DER-encoded signature.
+     * Use strict BIP-66 parser for post-BIP-66 blocks,
+     * lax parser for pre-BIP-66 historical signatures.
+     */
+    int parse_ok;
+    if (flags & SIG_VERIFY_STRICT_DER) {
+      parse_ok = secp256k1_ecdsa_sig_parse_der(&ecdsa_sig, sig, sig_len);
+    } else {
+      parse_ok = secp256k1_ecdsa_sig_parse_der_lax(&ecdsa_sig, sig, sig_len);
+    }
+    if (!parse_ok) {
       return 0;
     }
 

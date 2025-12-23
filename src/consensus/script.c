@@ -2998,8 +2998,11 @@ echo_result_t script_exec_op(script_context_t *ctx, const script_op_t *op) {
       echo_result_t res = sighash_legacy(ctx, sighash_type, sighash);
       if (res == ECHO_OK) {
         /* Verify ECDSA signature */
+        uint32_t sig_flags = (ctx->flags & SCRIPT_VERIFY_DERSIG)
+                                 ? SIG_VERIFY_STRICT_DER
+                                 : 0;
         if (sig_verify(SIG_ECDSA, sig_elem.data, actual_sig_len, sighash,
-                       pubkey_elem.data, pubkey_elem.len)) {
+                       pubkey_elem.data, pubkey_elem.len, sig_flags)) {
           result = ECHO_TRUE;
         }
       }
@@ -3213,8 +3216,11 @@ echo_result_t script_exec_op(script_context_t *ctx, const script_op_t *op) {
           uint8_t sighash[32];
           echo_result_t res = sighash_legacy(ctx, sighash_type, sighash);
           if (res == ECHO_OK) {
+            uint32_t sig_flags = (ctx->flags & SCRIPT_VERIFY_DERSIG)
+                                     ? SIG_VERIFY_STRICT_DER
+                                     : 0;
             if (sig_verify(SIG_ECDSA, sigs[isig].data, actual_sig_len, sighash,
-                           pubkeys[ikey].data, pubkeys[ikey].len)) {
+                           pubkeys[ikey].data, pubkeys[ikey].len, sig_flags)) {
               valid = ECHO_TRUE;
             }
           }
@@ -3924,9 +3930,9 @@ echo_result_t script_verify_p2wpkh(script_context_t *ctx,
     return res;
   }
 
-  /* Verify signature using ECDSA */
+  /* Verify signature using ECDSA (SegWit always uses strict DER) */
   int valid = sig_verify(SIG_ECDSA, sig, actual_sig_len, sighash_out, pubkey,
-                         pubkey_len);
+                         pubkey_len, SIG_VERIFY_STRICT_DER);
   if (!valid) {
     if ((ctx->flags & SCRIPT_VERIFY_NULLFAIL) && sig_len > 0) {
       ctx->error = SCRIPT_ERR_SIG_NULLFAIL;
@@ -4542,8 +4548,8 @@ echo_result_t script_verify_taproot_keypath(script_context_t *ctx,
     return res;
   }
 
-  /* Verify Schnorr signature */
-  if (!sig_verify(SIG_SCHNORR, sig, actual_sig_len, sighash, output_key, 32)) {
+  /* Verify Schnorr signature (flags ignored for Schnorr) */
+  if (!sig_verify(SIG_SCHNORR, sig, actual_sig_len, sighash, output_key, 32, 0)) {
     ctx->error = SCRIPT_ERR_SCHNORR_SIG;
     return ECHO_ERR_SCRIPT_ERROR;
   }
@@ -4846,7 +4852,7 @@ echo_result_t script_execute_tapscript(script_context_t *ctx,
 
       /* Verify Schnorr signature */
       if (sig_verify(SIG_SCHNORR, sig_elem.data, actual_sig_len, sighash,
-                     pubkey_elem.data, pubkey_elem.len)) {
+                     pubkey_elem.data, pubkey_elem.len, 0)) {
         n++; /* Valid signature: increment counter */
       }
       /* Invalid signature with NULLFAIL check would fail here in strict mode */

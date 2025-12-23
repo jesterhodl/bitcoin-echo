@@ -410,6 +410,19 @@ typedef struct {
    */
   void (*evict_peer)(peer_t *peer, const char *reason, void *ctx);
 
+  /**
+   * Request new peer connections after rotation eviction.
+   *
+   * Called after evicting underperformers to immediately fill the slots
+   * with fresh peers from the address pool. This ensures we maintain
+   * peer count and continuously test new candidates.
+   *
+   * Parameters:
+   *   count - Number of new peers to connect to
+   *   ctx   - User context
+   */
+  void (*request_new_peers)(size_t count, void *ctx);
+
   /* Context pointer passed to all callbacks */
   void *ctx;
 } sync_callbacks_t;

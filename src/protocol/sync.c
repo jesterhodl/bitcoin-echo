@@ -1233,6 +1233,13 @@ static void sync_rotate_peers(sync_manager_t *mgr) {
            mgr->rotation_cycle_count, evicted,
            mgr->peers_evicted_total, mgr->peers_replaced_total);
 
+  /* Request replacement peers from the address pool */
+  if (evicted > 0 && mgr->callbacks.request_new_peers) {
+    log_info(LOG_COMP_SYNC, "Requesting %zu replacement peers from address pool",
+             evicted);
+    mgr->callbacks.request_new_peers(evicted, mgr->callbacks.ctx);
+  }
+
 reset_windows:
   /* Reset windowed metrics for all peers for next evaluation cycle */
   for (size_t i = 0; i < mgr->peer_count; i++) {
@@ -1631,6 +1638,14 @@ void sync_add_peer(sync_manager_t *mgr, peer_t *peer, int32_t height) {
            peer->address, height, our_height,
            ps->sync_candidate ? "yes" : "no",
            peer_state_string(peer->state));
+
+  /* Track replacement peers during active IBD (Phase 2 continuous rotation).
+   * Any peer added during SYNC_MODE_BLOCKS is a replacement for an evicted peer. */
+  if (mgr->mode == SYNC_MODE_BLOCKS) {
+    mgr->peers_replaced_total++;
+    log_debug(LOG_COMP_SYNC, "Replacement peer joined during IBD: %s (total: %u)",
+              peer->address, mgr->peers_replaced_total);
+  }
 
   /* Check if we should trigger ping contest countdown.
    * Wait for 12 sync-candidate peers, then wait 12 more seconds. */

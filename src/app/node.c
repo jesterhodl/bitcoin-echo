@@ -151,6 +151,7 @@ static echo_result_t sync_cb_get_block_hash_at_height(uint32_t height,
                                                        void *ctx);
 static size_t sync_cb_cull_slow_peers(size_t target_count, void *ctx);
 static void sync_cb_evict_peer(peer_t *peer, const char *reason, void *ctx);
+static void sync_cb_request_new_peers(size_t count, void *ctx);
 
 /*
  * ============================================================================
@@ -1879,6 +1880,87 @@ static void sync_cb_evict_peer(peer_t *peer, const char *reason, void *ctx) {
 }
 
 /**
+ * Request new peer connections from the address pool.
+ *
+ * Called after evicting underperformers during rotation to immediately
+ * fill the slots with fresh peers. Uses the same connection logic as
+ * the main event loop but triggers it immediately rather than waiting.
+ */
+static void sync_cb_request_new_peers(size_t count, void *ctx) {
+  node_t *node = (node_t *)ctx;
+  if (node == NULL || count == 0) {
+    return;
+  }
+
+  size_t connected = 0;
+  size_t attempts = 0;
+  size_t max_attempts = count * 3; /* Try up to 3x addresses to fill slots */
+
+  while (connected < count && attempts < max_attempts) {
+    attempts++;
+
+    /* Select address from pool */
+    net_addr_t addr;
+    echo_result_t addr_result =
+        discovery_select_outbound_address(&node->addr_manager, &addr);
+    if (addr_result != ECHO_OK) {
+      log_debug(LOG_COMP_NET,
+                "No addresses available for replacement (connected %zu/%zu)",
+                connected, count);
+      break;
+    }
+
+    /* Find empty slot */
+    bool slot_found = false;
+    for (size_t i = 0; i < NODE_MAX_PEERS; i++) {
+      peer_t *peer = &node->peers[i];
+      if (!peer_is_connected(peer)) {
+        /* Convert IPv4-mapped IPv6 address to string */
+        char ip_str[64];
+        snprintf(ip_str, sizeof(ip_str), "%d.%d.%d.%d", addr.ip[12],
+                 addr.ip[13], addr.ip[14], addr.ip[15]);
+
+        log_info(LOG_COMP_NET, "Rotation replacement: connecting to %s:%u",
+                 ip_str, addr.port);
+
+        /* Mark address as in-use and record attempt */
+        discovery_mark_address_in_use(&node->addr_manager, &addr);
+        discovery_mark_attempt(&node->addr_manager, &addr);
+
+        uint64_t nonce = generate_nonce();
+        echo_result_t result = peer_connect(peer, ip_str, addr.port, nonce);
+        if (result == ECHO_OK) {
+          /* Send version message to start handshake */
+          uint32_t our_height = 0;
+          if (node->consensus != NULL) {
+            our_height = consensus_get_height(node->consensus);
+          }
+          uint64_t services = node_is_pruning_enabled(node) ? 0 : 1;
+          peer_send_version(peer, services, (int32_t)our_height, true);
+          connected++;
+        } else {
+          log_warn(LOG_COMP_NET, "Failed to connect to replacement %s:%u",
+                   ip_str, addr.port);
+          discovery_mark_address_free(&node->addr_manager, &addr, ECHO_FALSE);
+          /* Don't break - try another address */
+        }
+        slot_found = true;
+        break;
+      }
+    }
+
+    if (!slot_found) {
+      log_warn(LOG_COMP_NET, "No empty slots for replacement peers");
+      break;
+    }
+  }
+
+  log_info(LOG_COMP_NET, "Rotation replacement: connected %zu/%zu new peers "
+           "(tried %zu addresses)",
+           connected, count, attempts);
+}
+
+/**
  * Get block hash at height from the database.
  *
  * Used for efficient block queueing - avoids walking back through
@@ -1966,6 +2048,7 @@ static echo_result_t node_init_sync(node_t *node) {
       .flush_headers = NULL,
       .cull_slow_peers = sync_cb_cull_slow_peers,
       .evict_peer = sync_cb_evict_peer,
+      .request_new_peers = sync_cb_request_new_peers,
       .ctx = node};
 
   /* Create sync manager with appropriate download window for mode */

@@ -186,6 +186,58 @@ static void test_der_negative(void)
     }
 }
 
+/*
+ * Test lax parser accepts signature from block 124276 tx 4 input 0.
+ * This signature has double leading zeros in both r and s (74 bytes total).
+ */
+static void test_lax_block124276_sig(void)
+{
+    secp256k1_ecdsa_sig_t sig;
+    /* Actual signature from block 124276 - both r and s have 2 extra leading zeros */
+    uint8_t der[] = {
+        0x30, 0x48,  /* SEQUENCE, 72 bytes */
+        0x02, 0x22,  /* INTEGER r, 34 bytes */
+        0x00, 0x00, 0x2b, 0x83, 0xd5, 0x9c, 0x1d, 0x23,
+        0xc0, 0x8e, 0xfd, 0x82, 0xee, 0x06, 0x62, 0xfe,
+        0xc2, 0x33, 0x09, 0xc3, 0xad, 0xbc, 0xbd, 0x1f,
+        0x0b, 0x86, 0x95, 0x37, 0x8d, 0xb4, 0xb1, 0x4e,
+        0x73, 0x66,
+        0x02, 0x22,  /* INTEGER s, 34 bytes */
+        0x00, 0x00, 0x33, 0x4a, 0x96, 0x67, 0x6e, 0x58,
+        0xb1, 0xbb, 0x01, 0x78, 0x4c, 0xb7, 0xc5, 0x56,
+        0xdd, 0x8c, 0xe1, 0xc2, 0x20, 0x17, 0x19, 0x04,
+        0xda, 0x22, 0xe1, 0x8f, 0xe1, 0xe7, 0xd1, 0x51,
+        0x0d, 0xb5
+    };
+
+    /* Strict parser should reject (unnecessary leading zeros) */
+    test_case("Strict DER rejects block 124276 sig");
+    if (!secp256k1_ecdsa_sig_parse_der(&sig, der, sizeof(der))) {
+        test_pass();
+    } else {
+        test_fail("Strict parser accepted invalid sig");
+    }
+
+    /* Lax parser should accept */
+    test_case("Lax DER accepts block 124276 sig");
+    if (secp256k1_ecdsa_sig_parse_der_lax(&sig, der, sizeof(der))) {
+        test_pass();
+    } else {
+        test_fail("Lax parser rejected valid pre-BIP66 sig");
+    }
+
+    /* Verify the parsed r value is correct (after stripping zeros) */
+    uint8_t r_bytes[32];
+    secp256k1_scalar_get_bytes(r_bytes, &sig.r);
+    test_case("Lax parser extracts correct r value");
+    /* r should be 0x2b83d59c... (without leading zeros) */
+    if (r_bytes[0] == 0x2b && r_bytes[1] == 0x83) {
+        test_pass();
+    } else {
+        test_fail("Wrong r value extracted");
+    }
+}
+
 static void test_der_zero_r(void)
 {
     secp256k1_ecdsa_sig_t sig;
@@ -644,6 +696,7 @@ int main(void)
     test_der_zero_r();
     test_der_length_mismatch();
     test_der_extra_bytes();
+    test_lax_block124276_sig();
 
     test_section("Scalar Arithmetic");
     test_scalar_mul_basic();

@@ -113,7 +113,7 @@ static void test_sig_verify_ecdsa_valid(void)
         32);
 
     test_case("ECDSA valid signature via sig_verify");
-    if (sig_verify(SIG_ECDSA, sig, sizeof(sig), hash, pubkey, 33)) {
+    if (sig_verify(SIG_ECDSA, sig, sizeof(sig), hash, pubkey, 33, 0)) {
         test_pass();
     } else {
         test_fail("Valid ECDSA signature rejected");
@@ -148,7 +148,7 @@ static void test_sig_verify_ecdsa_wrong_hash(void)
         32);
 
     test_case("ECDSA reject wrong hash");
-    if (!sig_verify(SIG_ECDSA, sig, sizeof(sig), hash, pubkey, 33)) {
+    if (!sig_verify(SIG_ECDSA, sig, sizeof(sig), hash, pubkey, 33, 0)) {
         test_pass();
     } else {
         test_fail("ECDSA accepted signature with wrong hash");
@@ -169,7 +169,7 @@ static void test_sig_verify_ecdsa_invalid_sig_len(void)
         32);
 
     test_case("ECDSA reject invalid sig length");
-    if (!sig_verify(SIG_ECDSA, sig, sizeof(sig), hash, pubkey, 33)) {
+    if (!sig_verify(SIG_ECDSA, sig, sizeof(sig), hash, pubkey, 33, 0)) {
         test_pass();
     } else {
         test_fail("ECDSA accepted invalid signature length");
@@ -200,7 +200,7 @@ static void test_sig_verify_ecdsa_invalid_pubkey_len(void)
         32);
 
     test_case("ECDSA reject invalid pubkey length");
-    if (!sig_verify(SIG_ECDSA, sig, sizeof(sig), hash, pubkey, 32)) {
+    if (!sig_verify(SIG_ECDSA, sig, sizeof(sig), hash, pubkey, 32, 0)) {
         test_pass();
     } else {
         test_fail("ECDSA accepted invalid pubkey length");
@@ -227,7 +227,7 @@ static void test_sig_verify_schnorr_valid(void)
         "25f66a4a85ea8b71e482a74f382d2ce5ebeee8fdb2172f477df4900d310536c0", 64);
 
     test_case("Schnorr valid signature via sig_verify");
-    if (sig_verify(SIG_SCHNORR, sig, 64, hash, pubkey, 32)) {
+    if (sig_verify(SIG_SCHNORR, sig, 64, hash, pubkey, 32, 0)) {
         test_pass();
     } else {
         test_fail("Valid Schnorr signature rejected");
@@ -248,7 +248,7 @@ static void test_sig_verify_schnorr_wrong_hash(void)
         "25f66a4a85ea8b71e482a74f382d2ce5ebeee8fdb2172f477df4900d310536c0", 64);
 
     test_case("Schnorr reject wrong hash");
-    if (!sig_verify(SIG_SCHNORR, sig, 64, hash, pubkey, 32)) {
+    if (!sig_verify(SIG_SCHNORR, sig, 64, hash, pubkey, 32, 0)) {
         test_pass();
     } else {
         test_fail("Schnorr accepted signature with wrong hash");
@@ -266,7 +266,7 @@ static void test_sig_verify_schnorr_invalid_sig_len(void)
     memset(sig, 0, 32);
 
     test_case("Schnorr reject invalid sig length");
-    if (!sig_verify(SIG_SCHNORR, sig, 32, hash, pubkey, 32)) {
+    if (!sig_verify(SIG_SCHNORR, sig, 32, hash, pubkey, 32, 0)) {
         test_pass();
     } else {
         test_fail("Schnorr accepted invalid signature length");
@@ -284,7 +284,7 @@ static void test_sig_verify_schnorr_invalid_pubkey_len(void)
     memset(sig, 0, 64);
 
     test_case("Schnorr reject invalid pubkey length");
-    if (!sig_verify(SIG_SCHNORR, sig, 64, hash, pubkey, 33)) {
+    if (!sig_verify(SIG_SCHNORR, sig, 64, hash, pubkey, 33, 0)) {
         test_pass();
     } else {
         test_fail("Schnorr accepted invalid pubkey length");
@@ -306,7 +306,7 @@ static void test_sig_verify_unknown_type(void)
     memset(sig, 0, 64);
 
     test_case("Reject unknown signature type");
-    if (!sig_verify((sig_type_t)999, sig, 64, hash, pubkey, 33)) {
+    if (!sig_verify((sig_type_t)999, sig, 64, hash, pubkey, 33, 0)) {
         test_pass();
     } else {
         test_fail("Unknown signature type accepted");
@@ -327,9 +327,9 @@ static void test_sig_verify_null_inputs(void)
 
     /* All NULL combinations should fail */
     int failed = 0;
-    if (sig_verify(SIG_ECDSA, NULL, 64, data, data, 33)) failed = 1;
-    if (sig_verify(SIG_ECDSA, data, 64, NULL, data, 33)) failed = 1;
-    if (sig_verify(SIG_ECDSA, data, 64, data, NULL, 33)) failed = 1;
+    if (sig_verify(SIG_ECDSA, NULL, 64, data, data, 33, 0)) failed = 1;
+    if (sig_verify(SIG_ECDSA, data, 64, NULL, data, 33, 0)) failed = 1;
+    if (sig_verify(SIG_ECDSA, data, 64, data, NULL, 33, 0)) failed = 1;
 
     test_case("Reject NULL inputs");
     if (!failed) {

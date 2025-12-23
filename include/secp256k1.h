@@ -319,6 +319,22 @@ int secp256k1_ecdsa_sig_parse_der(secp256k1_ecdsa_sig_t *sig,
                                   const uint8_t *data, size_t len);
 
 /*
+ * Parse DER-encoded ECDSA signature (lax mode for pre-BIP-66 blocks).
+ *
+ * This is a permissive parser for historical Bitcoin signatures that may have:
+ *   - Unnecessary leading zero bytes in r or s
+ *   - Non-minimal length encodings
+ *
+ * Used for blocks before BIP-66 activation (height 363725 on mainnet).
+ * For new signatures, use secp256k1_ecdsa_sig_parse_der() which enforces
+ * strict BIP-66 encoding rules.
+ *
+ * Returns 1 on success, 0 on failure.
+ */
+int secp256k1_ecdsa_sig_parse_der_lax(secp256k1_ecdsa_sig_t *sig,
+                                      const uint8_t *data, size_t len);
+
+/*
  * Verify ECDSA signature.
  *
  * Algorithm:

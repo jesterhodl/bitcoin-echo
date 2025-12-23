@@ -45,6 +45,13 @@ typedef enum {
 } sig_type_t;
 
 /*
+ * Signature verification flags.
+ * These correspond to script verification flags and control how
+ * signatures are parsed and validated.
+ */
+#define SIG_VERIFY_STRICT_DER 0x01 /* BIP-66: Strict DER encoding required */
+
+/*
  * Verify a signature against a message hash and public key.
  *
  * This is the unified entry point for all signature verification
@@ -59,6 +66,7 @@ typedef enum {
  *   hash       - 32-byte message hash (sighash)
  *   pubkey     - public key bytes
  *   pubkey_len - public key length
+ *   flags      - verification flags (e.g., SIG_VERIFY_STRICT_DER)
  *
  * Returns:
  *   1 if signature is valid
@@ -69,13 +77,17 @@ typedef enum {
  * For ECDSA (SIG_ECDSA):
  *   - sig: DER-encoded signature (variable length, typically 70-72 bytes)
  *   - pubkey: compressed (33 bytes) or uncompressed (65 bytes)
+ *   - If SIG_VERIFY_STRICT_DER is set, uses strict BIP-66 DER parsing
+ *   - If not set, uses lax parsing for pre-BIP-66 historical signatures
  *
  * For Schnorr (SIG_SCHNORR):
  *   - sig: 64-byte signature (r || s)
  *   - pubkey: 32-byte x-only public key
+ *   - flags are ignored (Schnorr has its own fixed format)
  */
 int sig_verify(sig_type_t type, const uint8_t *sig, size_t sig_len,
-               const uint8_t *hash, const uint8_t *pubkey, size_t pubkey_len);
+               const uint8_t *hash, const uint8_t *pubkey, size_t pubkey_len,
+               uint32_t flags);
 
 /*
  * Check whether a signature type is known.

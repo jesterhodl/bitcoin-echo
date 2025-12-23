@@ -1322,6 +1322,132 @@ int secp256k1_ecdsa_sig_parse_der(secp256k1_ecdsa_sig_t *sig,
 }
 
 /*
+ * Parse DER-encoded ECDSA signature (lax mode for pre-BIP-66 blocks).
+ *
+ * This is a permissive parser that allows:
+ *   - Unnecessary leading zero bytes in r or s
+ *   - Non-minimal length encodings
+ *
+ * Used for historical Bitcoin signatures before BIP-66 activation.
+ * Same as strict parser but without the "unnecessary leading zero" checks.
+ */
+int secp256k1_ecdsa_sig_parse_der_lax(secp256k1_ecdsa_sig_t *sig,
+                                      const uint8_t *data, size_t len) {
+  size_t pos = 0;
+  size_t r_len, s_len;
+  size_t r_pos, s_pos;
+  uint8_t padded[32];
+
+  /* Minimum valid signature: 30 06 02 01 XX 02 01 XX = 8 bytes */
+  /* LAX: No upper bound - pre-BIP-66 allowed extra leading zeros */
+  if (len < 8) {
+    return 0;
+  }
+
+  /* Check SEQUENCE tag */
+  if (data[pos++] != 0x30) {
+    return 0;
+  }
+
+  /* LAX: Accept length byte even if it doesn't match exactly */
+  pos++;
+
+  /* Parse r INTEGER */
+  if (data[pos++] != 0x02) {
+    return 0;
+  }
+
+  r_len = data[pos++];
+  if (r_len == 0) {
+    return 0;
+  }
+  if (pos + r_len > len) {
+    return 0;
+  }
+  r_pos = pos;
+
+  /* Check for negative (high bit set without leading zero) */
+  if (data[r_pos] & 0x80) {
+    return 0; /* Negative integer not allowed */
+  }
+
+  /* LAX: Skip unnecessary leading zeros to find the actual value */
+  while (r_len > 1 && data[r_pos] == 0 && !(data[r_pos + 1] & 0x80)) {
+    r_pos++;
+    r_len--;
+  }
+
+  /* After stripping, value must fit in 32 bytes (or 33 with sign byte) */
+  if (r_len > 33) {
+    return 0;
+  }
+
+  pos += data[pos - 1]; /* Advance past original r bytes (use original length) */
+  /* Recalculate: pos was at r data start, original r_len is at data[3] */
+  pos = 4 + data[3];
+
+  /* Parse s INTEGER */
+  if (pos >= len || data[pos++] != 0x02) {
+    return 0;
+  }
+
+  s_len = data[pos++];
+  if (s_len == 0) {
+    return 0;
+  }
+  if (pos + s_len > len) {
+    return 0;
+  }
+  s_pos = pos;
+
+  /* Check for negative */
+  if (data[s_pos] & 0x80) {
+    return 0;
+  }
+
+  /* LAX: Skip unnecessary leading zeros */
+  while (s_len > 1 && data[s_pos] == 0 && !(data[s_pos + 1] & 0x80)) {
+    s_pos++;
+    s_len--;
+  }
+
+  if (s_len > 33) {
+    return 0;
+  }
+
+  /* Convert r to scalar (pad to 32 bytes) */
+  memset(padded, 0, 32);
+  if (r_len <= 32) {
+    memcpy(padded + (32 - r_len), data + r_pos, r_len);
+  } else {
+    /* 33 bytes with leading zero for sign - skip the zero */
+    memcpy(padded, data + r_pos + 1, 32);
+  }
+  secp256k1_scalar_set_bytes(&sig->r, padded);
+
+  /* Check r != 0 */
+  if (secp256k1_scalar_is_zero(&sig->r)) {
+    return 0;
+  }
+
+  /* Convert s to scalar */
+  memset(padded, 0, 32);
+  if (s_len <= 32) {
+    memcpy(padded + (32 - s_len), data + s_pos, s_len);
+  } else {
+    memcpy(padded, data + s_pos + 1, 32);
+  }
+  secp256k1_scalar_set_bytes(&sig->s, padded);
+
+  /* Check s != 0 */
+  if (secp256k1_scalar_is_zero(&sig->s)) {
+    return 0;
+  }
+
+  return 1;
+}
+
+/*
  * ECDSA verification.
  *
  * Algorithm:
