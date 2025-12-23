@@ -478,6 +478,13 @@ echo_result_t tx_validate_input(const tx_t *tx, size_t input_index,
       if (elem.data)
         free(elem.data);
 
+      /* Set the redeem script as script_code for sighash computation.
+       * This is critical: for P2SH, the sighash must use the redeem script,
+       * not the scriptPubKey. */
+      ctx.script_code = redeem_script;
+      ctx.script_code_len = redeem_len;
+      ctx.codesep_pos = 0;
+
       /* Execute redeem script */
       res = script_execute(&ctx, redeem_script, redeem_len);
       if (res != ECHO_OK) {
