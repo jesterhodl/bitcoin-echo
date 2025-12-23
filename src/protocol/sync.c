@@ -135,9 +135,8 @@ struct sync_manager {
   /* IBD profiling: Rate-limited progress logging (every 30s) */
   uint64_t last_progress_log_time;
 
-  /* Peer quality network baseline for adaptive slot allocation */
-  uint64_t network_median_latency_ms;  /* Median block latency across all peers */
-  uint64_t last_quality_update_time;   /* Last time quality scores recalculated */
+  /* Network latency baseline (kept for API compatibility, currently always 0) */
+  uint64_t network_median_latency_ms;
 
   /* Headers-first sync: single peer for header download (avoids 8x redundant requests) */
   size_t headers_sync_peer_idx;        /* Index into peers[] array */
@@ -185,39 +184,6 @@ struct sync_manager {
   pending_header_t *pending_headers;      /* Dynamic array of pending headers */
   size_t pending_headers_count;           /* Number of queued headers */
   size_t pending_headers_capacity;        /* Allocated capacity */
-
-  /*
-   * CONTINUOUS PEER ROTATION (Phase 2)
-   *
-   * Every 60 seconds during IBD, evaluate peer performance and rotate
-   * out the worst performers. This finds hidden gems among peers that
-   * may have been slow initially but improved, and discards peers that
-   * degraded after initial assessment.
-   */
-  uint64_t last_rotation_time;            /* Last time we rotated peers (ms) */
-  uint32_t rotation_cycle_count;          /* Number of rotation cycles completed */
-  uint32_t peers_evicted_total;           /* Total peers evicted via rotation */
-  uint32_t peers_replaced_total;          /* Total replacement peers connected */
-
-  /*
-   * PRIORITY PEER POOL (Phase 3)
-   *
-   * Separate peer pools for critical vs speculative block requests.
-   * The priority pool contains the top SYNC_PRIORITY_POOL_SIZE performers
-   * by delivery rate. These peers are dedicated to racing for critical
-   * blocks (the next N blocks needed for validation).
-   *
-   * Priority pool peers are NEVER assigned speculative blocks - their
-   * slots are reserved exclusively for critical path work. This ensures
-   * the most important blocks always get maximum attention from our
-   * best peers.
-   *
-   * General pool (all non-priority peers) handles speculative downloads
-   * that fill the pipeline while we wait for critical blocks.
-   */
-  size_t priority_pool[SYNC_PRIORITY_POOL_SIZE]; /* Indices into peers[] array */
-  size_t priority_pool_count;                    /* Current priority pool size */
-  uint64_t last_priority_update_time;            /* Last priority pool update (ms) */
 };
 
 /* ============================================================================
@@ -838,578 +804,6 @@ find_best_header_peer(sync_manager_t *mgr) {
   return best;
 }
 
-/* ============================================================================
- * Peer Quality Rating System
- *
- * Enables adaptive slot allocation and aggressive eviction of slow peers.
- * Fast peers get more download slots (up to 32), slow peers get fewer (min 4).
- * Peers significantly slower than the network median are disconnected.
- * ============================================================================
- */
-
-/**
- * Calculate peer quality score (0-1000, higher = better).
- *
- * Combines three factors weighted for IBD optimization:
- * - Block latency (60%): Primary factor, rewards fast peers
- * - Reliability (30%): Penalizes stalls/timeouts heavily
- * - Throughput (10%): Tiebreaker based on blocks per minute
- *
- * @param ps       Peer sync state
- * @param median   Network median latency (0 uses default 1000ms)
- * @param now      Current timestamp in milliseconds
- * @return         Quality score 0-1000
- */
-static uint16_t calculate_quality_score(const peer_sync_state_t *ps,
-                                        uint64_t median, uint64_t now) {
-  uint16_t score = 0;
-
-  /* Latency component: 600 points max
-   * ratio = median / peer_latency
-   * If peer == median: ratio = 1.0 -> 600 points
-   * If peer 2x slower: ratio = 0.5 -> 300 points
-   * If peer 2x faster: ratio = 2.0 -> capped at 600
-   */
-  if (ps->avg_block_latency_ms > 0 && ps->latency_samples >= 5) {
-    uint64_t base_median = median > 0 ? median : 1000;
-    /* Calculate ratio * 100 to avoid floating point */
-    uint64_t ratio_x100 = (base_median * 100) / ps->avg_block_latency_ms;
-    uint16_t latency_score = (uint16_t)((ratio_x100 * 600) / 100);
-    if (latency_score > 600) {
-      latency_score = 600;
-    }
-    score += latency_score;
-  } else {
-    /* Not enough samples - neutral score until proven */
-    score += 300;
-  }
-
-  /* Reliability component: 300 points max
-   * Each timeout costs 50 points (harsh penalty for unreliability)
-   * 0 timeouts = 300 pts, 6 timeouts = 0 pts
-   */
-  uint16_t timeout_penalty = ps->timeout_count * 50;
-  if (timeout_penalty > 300) {
-    timeout_penalty = 300;
-  }
-  score += (300 - timeout_penalty);
-
-  /* Throughput component: 100 points max
-   * Blocks per minute * 10, capped at 100
-   * 10 blocks/min = 100 pts
-   */
-  if (ps->first_block_time > 0 && ps->blocks_received > 0 &&
-      now > ps->first_block_time) {
-    uint64_t duration_ms = now - ps->first_block_time;
-    /* blocks_per_min = blocks_received * 60000 / duration_ms */
-    uint64_t bpm_x10 = (ps->blocks_received * 600000) / duration_ms;
-    uint16_t throughput_score = (uint16_t)(bpm_x10 > 100 ? 100 : bpm_x10);
-    score += throughput_score;
-  }
-
-  return score;
-}
-
-/**
- * RESERVED CAPACITY: Leave room for urgent requests!
- *
- * If we fill all 16 slots with speculative blocks, there's no room left
- * when we desperately need the blocking block. Reserve slots for urgent work.
- *
- * Normal/speculative requests: 12 slots max (32 peers × 12 = 384 parallel)
- * Reserved for urgent (BLAST): 4 slots per peer (32 peers × 4 = 128 emergency)
- *
- * @param quality_score  Peer quality score (0-1000) - currently unused
- * @return               Maximum slots for normal requests (12)
- */
-#define SLOTS_RESERVED_FOR_URGENT 4
-static uint16_t calculate_max_slots(uint16_t quality_score) {
-  (void)quality_score;
-  return SYNC_MAX_BLOCKS_PER_PEER - SLOTS_RESERVED_FOR_URGENT; /* 12 */
-}
-
-/**
- * Recalculate peer quality scores and slot allocations.
- *
- * Called every 5 seconds during SYNC_MODE_BLOCKS to:
- * 1. Calculate network median latency from all peers with sufficient samples
- * 2. Update each peer's quality_score based on relative performance
- * 3. Adjust max_slots dynamically (4-32 based on quality)
- *
- * @param mgr  Sync manager
- */
-static void update_peer_quality(sync_manager_t *mgr) {
-  uint64_t now = plat_time_ms();
-
-  /* Rate limit: only update every 5 seconds */
-  if (now - mgr->last_quality_update_time < 5000) {
-    return;
-  }
-  mgr->last_quality_update_time = now;
-
-  /* Collect latencies from peers with sufficient samples for median calc */
-  uint64_t latencies[SYNC_MAX_PEERS];
-  size_t latency_count = 0;
-
-  for (size_t i = 0; i < mgr->peer_count; i++) {
-    peer_sync_state_t *ps = &mgr->peers[i];
-    if (ps->avg_block_latency_ms > 0 && ps->latency_samples >= 5) {
-      latencies[latency_count++] = ps->avg_block_latency_ms;
-    }
-  }
-
-  /* Calculate median latency (simple bubble sort for small N) */
-  if (latency_count >= 3) {
-    /* Sort latencies ascending */
-    for (size_t i = 0; i < latency_count - 1; i++) {
-      for (size_t j = 0; j < latency_count - i - 1; j++) {
-        if (latencies[j] > latencies[j + 1]) {
-          uint64_t tmp = latencies[j];
-          latencies[j] = latencies[j + 1];
-          latencies[j + 1] = tmp;
-        }
-      }
-    }
-    mgr->network_median_latency_ms = latencies[latency_count / 2];
-  } else {
-    /* Not enough data - use reasonable default */
-    mgr->network_median_latency_ms = 1000; /* 1 second */
-  }
-
-  /* Update each peer's quality score and max_slots */
-  for (size_t i = 0; i < mgr->peer_count; i++) {
-    peer_sync_state_t *ps = &mgr->peers[i];
-    ps->quality_score =
-        calculate_quality_score(ps, mgr->network_median_latency_ms, now);
-    uint16_t new_slots = calculate_max_slots(ps->quality_score);
-
-    /*
-     * Never reduce max_slots below current in-flight count.
-     * This prevents capacity deadlock during network-wide slowdowns where
-     * all peers timeout simultaneously and get penalized together.
-     */
-    if (new_slots < ps->blocks_in_flight_count) {
-      new_slots = (uint16_t)ps->blocks_in_flight_count;
-    }
-    ps->max_slots = new_slots;
-
-    /* Log quality metrics for debugging (only peers with samples) */
-    if (ps->latency_samples > 0) {
-      log_debug(LOG_COMP_SYNC,
-                "Peer %s quality: score=%u slots=%u latency=%lums "
-                "samples=%u timeouts=%u",
-                ps->peer->address, ps->quality_score, ps->max_slots,
-                (unsigned long)ps->avg_block_latency_ms, ps->latency_samples,
-                ps->timeout_count);
-    }
-  }
-
-  /* Log network baseline */
-  log_debug(LOG_COMP_SYNC, "Network quality baseline: median_latency=%lums "
-                           "(from %zu peers with samples)",
-            (unsigned long)mgr->network_median_latency_ms, latency_count);
-}
-
-/* ============================================================================
- * Continuous Peer Rotation (Phase 2)
- * ============================================================================
- *
- * Every 60 seconds during IBD, evaluate recent peer performance and rotate
- * out the worst performers. This complements the initial ping contest with
- * ongoing assessment during actual block delivery.
- *
- * Key insight: A peer's RTT during ping contest doesn't guarantee good
- * block delivery. Network conditions change, peers get congested, etc.
- * Continuous rotation finds hidden gems and discards degraded peers.
- */
-
-/**
- * Calculate delivery rate for a peer in the current rotation window.
- *
- * @param ps   Peer sync state
- * @param now  Current timestamp (ms)
- * @return     Delivery rate (blocks per minute), 0 if insufficient data
- */
-static float calculate_delivery_rate(const peer_sync_state_t *ps, uint64_t now) {
-  /* Need evaluation window to have started */
-  if (ps->rotation_eval_start == 0) {
-    return 0.0f;
-  }
-
-  uint64_t elapsed_ms = now - ps->rotation_eval_start;
-  if (elapsed_ms < 10000) { /* Need at least 10 seconds */
-    return 0.0f;
-  }
-
-  /* Rate = blocks delivered per minute */
-  float minutes = (float)elapsed_ms / 60000.0f;
-  if (minutes < 0.001f) {
-    return 0.0f;
-  }
-
-  return (float)ps->rotation_blocks_recv / minutes;
-}
-
-/**
- * Structure for sorting peers by performance (worst first).
- */
-typedef struct {
-  size_t idx;           /* Index in mgr->peers[] */
-  float delivery_rate;  /* Blocks per minute */
-  uint32_t timeouts;    /* Timeout count in window */
-  bool eligible;        /* Eligible for eviction */
-} rotation_candidate_t;
-
-/**
- * Compare rotation candidates - worst performers sort first.
- * Criteria: lowest delivery rate, then highest timeout count.
- */
-static int compare_rotation_candidates(const void *a, const void *b) {
-  const rotation_candidate_t *ca = (const rotation_candidate_t *)a;
-  const rotation_candidate_t *cb = (const rotation_candidate_t *)b;
-
-  /* Non-eligible peers go to the end (we don't evict them) */
-  if (!ca->eligible && cb->eligible) return 1;
-  if (ca->eligible && !cb->eligible) return -1;
-  if (!ca->eligible && !cb->eligible) return 0;
-
-  /* Lowest delivery rate = worst = sorts first */
-  if (ca->delivery_rate < cb->delivery_rate) return -1;
-  if (ca->delivery_rate > cb->delivery_rate) return 1;
-
-  /* Tiebreaker: highest timeout count = worst */
-  if (ca->timeouts > cb->timeouts) return -1;
-  if (ca->timeouts < cb->timeouts) return 1;
-
-  return 0;
-}
-
-/**
- * Rotate peers during IBD - evict worst performers and try new ones.
- *
- * Called every SYNC_ROTATION_INTERVAL_MS (60s) during SYNC_MODE_BLOCKS.
- * Identifies the bottom SYNC_ROTATION_COUNT (3) performers and evicts them,
- * allowing the node to try fresh peers from the address pool.
- *
- * @param mgr  Sync manager
- */
-static void sync_rotate_peers(sync_manager_t *mgr) {
-  uint64_t now = plat_time_ms();
-
-  /* Rate limit: only rotate every SYNC_ROTATION_INTERVAL_MS */
-  if (now - mgr->last_rotation_time < SYNC_ROTATION_INTERVAL_MS) {
-    return;
-  }
-
-  /* Only rotate during block sync (not headers, not done) */
-  if (mgr->mode != SYNC_MODE_BLOCKS) {
-    return;
-  }
-
-  /* Need evict callback to actually evict peers */
-  if (!mgr->callbacks.evict_peer) {
-    return;
-  }
-
-  mgr->last_rotation_time = now;
-  mgr->rotation_cycle_count++;
-
-  log_info(LOG_COMP_SYNC, "Peer rotation cycle %u starting (evaluating %zu peers)",
-           mgr->rotation_cycle_count, mgr->peer_count);
-
-  /* Build candidate list with performance metrics */
-  rotation_candidate_t candidates[SYNC_MAX_PEERS];
-  size_t candidate_count = 0;
-
-  for (size_t i = 0; i < mgr->peer_count; i++) {
-    peer_sync_state_t *ps = &mgr->peers[i];
-
-    /* Skip peers that aren't ready or aren't sync candidates */
-    if (!ps->sync_candidate || !peer_is_ready(ps->peer)) {
-      continue;
-    }
-
-    rotation_candidate_t *c = &candidates[candidate_count++];
-    c->idx = i;
-    c->delivery_rate = calculate_delivery_rate(ps, now);
-    c->timeouts = ps->timeout_count;
-
-    /* Eligibility check: peer must have had fair evaluation period */
-    uint64_t eval_time = now - ps->rotation_eval_start;
-    bool had_time = (ps->rotation_eval_start > 0) &&
-                    (eval_time >= SYNC_ROTATION_MIN_EVAL_TIME_MS);
-    bool had_opportunity = ps->rotation_blocks_req >= SYNC_ROTATION_MIN_EVAL_BLOCKS;
-
-    c->eligible = had_time && had_opportunity;
-
-    log_debug(LOG_COMP_SYNC,
-              "Rotation candidate: %s rate=%.1f blk/min timeouts=%u eligible=%s "
-              "(eval_time=%llums blocks_req=%u blocks_recv=%u)",
-              ps->peer->address, c->delivery_rate, c->timeouts,
-              c->eligible ? "yes" : "no",
-              (unsigned long long)eval_time,
-              ps->rotation_blocks_req, ps->rotation_blocks_recv);
-  }
-
-  /* Need enough candidates to rotate */
-  if (candidate_count < SYNC_ROTATION_COUNT + 2) {
-    log_info(LOG_COMP_SYNC, "Rotation: too few candidates (%zu), skipping",
-             candidate_count);
-    /* Reset windows for next cycle anyway */
-    goto reset_windows;
-  }
-
-  /* Don't evict below minimum peer threshold */
-  size_t active_peers = candidate_count;
-  size_t max_evictions = 0;
-  if (active_peers > SYNC_ROTATION_MIN_PEERS) {
-    max_evictions = active_peers - SYNC_ROTATION_MIN_PEERS;
-    if (max_evictions > SYNC_ROTATION_COUNT) {
-      max_evictions = SYNC_ROTATION_COUNT;
-    }
-  }
-  if (max_evictions == 0) {
-    log_info(LOG_COMP_SYNC,
-             "Rotation: at minimum peer threshold (%zu peers), skipping eviction",
-             active_peers);
-    goto reset_windows;
-  }
-
-  /* Sort by performance (worst first) */
-  qsort(candidates, candidate_count, sizeof(rotation_candidate_t),
-        compare_rotation_candidates);
-
-  /* Evict the worst performers (up to max_evictions) */
-  size_t evicted = 0;
-  for (size_t i = 0; i < candidate_count && evicted < max_evictions; i++) {
-    rotation_candidate_t *c = &candidates[i];
-
-    if (!c->eligible) {
-      continue; /* Skip peers that haven't had fair evaluation */
-    }
-
-    peer_sync_state_t *ps = &mgr->peers[c->idx];
-
-    /* Don't evict if peer is currently serving blocks we need urgently */
-    if (ps->blocks_in_flight_count > 0) {
-      /* Check if any in-flight blocks are critical (within 8 of validated tip) */
-      uint32_t validated_height = chainstate_get_height(mgr->chainstate);
-      block_index_map_t *index_map = chainstate_get_block_index_map(mgr->chainstate);
-      bool has_critical = false;
-      for (size_t j = 0; j < ps->blocks_in_flight_count; j++) {
-        block_index_t *idx = block_index_map_lookup(
-            index_map, &ps->blocks_in_flight[j]);
-        if (idx && idx->height <= validated_height + 8) {
-          has_critical = true;
-          break;
-        }
-      }
-      if (has_critical) {
-        log_debug(LOG_COMP_SYNC,
-                  "Rotation: skipping %s (has critical blocks in flight)",
-                  ps->peer->address);
-        continue;
-      }
-    }
-
-    /* Build eviction reason string */
-    char reason[128];
-    snprintf(reason, sizeof(reason),
-             "Poor IBD performance (rate=%.1f blk/min, timeouts=%u)",
-             c->delivery_rate, c->timeouts);
-
-    log_info(LOG_COMP_SYNC, "Rotation: evicting %s - %s",
-             ps->peer->address, reason);
-
-    /* Request eviction via callback */
-    mgr->callbacks.evict_peer(ps->peer, reason, mgr->callbacks.ctx);
-    mgr->peers_evicted_total++;
-    evicted++;
-  }
-
-  log_info(LOG_COMP_SYNC,
-           "Rotation cycle %u complete: evicted %zu peers "
-           "(total evicted: %u, total replaced: %u)",
-           mgr->rotation_cycle_count, evicted,
-           mgr->peers_evicted_total, mgr->peers_replaced_total);
-
-  /* Request replacement peers from the address pool */
-  if (evicted > 0 && mgr->callbacks.request_new_peers) {
-    log_info(LOG_COMP_SYNC, "Requesting %zu replacement peers from address pool",
-             evicted);
-    mgr->callbacks.request_new_peers(evicted, mgr->callbacks.ctx);
-  }
-
-reset_windows:
-  /* Reset windowed metrics for all peers for next evaluation cycle */
-  for (size_t i = 0; i < mgr->peer_count; i++) {
-    peer_sync_state_t *ps = &mgr->peers[i];
-    ps->rotation_eval_start = now;
-    ps->rotation_blocks_recv = 0;
-    ps->rotation_blocks_req = 0;
-  }
-}
-
-/* ============================================================================
- * Priority Peer Pool (Phase 3)
- *
- * Separate pools for critical vs speculative block requests.
- * Top performers are dedicated to racing for critical blocks.
- * ============================================================================
- */
-
-/**
- * Structure for sorting peers by performance (best first, for priority pool).
- */
-typedef struct {
-  size_t idx;           /* Index in mgr->peers[] */
-  float delivery_rate;  /* Blocks per minute (higher = better) */
-  bool eligible;        /* Peer is ready and sync candidate */
-} priority_candidate_t;
-
-/**
- * Compare priority candidates - best performers sort first.
- */
-static int compare_priority_candidates(const void *a, const void *b) {
-  const priority_candidate_t *ca = (const priority_candidate_t *)a;
-  const priority_candidate_t *cb = (const priority_candidate_t *)b;
-
-  /* Non-eligible peers go to the end */
-  if (!ca->eligible && cb->eligible) return 1;
-  if (ca->eligible && !cb->eligible) return -1;
-  if (!ca->eligible && !cb->eligible) return 0;
-
-  /* Highest delivery rate = best = sorts first */
-  if (ca->delivery_rate > cb->delivery_rate) return -1;
-  if (ca->delivery_rate < cb->delivery_rate) return 1;
-
-  return 0;
-}
-
-/**
- * Check if a peer is in the priority pool.
- *
- * @param mgr  Sync manager
- * @param peer_idx  Index into mgr->peers[] array
- * @return true if peer is in priority pool
- */
-static bool is_priority_peer(const sync_manager_t *mgr, size_t peer_idx) {
-  for (size_t i = 0; i < mgr->priority_pool_count; i++) {
-    if (mgr->priority_pool[i] == peer_idx) {
-      return true;
-    }
-  }
-  return false;
-}
-
-/**
- * Update the priority peer pool based on recent performance.
- *
- * Called during rotation cycles to identify the top SYNC_PRIORITY_POOL_SIZE
- * performers. These peers will be dedicated to critical block racing.
- *
- * @param mgr  Sync manager
- */
-static void sync_update_priority_pool(sync_manager_t *mgr) {
-  uint64_t now = plat_time_ms();
-
-  /* Rate limit: same interval as rotation */
-  if (now - mgr->last_priority_update_time < SYNC_PRIORITY_UPDATE_INTERVAL_MS) {
-    return;
-  }
-
-  /* Only update during block sync */
-  if (mgr->mode != SYNC_MODE_BLOCKS) {
-    return;
-  }
-
-  mgr->last_priority_update_time = now;
-
-  /* Build candidate list with performance metrics */
-  priority_candidate_t candidates[SYNC_MAX_PEERS];
-  size_t candidate_count = 0;
-
-  for (size_t i = 0; i < mgr->peer_count; i++) {
-    peer_sync_state_t *ps = &mgr->peers[i];
-
-    priority_candidate_t *c = &candidates[candidate_count++];
-    c->idx = i;
-    c->delivery_rate = calculate_delivery_rate(ps, now);
-    c->eligible = ps->sync_candidate && peer_is_ready(ps->peer);
-  }
-
-  /* Sort by performance (best first) */
-  qsort(candidates, candidate_count, sizeof(priority_candidate_t),
-        compare_priority_candidates);
-
-  /* Select top performers for priority pool.
-   * First pass: peers with good delivery rates (>= 0.1 blk/min).
-   * Second pass: if pool not full, add any eligible peers (bootstrap case). */
-  size_t old_count = mgr->priority_pool_count;
-  mgr->priority_pool_count = 0;
-
-  /* First pass: peers with demonstrated delivery */
-  for (size_t i = 0; i < candidate_count &&
-       mgr->priority_pool_count < SYNC_PRIORITY_POOL_SIZE; i++) {
-    priority_candidate_t *c = &candidates[i];
-
-    if (!c->eligible) {
-      continue;
-    }
-
-    /* Require minimum delivery rate to be in priority pool */
-    if (c->delivery_rate < 0.1f) {
-      continue;
-    }
-
-    mgr->priority_pool[mgr->priority_pool_count++] = c->idx;
-  }
-
-  /* Second pass: if pool not full, add remaining eligible peers.
-   * This handles the bootstrap case where peers haven't delivered yet. */
-  if (mgr->priority_pool_count < SYNC_PRIORITY_POOL_SIZE) {
-    for (size_t i = 0; i < candidate_count &&
-         mgr->priority_pool_count < SYNC_PRIORITY_POOL_SIZE; i++) {
-      priority_candidate_t *c = &candidates[i];
-
-      if (!c->eligible) {
-        continue;
-      }
-
-      /* Skip if already added in first pass */
-      bool already_added = false;
-      for (size_t j = 0; j < mgr->priority_pool_count; j++) {
-        if (mgr->priority_pool[j] == c->idx) {
-          already_added = true;
-          break;
-        }
-      }
-      if (already_added) {
-        continue;
-      }
-
-      mgr->priority_pool[mgr->priority_pool_count++] = c->idx;
-    }
-  }
-
-  /* Log priority pool changes */
-  if (mgr->priority_pool_count != old_count || mgr->priority_pool_count > 0) {
-    log_info(LOG_COMP_SYNC,
-             "Priority pool updated: %zu peers (was %zu)",
-             mgr->priority_pool_count, old_count);
-
-    /* Log the priority peers */
-    for (size_t i = 0; i < mgr->priority_pool_count; i++) {
-      size_t idx = mgr->priority_pool[i];
-      peer_sync_state_t *ps = &mgr->peers[idx];
-      float rate = calculate_delivery_rate(ps, now);
-      log_debug(LOG_COMP_SYNC,
-                "  Priority #%zu: %s (%.1f blk/min)",
-                i + 1, ps->peer->address, rate);
-    }
-  }
-}
-
 /**
  * Select or validate the designated headers sync peer.
  *
@@ -1457,67 +851,38 @@ static peer_sync_state_t *get_headers_sync_peer(sync_manager_t *mgr) {
 }
 
 /**
- * Find best peer for block download based on quality and capacity.
+ * Find best peer for block download.
  *
- * Selection criteria (in priority order):
+ * SIMPLIFIED Core-style selection:
  * 1. Must be sync_candidate (has blocks we need)
  * 2. Must be PEER_STATE_READY (handshake complete)
- * 3. Must have capacity: blocks_in_flight < max_slots (dynamic!)
- * 4. Primary: highest quality_score (prefer fast, reliable peers)
- * 5. Tiebreaker: fewer blocks in flight (spread load)
+ * 3. Must have capacity: blocks_in_flight < 16
+ * 4. Prefer peer with fewer in-flight (spread load)
  */
 static peer_sync_state_t *find_best_block_peer(sync_manager_t *mgr) {
   peer_sync_state_t *best = NULL;
-  uint16_t best_score = 0;
   size_t best_inflight = SIZE_MAX;
   size_t candidates = 0;
   size_t not_sync_candidate = 0;
   size_t not_ready = 0;
   size_t no_capacity = 0;
-  size_t in_priority_pool = 0;
 
   for (size_t i = 0; i < mgr->peer_count; i++) {
     peer_sync_state_t *ps = &mgr->peers[i];
-
-    /* Phase 3: Skip priority pool peers for speculative blocks.
-     * Priority peers are reserved exclusively for critical block racing. */
-    if (is_priority_peer(mgr, i)) {
-      in_priority_pool++;
-      continue;
-    }
-
     bool ready = peer_is_ready(ps->peer);
-
-    /* Use dynamic max_slots based on peer quality.
-     * Default to SYNC_MAX_BLOCKS_PER_PEER (16) until quality is measured,
-     * not 4 - that severely limits parallelism early in sync! */
-    uint16_t peer_max_slots = ps->max_slots > 0 ? ps->max_slots : SYNC_MAX_BLOCKS_PER_PEER;
-    bool has_capacity = ps->blocks_in_flight_count < peer_max_slots;
+    bool has_capacity = ps->blocks_in_flight_count < SYNC_MAX_BLOCKS_PER_PEER;
 
     if (!ps->sync_candidate) {
       not_sync_candidate++;
     } else if (!ready) {
       not_ready++;
-      log_debug(LOG_COMP_SYNC, "Peer %s not_ready: state=%s",
-                ps->peer->address, peer_state_string(ps->peer->state));
     } else if (!has_capacity) {
       no_capacity++;
     } else {
       candidates++;
 
-      /* Primary: highest quality_score
-       * Secondary: fewer blocks in flight (spread load among equal quality)
-       */
-      bool is_better = false;
-      if (ps->quality_score > best_score) {
-        is_better = true;
-      } else if (ps->quality_score == best_score &&
-                 ps->blocks_in_flight_count < best_inflight) {
-        is_better = true;
-      }
-
-      if (is_better) {
-        best_score = ps->quality_score;
+      /* Pick peer with fewest in-flight requests (spread load) */
+      if (ps->blocks_in_flight_count < best_inflight) {
         best_inflight = ps->blocks_in_flight_count;
         best = ps;
       }
@@ -1526,9 +891,9 @@ static peer_sync_state_t *find_best_block_peer(sync_manager_t *mgr) {
 
   if (candidates == 0) {
     log_info(LOG_COMP_SYNC,
-             "find_best_block_peer: no candidates (peers=%zu, priority=%zu, "
+             "find_best_block_peer: no candidates (peers=%zu, "
              "not_sync_candidate=%zu, not_ready=%zu, no_capacity=%zu)",
-             mgr->peer_count, in_priority_pool, not_sync_candidate, not_ready, no_capacity);
+             mgr->peer_count, not_sync_candidate, not_ready, no_capacity);
   }
   return best;
 }
@@ -1626,9 +991,6 @@ void sync_add_peer(sync_manager_t *mgr, peer_t *peer, int32_t height) {
   ps->peer = peer;
   ps->start_height = height;
 
-  /* Initialize rotation evaluation window (Phase 2 continuous rotation) */
-  ps->rotation_eval_start = plat_time_ms();
-
   /* Peer is sync candidate if they have blocks we need */
   uint32_t our_height = chainstate_get_height(mgr->chainstate);
   ps->sync_candidate = (height > (int32_t)our_height);
@@ -1638,14 +1000,6 @@ void sync_add_peer(sync_manager_t *mgr, peer_t *peer, int32_t height) {
            peer->address, height, our_height,
            ps->sync_candidate ? "yes" : "no",
            peer_state_string(peer->state));
-
-  /* Track replacement peers during active IBD (Phase 2 continuous rotation).
-   * Any peer added during SYNC_MODE_BLOCKS is a replacement for an evicted peer. */
-  if (mgr->mode == SYNC_MODE_BLOCKS) {
-    mgr->peers_replaced_total++;
-    log_debug(LOG_COMP_SYNC, "Replacement peer joined during IBD: %s (total: %u)",
-              peer->address, mgr->peers_replaced_total);
-  }
 
   /* Check if we should trigger ping contest countdown.
    * Wait for 12 sync-candidate peers, then wait 12 more seconds. */
@@ -2113,6 +1467,13 @@ echo_result_t sync_handle_block(sync_manager_t *mgr, peer_t *peer,
     mgr->blocks_validated_total++;
     rate_window_record(mgr, plat_time_ms());
 
+    /* Core-style adaptive timeout: decay on success (faster recovery) */
+    uint64_t decayed = (uint64_t)(mgr->stalling_timeout_ms * SYNC_STALLING_TIMEOUT_DECAY);
+    if (decayed < SYNC_BLOCK_STALLING_TIMEOUT_MS) {
+      decayed = SYNC_BLOCK_STALLING_TIMEOUT_MS;
+    }
+    mgr->stalling_timeout_ms = decayed;
+
     /*
      * After successful validation, check if we have the next block already
      * stored on disk (from out-of-order download). If so, load and validate
@@ -2199,7 +1560,6 @@ echo_result_t sync_handle_block(sync_manager_t *mgr, peer_t *peer,
 
   mgr->blocks_received_total++;
   ps->blocks_received++;
-  ps->rotation_blocks_recv++;  /* Track for continuous rotation (Phase 2) */
   mgr->last_progress_time = plat_time_ms();
 
   /* Record block size for adaptive window calculation */
@@ -2259,31 +1619,18 @@ void sync_process_timeouts(sync_manager_t *mgr) {
       }
     }
 
-    /* Process block timeouts - count stalls per peer per tick, not per block */
-    /*
-     * Adaptive stall timeout based on network conditions:
-     * - Base: 3x network median latency (accounts for variance)
-     * - Floor: SYNC_BLOCK_STALLING_TIMEOUT_MS (5s)
-     * - Ceiling: SYNC_BLOCK_STALLING_TIMEOUT_MAX_MS (16s)
+    /* Process block timeouts - count stalls per peer per tick, not per block.
      *
-     * At height 180k+ with median latency ~2400ms, this gives ~7200ms timeout
-     * instead of a fixed 5000ms, reducing false stall detections.
+     * Core-style adaptive timeout:
+     * - Starts at SYNC_BLOCK_STALLING_TIMEOUT_MS (5s)
+     * - Doubles on each stall (up to SYNC_BLOCK_STALLING_TIMEOUT_MAX_MS)
+     * - Decays by 0.85 on each block success
+     * This allows tolerance for network variance while recovering quickly
+     * when conditions improve.
      */
-    uint64_t adaptive_timeout = SYNC_BLOCK_STALLING_TIMEOUT_MS;
-    if (mgr->network_median_latency_ms > 0) {
-      uint64_t latency_based = mgr->network_median_latency_ms * 3;
-      if (latency_based > adaptive_timeout) {
-        adaptive_timeout = latency_based;
-      }
-      if (adaptive_timeout > SYNC_BLOCK_STALLING_TIMEOUT_MAX_MS) {
-        adaptive_timeout = SYNC_BLOCK_STALLING_TIMEOUT_MAX_MS;
-      }
-    }
-    mgr->stalling_timeout_ms = adaptive_timeout;
-
     size_t stalled_this_tick = 0;
     for (size_t j = 0; j < ps->blocks_in_flight_count;) {
-      if (now - ps->block_request_time[j] > adaptive_timeout) {
+      if (now - ps->block_request_time[j] > mgr->stalling_timeout_ms) {
         /* Timeout - unassign block and re-queue */
         hash256_t stalled_hash = ps->blocks_in_flight[j];
         block_queue_unassign(mgr->block_queue, &stalled_hash);
@@ -2303,9 +1650,18 @@ void sync_process_timeouts(sync_manager_t *mgr) {
     /* Only count ONE stall event per peer per tick, not one per block */
     if (stalled_this_tick > 0) {
       ps->timeout_count++;
+
+      /* Core-style adaptive timeout: double on stall (slower tolerance) */
+      uint64_t doubled = mgr->stalling_timeout_ms * 2;
+      if (doubled > SYNC_BLOCK_STALLING_TIMEOUT_MAX_MS) {
+        doubled = SYNC_BLOCK_STALLING_TIMEOUT_MAX_MS;
+      }
+      mgr->stalling_timeout_ms = doubled;
+
       log_info(LOG_COMP_SYNC,
-               "Peer stall: %zu blocks timed out (total stall events: %u)",
-               stalled_this_tick, ps->timeout_count);
+               "Peer stall: %zu blocks timed out (stall events: %u, new timeout: %llums)",
+               stalled_this_tick, ps->timeout_count,
+               (unsigned long long)mgr->stalling_timeout_ms);
 
       /* After 6 stall EVENTS (not blocks), disconnect slow peer.
        * More tolerant than before (was 3) to maintain stable peer count.
@@ -2317,48 +1673,10 @@ void sync_process_timeouts(sync_manager_t *mgr) {
                  ps->timeout_count);
         peer_disconnect(ps->peer, PEER_DISCONNECT_MISBEHAVING,
                         "Too many block stalls during IBD");
-        continue; /* Skip further checks for this peer */
-      }
-    }
-
-    /*
-     * Aggressive eviction for chronically slow peers.
-     *
-     * Disconnect peers that are significantly slower than the network:
-     * - Condition 1: avg_latency > 3x median (hard limit)
-     * - Condition 2: avg_latency > 2.5x median AND 3+ timeouts (pattern of issues)
-     *
-     * Requires sufficient samples (10+) to avoid evicting peers too early.
-     */
-    if (ps->peer && ps->latency_samples >= 10 &&
-        mgr->network_median_latency_ms > 0 && ps->avg_block_latency_ms > 0) {
-
-      /* Hard limit: disconnect if >3x slower than network median */
-      if (ps->avg_block_latency_ms > mgr->network_median_latency_ms * 3) {
-        log_info(LOG_COMP_SYNC,
-                 "Evicting slow peer %s: latency=%lums (median=%lums, %.1fx)",
-                 ps->peer->address, (unsigned long)ps->avg_block_latency_ms,
-                 (unsigned long)mgr->network_median_latency_ms,
-                 (float)ps->avg_block_latency_ms /
-                     (float)mgr->network_median_latency_ms);
-        peer_disconnect(ps->peer, PEER_DISCONNECT_MISBEHAVING,
-                        "Block latency > 3x network median");
-        continue;
-      }
-
-      /* Combined slow + unreliable: disconnect if >2.5x slower AND has timeouts
-       */
-      if (ps->timeout_count >= 3 &&
-          ps->avg_block_latency_ms > (mgr->network_median_latency_ms * 5) / 2) {
-        log_info(LOG_COMP_SYNC,
-                 "Evicting unreliable peer %s: latency=%lums, timeouts=%u",
-                 ps->peer->address, (unsigned long)ps->avg_block_latency_ms,
-                 ps->timeout_count);
-        peer_disconnect(ps->peer, PEER_DISCONNECT_MISBEHAVING,
-                        "Slow + unreliable during IBD");
         continue;
       }
     }
+    /* Core-style: only disconnect peers that actually stall - no proactive eviction */
   }
 }
 
@@ -2556,118 +1874,6 @@ static void queue_blocks_from_headers(sync_manager_t *mgr) {
 }
 
 /**
- * PRIORITY POOL RACING: Request critical zone from PRIORITY PEERS ONLY.
- *
- * Phase 3 changes the racing strategy:
- * - Critical zone is now SYNC_PRIORITY_CRITICAL_ZONE (8 blocks)
- * - Only SYNC_PRIORITY_POOL_SIZE (8) top performers race
- * - 8 blocks × 8 peers = 64 parallel races (focused redundancy)
- * - Priority peers are NEVER assigned speculative blocks
- *
- * This protects the critical path from congestion while maintaining
- * the mathematical advantage of order statistics racing:
- *   E[min of 8 exponentials] = mean/8 ≈ 125ms per block (at 1000ms mean)
- *
- * General pool (remaining ~24 peers) handles speculative downloads,
- * keeping the pipeline full without competing for priority peer slots.
- */
-static size_t request_racing_critical_blocks(sync_manager_t *mgr) {
-  uint32_t validated_height = chainstate_get_height(mgr->chainstate);
-  uint32_t next_needed = validated_height + 1;
-
-  /* Skip if no priority pool established yet */
-  if (mgr->priority_pool_count == 0) {
-    return 0;
-  }
-
-  /* Collect critical blocks */
-  hash256_t critical_blocks[SYNC_PRIORITY_CRITICAL_ZONE];
-  uint32_t critical_heights[SYNC_PRIORITY_CRITICAL_ZONE];
-  size_t critical_count = 0;
-
-  for (uint32_t h = next_needed;
-       h < next_needed + SYNC_PRIORITY_CRITICAL_ZONE &&
-       critical_count < SYNC_PRIORITY_CRITICAL_ZONE;
-       h++) {
-    hash256_t hash;
-    if (block_queue_find_by_height(mgr->block_queue, h, &hash) == ECHO_OK) {
-      critical_blocks[critical_count] = hash;
-      critical_heights[critical_count] = h;
-      critical_count++;
-    }
-  }
-
-  if (critical_count == 0) {
-    return 0;
-  }
-
-  size_t total_requests = 0;
-  size_t peers_used = 0;
-
-  /* Priority pool racing: Request critical blocks from PRIORITY PEERS ONLY */
-  for (size_t pool_idx = 0; pool_idx < mgr->priority_pool_count; pool_idx++) {
-    size_t peer_idx = mgr->priority_pool[pool_idx];
-    if (peer_idx >= mgr->peer_count) {
-      continue; /* Stale index, peer was removed */
-    }
-
-    peer_sync_state_t *ps = &mgr->peers[peer_idx];
-    if (!ps->peer || ps->peer->state != PEER_STATE_READY) {
-      continue;
-    }
-
-    /* Build list of blocks NOT yet in-flight for this peer */
-    hash256_t to_request[SYNC_PRIORITY_CRITICAL_ZONE];
-    size_t request_count = 0;
-
-    for (size_t i = 0; i < critical_count; i++) {
-      hash256_t *block_hash = &critical_blocks[i];
-
-      /* Skip if already in-flight for this peer */
-      bool already_inflight = false;
-      for (size_t j = 0; j < ps->blocks_in_flight_count; j++) {
-        if (memcmp(&ps->blocks_in_flight[j], block_hash, sizeof(hash256_t)) == 0) {
-          already_inflight = true;
-          break;
-        }
-      }
-
-      if (!already_inflight && ps->blocks_in_flight_count + request_count < SYNC_MAX_BLOCKS_PER_PEER) {
-        to_request[request_count++] = *block_hash;
-      }
-    }
-
-    /* Send ONE batched getdata with all blocks for this priority peer */
-    if (request_count > 0 && mgr->callbacks.send_getdata_blocks) {
-      mgr->callbacks.send_getdata_blocks(ps->peer, to_request, request_count,
-                                          mgr->callbacks.ctx);
-
-      /* Track in-flight */
-      uint64_t now = plat_time_ms();
-      for (size_t i = 0; i < request_count; i++) {
-        ps->blocks_in_flight[ps->blocks_in_flight_count] = to_request[i];
-        ps->block_request_time[ps->blocks_in_flight_count] = now;
-        ps->blocks_in_flight_count++;
-      }
-      ps->rotation_blocks_req += request_count;  /* Track for continuous rotation (Phase 2) */
-
-      total_requests += request_count;
-      peers_used++;
-    }
-  }
-
-  if (total_requests > 0 && peers_used > 0) {
-    log_info(LOG_COMP_SYNC,
-             "Priority racing: %zu requests for %zu blocks (%u-%u) across %zu priority peers",
-             total_requests, critical_count,
-             critical_heights[0], critical_heights[critical_count - 1],
-             peers_used);
-  }
-
-  return total_requests;
-}
-
-/**
  * Request blocks from peers.
  */
 static void request_blocks(sync_manager_t *mgr) {
@@ -2677,15 +1883,6 @@ static void request_blocks(sync_manager_t *mgr) {
   peer_sync_state_t *current_peer = NULL;
 
   uint32_t validated_height = chainstate_get_height(mgr->chainstate);
-
-  /*
-   * Priority Pool Racing (Phase 3): Request critical blocks from priority peers.
-   * Mathematics: E[min of 8 exponentials] = mean/8 ≈ 125ms per block.
-   * 8 blocks × 8 priority peers = 64 parallel races. First response wins.
-   * Priority peers handle ONLY critical blocks, never speculative.
-   */
-  size_t racing_requests = request_racing_critical_blocks(mgr);
-  (void)racing_requests;
 
   /* Log entry state */
   size_t pending = block_queue_pending_count(mgr->block_queue);
@@ -2697,13 +1894,9 @@ static void request_blocks(sync_manager_t *mgr) {
   }
 
   /*
-   * Request speculative blocks beyond the critical zone.
-   * Window dynamically adjusts based on recent block sizes (like difficulty).
-   *
-   * POST-AUDITION PHILOSOPHY: The critical zone (next 16 blocks) is handled by
-   * staggered redundancy above - all 32 peers race for those blocks. Here we
-   * request additional speculative blocks to keep the pipeline full, distributed
-   * across peers normally (one block per peer slot).
+   * Request blocks from peers with capacity.
+   * Core approach: simple parallel download, no racing, no priority pools.
+   * Window adapts based on recent block sizes.
    */
   uint32_t effective_window = get_adaptive_window(mgr);
   uint32_t max_request_height = validated_height + effective_window;
@@ -2761,7 +1954,6 @@ static void request_blocks(sync_manager_t *mgr) {
       ps->blocks_in_flight[ps->blocks_in_flight_count] = hash;
       ps->block_request_time[ps->blocks_in_flight_count] = plat_time_ms();
       ps->blocks_in_flight_count++;
-      ps->rotation_blocks_req++;  /* Track for continuous rotation (Phase 2) */
     }
 
     /* Collect for batched getdata */
@@ -2917,15 +2109,6 @@ void sync_tick(sync_manager_t *mgr) {
 
   case SYNC_MODE_BLOCKS: {
     uint64_t now = plat_time_ms();
-
-    /* Update peer quality scores periodically (every 5 seconds) */
-    update_peer_quality(mgr);
-
-    /* Continuous peer rotation (Phase 2): evict worst performers every 60s */
-    sync_rotate_peers(mgr);
-
-    /* Priority peer pool (Phase 3): update priority pool membership */
-    sync_update_priority_pool(mgr);
 
     /* IBD profiling: Rate-limited progress log every 30 seconds */
     if (now - mgr->last_progress_log_time >= 30000) {

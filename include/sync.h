@@ -92,45 +92,6 @@
 #define SYNC_STALE_TIP_THRESHOLD_MS (30ULL * 60 * 1000) /* 30 minutes */
 
 /* ============================================================================
- * Continuous Peer Rotation (Phase 2)
- * ============================================================================
- * During IBD, continuously evaluate peer performance and rotate out the
- * worst performers. This finds hidden gems and discards degraded peers.
- */
-
-/* Rotation interval - evaluate and rotate peers every 60 seconds */
-#define SYNC_ROTATION_INTERVAL_MS 60000
-
-/* Number of peers to rotate per cycle (bottom 3 performers) */
-#define SYNC_ROTATION_COUNT 3
-
-/* Minimum time before a peer can be evicted (evaluation period) */
-#define SYNC_ROTATION_MIN_EVAL_TIME_MS 60000
-
-/* Minimum blocks a peer must have opportunity to deliver before eviction */
-#define SYNC_ROTATION_MIN_EVAL_BLOCKS 5
-
-/* Minimum peers to keep - never evict below this threshold */
-#define SYNC_ROTATION_MIN_PEERS 16
-
-/* ============================================================================
- * Priority Peer Pool (Phase 3)
- * ============================================================================
- * Separate peer pools for critical vs speculative block requests.
- * Priority pool: Top performers dedicated to critical path racing.
- * General pool: Remaining peers handle speculative block downloads.
- */
-
-/* Size of priority pool - top N performers by delivery rate */
-#define SYNC_PRIORITY_POOL_SIZE 8
-
-/* Critical zone size for priority pool racing (blocks after validated tip) */
-#define SYNC_PRIORITY_CRITICAL_ZONE 8
-
-/* How often to recalculate priority pool membership (same as rotation cycle) */
-#define SYNC_PRIORITY_UPDATE_INTERVAL_MS SYNC_ROTATION_INTERVAL_MS
-
-/* ============================================================================
  * Sync State
  * ============================================================================
  */
@@ -177,17 +138,10 @@ typedef struct {
   uint64_t avg_block_latency_ms;   /* Average block download time */
   uint32_t timeout_count;          /* Number of timeouts from this peer */
 
-  /* Quality rating system - enables adaptive slot allocation and peer eviction */
+  /* Latency tracking for metrics */
   uint64_t first_block_time;  /* When peer started delivering blocks (ms) */
   uint64_t total_latency_ms;  /* Sum of all block download latencies */
   uint32_t latency_samples;   /* Number of latency samples collected */
-  uint16_t quality_score;     /* 0-1000, higher = better peer */
-  uint16_t max_slots;         /* Dynamic slot cap based on quality (4-32) */
-
-  /* Continuous rotation metrics (Phase 2) - windowed for recent performance */
-  uint64_t rotation_eval_start;    /* Start of current evaluation window (ms) */
-  uint32_t rotation_blocks_recv;   /* Blocks received in current window */
-  uint32_t rotation_blocks_req;    /* Blocks requested in current window */
 } peer_sync_state_t;
 
 /**
