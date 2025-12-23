@@ -2559,8 +2559,19 @@ static void node_handle_peer_message(node_t *node, peer_t *peer,
   case MSG_VERACK:
     /* Verack handled during handshake in peer.c */
     /* When handshake complete, add peer to sync manager */
-    if (peer_is_ready(peer) && node->sync_mgr != NULL) {
-      sync_add_peer(node->sync_mgr, peer, peer->start_height);
+    if (peer_is_ready(peer)) {
+      if (node->sync_mgr != NULL) {
+        sync_add_peer(node->sync_mgr, peer, peer->start_height);
+      }
+
+      /* Request addresses from peer to replenish our address pool.
+       * This is critical for maintaining peer diversity - without it,
+       * we can only connect to our initial seed addresses. */
+      msg_t getaddr;
+      memset(&getaddr, 0, sizeof(getaddr));
+      getaddr.type = MSG_GETADDR;
+      peer_queue_message(peer, &getaddr);
+      log_debug(LOG_COMP_NET, "Sent GETADDR to peer %s", peer->address);
     }
     break;
 

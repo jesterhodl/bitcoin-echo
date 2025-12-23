@@ -572,6 +572,9 @@ void discovery_mark_success(peer_addr_manager_t *manager,
   if (entry != NULL) {
     entry->last_success = plat_time_ms();
     entry->reachable = ECHO_TRUE;
+    /* Reset attempts on success to prevent cooldown from growing
+     * indefinitely across successful connection cycles */
+    entry->attempts = 0;
   }
 }
 
