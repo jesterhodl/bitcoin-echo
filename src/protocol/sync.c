@@ -179,6 +179,17 @@ struct sync_manager {
   size_t size_window_count;               /* Number of entries (0 to SIZE_WINDOW_SIZE) */
   uint64_t size_window_total;             /* Running sum for O(1) average calculation */
 
+  /*
+   * Bottleneck diagnostics: Track whether we're CPU-bound or network-bound.
+   * When we finish validating a block, was the next one already available?
+   */
+  uint32_t blocks_ready;          /* Next block was immediately available */
+  uint32_t blocks_starved;        /* Had to wait for next block */
+  uint64_t total_validation_ms;   /* Cumulative time spent in validation callbacks */
+  uint64_t total_starvation_ms;   /* Cumulative time spent waiting for blocks */
+  uint64_t starvation_start_time; /* When we started waiting (0 = not waiting) */
+  uint32_t last_validated_height; /* Height of last validated block */
+
   /* Deferred header persistence: queue headers during SYNC_MODE_HEADERS,
    * flush all at once when transitioning to SYNC_MODE_BLOCKS. */
   pending_header_t *pending_headers;      /* Dynamic array of pending headers */
@@ -1454,8 +1465,20 @@ echo_result_t sync_handle_block(sync_manager_t *mgr, peer_t *peer,
       return ECHO_ERR_WOULD_BLOCK; /* Not an error, just waiting for parent */
     }
 
+    /* Bottleneck tracking: record starvation time if we were waiting */
+    if (mgr->starvation_start_time > 0) {
+      uint64_t starvation_end = plat_time_ms();
+      mgr->total_starvation_ms += (starvation_end - mgr->starvation_start_time);
+      mgr->starvation_start_time = 0;
+    }
+
+    /* Time the validation callback */
+    uint64_t validation_start = plat_time_ms();
     echo_result_t result = mgr->callbacks.validate_and_apply_block(
         block, block_index, mgr->callbacks.ctx);
+    uint64_t validation_end = plat_time_ms();
+    mgr->total_validation_ms += (validation_end - validation_start);
+
     if (result != ECHO_OK) {
       /*
        * Block validation failed for a reason other than ordering.
@@ -1465,6 +1488,7 @@ echo_result_t sync_handle_block(sync_manager_t *mgr, peer_t *peer,
       return ECHO_ERR_INVALID;
     }
     mgr->blocks_validated_total++;
+    mgr->last_validated_height = block_height;
     rate_window_record(mgr, plat_time_ms());
 
     /* Core-style adaptive timeout: decay on success (faster recovery) */
@@ -1527,9 +1551,12 @@ echo_result_t sync_handle_block(sync_manager_t *mgr, peer_t *peer,
           break;
         }
 
-        /* Validate and apply the stored block */
+        /* Time the stored block validation too */
+        uint64_t stored_val_start = plat_time_ms();
         echo_result_t val_result = mgr->callbacks.validate_and_apply_block(
             &stored_block, next_index, mgr->callbacks.ctx);
+        uint64_t stored_val_end = plat_time_ms();
+        mgr->total_validation_ms += (stored_val_end - stored_val_start);
 
         block_free(&stored_block);
 
@@ -1543,6 +1570,8 @@ echo_result_t sync_handle_block(sync_manager_t *mgr, peer_t *peer,
         /* Success! Remove from queue and continue */
         block_queue_complete(mgr->block_queue, &next_index->hash);
         mgr->blocks_validated_total++;
+        mgr->last_validated_height = next_height;
+        mgr->blocks_ready++; /* Had next block immediately available */
         rate_window_record(mgr, plat_time_ms());
         mgr->last_progress_time = plat_time_ms();
 
@@ -1551,6 +1580,20 @@ echo_result_t sync_handle_block(sync_manager_t *mgr, peer_t *peer,
                  next_height);
 
         next_height++;
+      }
+
+      /*
+       * Bottleneck tracking: After processing all available stored blocks,
+       * check if the next block is ready. If not, start starvation timer.
+       */
+      uint32_t current_height = chainstate_get_height(mgr->chainstate);
+      hash256_t check_next_hash;
+      if (current_height < mgr->best_header->height &&
+          block_queue_find_by_height(mgr->block_queue, current_height + 1,
+                                     &check_next_hash) != ECHO_OK) {
+        /* Next block not in queue - we're now waiting (starved) */
+        mgr->blocks_starved++;
+        mgr->starvation_start_time = plat_time_ms();
       }
     }
   }
@@ -2442,6 +2485,10 @@ void sync_get_metrics(const sync_manager_t *mgr, sync_metrics_t *metrics) {
   metrics->network_median_latency = 0;
   metrics->active_sync_peers = 0;
   metrics->mode_string = "idle";
+  metrics->blocks_ready = 0;
+  metrics->blocks_starved = 0;
+  metrics->total_validation_ms = 0;
+  metrics->total_starvation_ms = 0;
 
   if (!mgr) {
     return;
@@ -2475,4 +2522,10 @@ void sync_get_metrics(const sync_manager_t *mgr, sync_metrics_t *metrics) {
     }
   }
   metrics->active_sync_peers = active;
+
+  /* Bottleneck diagnostics */
+  metrics->blocks_ready = mgr->blocks_ready;
+  metrics->blocks_starved = mgr->blocks_starved;
+  metrics->total_validation_ms = mgr->total_validation_ms;
+  metrics->total_starvation_ms = mgr->total_starvation_ms;
 }

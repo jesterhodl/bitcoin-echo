@@ -826,6 +826,12 @@ typedef struct {
   uint64_t network_median_latency;  /* Network baseline latency (ms) */
   uint32_t active_sync_peers;       /* Peers actively contributing blocks */
   const char *mode_string;          /* Human-readable sync mode */
+
+  /* Bottleneck diagnostics: helps identify network vs CPU bound sync */
+  uint32_t blocks_ready;            /* Blocks where next was immediately ready */
+  uint32_t blocks_starved;          /* Blocks where we had to wait for next */
+  uint64_t total_validation_ms;     /* Cumulative time in consensus validation */
+  uint64_t total_starvation_ms;     /* Cumulative time waiting for blocks */
 } sync_metrics_t;
 
 /**
