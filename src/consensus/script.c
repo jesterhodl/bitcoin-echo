@@ -3717,7 +3717,7 @@ echo_result_t sighash_bip143(script_context_t *ctx, uint32_t sighash_type,
 
 /*
  * Compute legacy signature hash (pre-SegWit).
- * This is a simplified implementation for basic SIGHASH_ALL.
+ * Handles all sighash types: ALL, NONE, SINGLE, with optional ANYONECANPAY.
  */
 echo_result_t sighash_legacy(script_context_t *ctx, uint32_t sighash_type,
                              uint8_t sighash[32]) {
@@ -3725,50 +3725,66 @@ echo_result_t sighash_legacy(script_context_t *ctx, uint32_t sighash_type,
     return ECHO_ERR_NULL_PARAM;
   }
 
+  const tx_t *tx = ctx->tx;
+  size_t idx = ctx->input_index;
+
+  /* Extract base type and flags */
+  uint32_t base_type = sighash_type & 0x1f;
+  int anyonecanpay = (sighash_type & SIGHASH_ANYONECANPAY) != 0;
+
   /*
-   * Legacy sighash requires serializing a modified transaction.
-   * This is complex because we need to:
-   * 1. Clear all input scripts except the one being signed
-   * 2. Replace that script with scriptCode (starting from codesep_pos)
-   * 3. Handle SIGHASH_SINGLE and SIGHASH_NONE edge cases
-   *
-   * For now, we implement basic SIGHASH_ALL support.
-   * Full legacy sighash is complex and rarely needed for new code.
+   * SIGHASH_SINGLE special case: if input index >= output count,
+   * return the special hash (all zeros except last byte is 1).
+   * This is a historical quirk that must be preserved for consensus.
    */
+  if (base_type == SIGHASH_SINGLE && idx >= tx->output_count) {
+    memset(sighash, 0, 32);
+    sighash[0] = 0x01; /* Little-endian 1 */
+    return ECHO_OK;
+  }
 
   /*
    * The subscript for sighash is the portion of script_code starting
-   * from codesep_pos. This handles OP_CODESEPARATOR which updates
-   * script_code and sets codesep_pos to exclude everything before it.
+   * from codesep_pos. This handles OP_CODESEPARATOR.
    */
   const uint8_t *subscript = ctx->script_code + ctx->codesep_pos;
   size_t subscript_len = ctx->script_code_len - ctx->codesep_pos;
 
-  /* Calculate approximate buffer size needed */
-  const tx_t *tx = ctx->tx;
+  /* Calculate buffer size needed */
   size_t buf_size = 4; /* version */
+  buf_size += 9;       /* input count varint */
 
-  /* Input count varint */
-  buf_size += 9;
-
-  /* Inputs */
-  for (size_t i = 0; i < tx->input_count; i++) {
+  /* Inputs: ANYONECANPAY = only signing input, else all inputs */
+  size_t input_count = anyonecanpay ? 1 : tx->input_count;
+  for (size_t i = 0; i < input_count; i++) {
     buf_size += 32 + 4; /* outpoint */
-    if (i == ctx->input_index) {
-      buf_size += 9 + subscript_len; /* scriptCode */
+    size_t actual_i = anyonecanpay ? idx : i;
+    if (actual_i == idx) {
+      buf_size += 9 + subscript_len;
     } else {
       buf_size += 1; /* empty script */
     }
     buf_size += 4; /* sequence */
   }
 
-  /* Output count varint */
-  buf_size += 9;
+  buf_size += 9; /* output count varint */
 
-  /* Outputs */
-  for (size_t i = 0; i < tx->output_count; i++) {
-    buf_size += 8;                                    /* value */
-    buf_size += 9 + tx->outputs[i].script_pubkey_len; /* script */
+  /* Outputs depend on sighash type */
+  size_t output_count = 0;
+  if (base_type == SIGHASH_ALL) {
+    output_count = tx->output_count;
+  } else if (base_type == SIGHASH_SINGLE) {
+    output_count = idx + 1;
+  }
+  /* SIGHASH_NONE: output_count = 0 */
+
+  for (size_t i = 0; i < output_count; i++) {
+    buf_size += 8; /* value */
+    if (base_type == SIGHASH_SINGLE && i < idx) {
+      buf_size += 1; /* empty script for preceding outputs */
+    } else {
+      buf_size += 9 + tx->outputs[i].script_pubkey_len;
+    }
   }
 
   buf_size += 4; /* locktime */
@@ -3787,25 +3803,27 @@ echo_result_t sighash_legacy(script_context_t *ctx, uint32_t sighash_type,
   pos += 4;
 
   /* Input count */
-  if (tx->input_count < 0xfd) {
-    buf[pos++] = (uint8_t)tx->input_count;
+  if (input_count < 0xfd) {
+    buf[pos++] = (uint8_t)input_count;
   } else {
     buf[pos++] = 0xfd;
-    buf[pos++] = (uint8_t)(tx->input_count & 0xff);
-    buf[pos++] = (uint8_t)((tx->input_count >> 8) & 0xff);
+    buf[pos++] = (uint8_t)(input_count & 0xff);
+    buf[pos++] = (uint8_t)((input_count >> 8) & 0xff);
   }
 
   /* Inputs */
-  for (size_t i = 0; i < tx->input_count; i++) {
+  for (size_t i = 0; i < input_count; i++) {
+    size_t actual_i = anyonecanpay ? idx : i;
+
     /* Outpoint */
-    memcpy(buf + pos, tx->inputs[i].prevout.txid.bytes, 32);
+    memcpy(buf + pos, tx->inputs[actual_i].prevout.txid.bytes, 32);
     pos += 32;
-    write_le32(buf + pos, tx->inputs[i].prevout.vout);
+    write_le32(buf + pos, tx->inputs[actual_i].prevout.vout);
     pos += 4;
 
     /* Script */
-    if (i == ctx->input_index) {
-      /* Use subscript (script_code from codesep_pos) for the input being signed */
+    if (actual_i == idx) {
+      /* Use subscript for the input being signed */
       if (subscript_len < 0xfd) {
         buf[pos++] = (uint8_t)subscript_len;
       } else {
@@ -3822,37 +3840,48 @@ echo_result_t sighash_legacy(script_context_t *ctx, uint32_t sighash_type,
       buf[pos++] = 0;
     }
 
-    /* Sequence */
-    write_le32(buf + pos, tx->inputs[i].sequence);
+    /* Sequence: for NONE/SINGLE, other inputs get sequence 0 */
+    uint32_t seq = tx->inputs[actual_i].sequence;
+    if ((base_type == SIGHASH_NONE || base_type == SIGHASH_SINGLE) &&
+        actual_i != idx) {
+      seq = 0;
+    }
+    write_le32(buf + pos, seq);
     pos += 4;
   }
 
   /* Output count */
-  if (tx->output_count < 0xfd) {
-    buf[pos++] = (uint8_t)tx->output_count;
+  if (output_count < 0xfd) {
+    buf[pos++] = (uint8_t)output_count;
   } else {
     buf[pos++] = 0xfd;
-    buf[pos++] = (uint8_t)(tx->output_count & 0xff);
-    buf[pos++] = (uint8_t)((tx->output_count >> 8) & 0xff);
+    buf[pos++] = (uint8_t)(output_count & 0xff);
+    buf[pos++] = (uint8_t)((output_count >> 8) & 0xff);
   }
 
   /* Outputs */
-  for (size_t i = 0; i < tx->output_count; i++) {
-    /* Value */
-    write_le64(buf + pos, (uint64_t)tx->outputs[i].value);
-    pos += 8;
-
-    /* Script */
-    size_t len = tx->outputs[i].script_pubkey_len;
-    if (len < 0xfd) {
-      buf[pos++] = (uint8_t)len;
+  for (size_t i = 0; i < output_count; i++) {
+    if (base_type == SIGHASH_SINGLE && i < idx) {
+      /* For SIGHASH_SINGLE, outputs before idx have value=-1 and empty script */
+      write_le64(buf + pos, 0xffffffffffffffffULL);
+      pos += 8;
+      buf[pos++] = 0; /* empty script */
     } else {
-      buf[pos++] = 0xfd;
-      buf[pos++] = (uint8_t)(len & 0xff);
-      buf[pos++] = (uint8_t)((len >> 8) & 0xff);
+      /* Normal output serialization */
+      write_le64(buf + pos, (uint64_t)tx->outputs[i].value);
+      pos += 8;
+
+      size_t len = tx->outputs[i].script_pubkey_len;
+      if (len < 0xfd) {
+        buf[pos++] = (uint8_t)len;
+      } else {
+        buf[pos++] = 0xfd;
+        buf[pos++] = (uint8_t)(len & 0xff);
+        buf[pos++] = (uint8_t)((len >> 8) & 0xff);
+      }
+      memcpy(buf + pos, tx->outputs[i].script_pubkey, len);
+      pos += len;
     }
-    memcpy(buf + pos, tx->outputs[i].script_pubkey, len);
-    pos += len;
   }
 
   /* Locktime */
