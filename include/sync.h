@@ -114,6 +114,23 @@
 #define SYNC_ROTATION_MIN_PEERS 16
 
 /* ============================================================================
+ * Priority Peer Pool (Phase 3)
+ * ============================================================================
+ * Separate peer pools for critical vs speculative block requests.
+ * Priority pool: Top performers dedicated to critical path racing.
+ * General pool: Remaining peers handle speculative block downloads.
+ */
+
+/* Size of priority pool - top N performers by delivery rate */
+#define SYNC_PRIORITY_POOL_SIZE 8
+
+/* Critical zone size for priority pool racing (blocks after validated tip) */
+#define SYNC_PRIORITY_CRITICAL_ZONE 8
+
+/* How often to recalculate priority pool membership (same as rotation cycle) */
+#define SYNC_PRIORITY_UPDATE_INTERVAL_MS SYNC_ROTATION_INTERVAL_MS
+
+/* ============================================================================
  * Sync State
  * ============================================================================
  */
