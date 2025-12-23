@@ -26,6 +26,7 @@
 
 #include "sig_verify.h"
 #include "secp256k1.h"
+#include "../crypto/secp256k1_libsecp.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -51,8 +52,6 @@ int sig_verify(sig_type_t type, const uint8_t *sig, size_t sig_len,
      * Public key: compressed (33) or uncompressed (65) bytes
      * Hash: 32-byte sighash
      */
-    secp256k1_ecdsa_sig_t ecdsa_sig;
-    secp256k1_point_t pk_point;
 
     /* Validate signature length */
     /* Strict DER: max 73 bytes. Lax: allow longer for extra leading zeros */
@@ -69,27 +68,30 @@ int sig_verify(sig_type_t type, const uint8_t *sig, size_t sig_len,
     }
 
     /*
-     * Parse DER-encoded signature.
-     * Use strict BIP-66 parser for post-BIP-66 blocks,
-     * lax parser for pre-BIP-66 historical signatures.
+     * For strict DER (post-BIP-66 blocks), call libsecp256k1 directly
+     * with the raw bytes - no intermediate parsing overhead.
+     *
+     * For lax DER (pre-BIP-66 historical blocks), use our lax parser
+     * then convert to compact format for libsecp256k1.
      */
-    int parse_ok;
     if (flags & SIG_VERIFY_STRICT_DER) {
-      parse_ok = secp256k1_ecdsa_sig_parse_der(&ecdsa_sig, sig, sig_len);
+      /* Fast path: direct libsecp256k1 call with raw DER bytes */
+      return libsecp_ecdsa_verify_der(sig, sig_len, hash, pubkey, pubkey_len);
     } else {
-      parse_ok = secp256k1_ecdsa_sig_parse_der_lax(&ecdsa_sig, sig, sig_len);
-    }
-    if (!parse_ok) {
-      return 0;
-    }
+      /* Slow path: lax DER parsing for pre-BIP-66 historical signatures */
+      secp256k1_ecdsa_sig_t ecdsa_sig;
+      uint8_t sig_compact[64];
 
-    /* Parse public key */
-    if (!secp256k1_pubkey_parse(&pk_point, pubkey, pubkey_len)) {
-      return 0;
-    }
+      if (!secp256k1_ecdsa_sig_parse_der_lax(&ecdsa_sig, sig, sig_len)) {
+        return 0;
+      }
 
-    /* Verify signature */
-    return secp256k1_ecdsa_verify(&ecdsa_sig, hash, &pk_point);
+      /* Convert to compact format for libsecp256k1 */
+      secp256k1_scalar_get_bytes(sig_compact, &ecdsa_sig.r);
+      secp256k1_scalar_get_bytes(sig_compact + 32, &ecdsa_sig.s);
+
+      return libsecp_ecdsa_verify(sig_compact, hash, pubkey, pubkey_len);
+    }
   }
 
   case SIG_SCHNORR: {
@@ -113,12 +115,10 @@ int sig_verify(sig_type_t type, const uint8_t *sig, size_t sig_len,
     }
 
     /*
-     * Note: For BIP-340 Schnorr, the 'hash' parameter is passed
-     * as the message. In Bitcoin's Taproot context, this would
-     * be the 32-byte sighash. The secp256k1_schnorr_verify function
-     * handles the tagged hash internally.
+     * Call libsecp256k1 directly with raw bytes.
+     * For BIP-340 Schnorr, the 'hash' parameter is the 32-byte sighash.
      */
-    return secp256k1_schnorr_verify(sig, hash, 32, pubkey);
+    return libsecp_schnorr_verify(sig, hash, 32, pubkey);
   }
 
   default:

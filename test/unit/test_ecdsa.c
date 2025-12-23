@@ -419,7 +419,7 @@ static void test_ecdsa_valid_signature(void)
         return;
     }
 
-    if (secp256k1_ecdsa_verify(&sig, msg_hash, &pubkey)) {
+    if (echo_ecdsa_verify(&sig, msg_hash, &pubkey)) {
         test_case("Valid ECDSA signature verification");
         test_pass();
     } else {
@@ -465,7 +465,7 @@ static void test_ecdsa_wrong_message(void)
 
     secp256k1_ecdsa_sig_parse_der(&sig, der_sig, sizeof(der_sig));
 
-    if (!secp256k1_ecdsa_verify(&sig, msg_hash, &pubkey)) {
+    if (!echo_ecdsa_verify(&sig, msg_hash, &pubkey)) {
         test_case("Reject wrong message");
         test_pass();
     } else {
@@ -511,7 +511,7 @@ static void test_ecdsa_wrong_pubkey(void)
 
     secp256k1_ecdsa_sig_parse_der(&sig, der_sig, sizeof(der_sig));
 
-    if (!secp256k1_ecdsa_verify(&sig, msg_hash, &pubkey)) {
+    if (!echo_ecdsa_verify(&sig, msg_hash, &pubkey)) {
         test_case("Reject wrong pubkey");
         test_pass();
     } else {
@@ -588,7 +588,7 @@ static void test_ecdsa_different_nonce(void)
     /* s = inv_two * one_plus_r */
     secp256k1_scalar_mul(&sig.s, &inv_two, &one_plus_r);
 
-    if (secp256k1_ecdsa_verify(&sig, msg_hash, &pubkey)) {
+    if (echo_ecdsa_verify(&sig, msg_hash, &pubkey)) {
         test_case("ECDSA with k=2 nonce");
         test_pass();
     } else {
@@ -617,7 +617,7 @@ static void test_ecdsa_infinity_pubkey(void)
         sig.s.limbs[i] = 0;
     }
 
-    if (!secp256k1_ecdsa_verify(&sig, msg_hash, &pubkey)) {
+    if (!echo_ecdsa_verify(&sig, msg_hash, &pubkey)) {
         test_case("Reject infinity pubkey");
         test_pass();
     } else {
@@ -673,7 +673,7 @@ static void test_ecdsa_uncompressed_pubkey(void)
         return;
     }
 
-    if (secp256k1_ecdsa_verify(&sig, msg_hash, &pubkey)) {
+    if (echo_ecdsa_verify(&sig, msg_hash, &pubkey)) {
         test_case("ECDSA with uncompressed pubkey");
         test_pass();
     } else {

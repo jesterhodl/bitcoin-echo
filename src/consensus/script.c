@@ -4450,7 +4450,7 @@ echo_result_t taproot_verify_merkle_proof(const uint8_t leaf_hash[32],
   secp256k1_point_t P, tG, Q;
 
   /* Parse internal key as x-only point */
-  if (!secp256k1_xonly_pubkey_parse(&P, internal_key)) {
+  if (!echo_xonly_pubkey_parse(&P, internal_key)) {
     return ECHO_ERR_SCRIPT_ERROR;
   }
 
@@ -4464,7 +4464,7 @@ echo_result_t taproot_verify_merkle_proof(const uint8_t leaf_hash[32],
 
   /* Serialize Q as x-only and compare with output_key */
   uint8_t computed_key[32];
-  secp256k1_xonly_pubkey_serialize(computed_key, &Q);
+  echo_xonly_pubkey_serialize(computed_key, &Q);
 
   if (memcmp(computed_key, output_key, 32) != 0) {
     return ECHO_ERR_SCRIPT_ERROR;

@@ -353,9 +353,9 @@ int secp256k1_ecdsa_sig_parse_der_lax(secp256k1_ecdsa_sig_t *sig,
  *
  * Returns 1 if valid, 0 if invalid.
  */
-int secp256k1_ecdsa_verify(const secp256k1_ecdsa_sig_t *sig,
-                           const uint8_t msg_hash[32],
-                           const secp256k1_point_t *pubkey);
+int echo_ecdsa_verify(const secp256k1_ecdsa_sig_t *sig,
+                      const uint8_t msg_hash[32],
+                      const secp256k1_point_t *pubkey);
 
 /*
  * ============================================================================
@@ -377,14 +377,14 @@ int secp256k1_ecdsa_verify(const secp256k1_ecdsa_sig_t *sig,
  *
  * Returns 1 on success, 0 if x is not a valid x-coordinate.
  */
-int secp256k1_xonly_pubkey_parse(secp256k1_point_t *p, const uint8_t xonly[32]);
+int echo_xonly_pubkey_parse(secp256k1_point_t *p, const uint8_t xonly[32]);
 
 /*
  * Serialize point to x-only format (32 bytes).
  * Only the x-coordinate is output.
  */
-void secp256k1_xonly_pubkey_serialize(uint8_t xonly[32],
-                                      const secp256k1_point_t *p);
+void echo_xonly_pubkey_serialize(uint8_t xonly[32],
+                                 const secp256k1_point_t *p);
 
 /*
  * BIP-340 tagged hash: SHA256(SHA256(tag) || SHA256(tag) || msg)
@@ -419,7 +419,7 @@ void secp256k1_schnorr_tagged_hash(uint8_t out[32], const char *tag,
  *
  * Returns 1 if valid, 0 if invalid.
  */
-int secp256k1_schnorr_verify(const uint8_t sig[64], const uint8_t *msg,
-                             size_t msg_len, const uint8_t pubkey[32]);
+int echo_schnorr_verify(const uint8_t sig[64], const uint8_t *msg,
+                        size_t msg_len, const uint8_t pubkey[32]);
 
 #endif /* ECHO_SECP256K1_H */

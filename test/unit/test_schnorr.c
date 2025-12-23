@@ -91,7 +91,7 @@ static void test_xonly_pubkey_parse_valid(void)
         "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
         32);
 
-    if (secp256k1_xonly_pubkey_parse(&p, xonly)) {
+    if (echo_xonly_pubkey_parse(&p, xonly)) {
         /* Verify we got a point on the curve */
         if (secp256k1_point_is_valid(&p) && !secp256k1_point_is_infinity(&p)) {
             test_case("Parse valid x-only pubkey (G)");
@@ -115,7 +115,7 @@ static void test_xonly_pubkey_parse_invalid(void)
         "fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f",
         32);
 
-    if (!secp256k1_xonly_pubkey_parse(&p, xonly)) {
+    if (!echo_xonly_pubkey_parse(&p, xonly)) {
         test_case("Reject x >= p");
         test_pass();
     } else {
@@ -132,8 +132,8 @@ static void test_xonly_pubkey_serialize(void)
         "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
         32);
 
-    secp256k1_xonly_pubkey_parse(&p, xonly_in);
-    secp256k1_xonly_pubkey_serialize(xonly_out, &p);
+    echo_xonly_pubkey_parse(&p, xonly_in);
+    echo_xonly_pubkey_serialize(xonly_out, &p);
 
     if (memcmp(xonly_in, xonly_out, 32) == 0) {
         test_case("x-only serialize roundtrip");
@@ -163,7 +163,7 @@ static void test_schnorr_vector_0(void)
         "e907831f80848d1069a5371b402410364bdf1c5f8307b0084c55f1ce2dca8215"
         "25f66a4a85ea8b71e482a74f382d2ce5ebeee8fdb2172f477df4900d310536c0", 64);
 
-    if (secp256k1_schnorr_verify(sig, msg, 32, pubkey)) {
+    if (echo_schnorr_verify(sig, msg, 32, pubkey)) {
         test_case("Vector 0: valid signature");
         test_pass();
     } else {
@@ -184,7 +184,7 @@ static void test_schnorr_vector_1(void)
         "6896bd60eeae296db48a229ff71dfe071bde413e6d43f917dc8dcf8c78de3341"
         "8906d11ac976abccb20b091292bff4ea897efcb639ea871cfa95f6de339e4b0a", 64);
 
-    if (secp256k1_schnorr_verify(sig, msg, 32, pubkey)) {
+    if (echo_schnorr_verify(sig, msg, 32, pubkey)) {
         test_case("Vector 1: valid signature");
         test_pass();
     } else {
@@ -205,7 +205,7 @@ static void test_schnorr_vector_2(void)
         "5831aaeed7b44bb74e5eab94ba9d4294c49bcf2a60728d8b4c200f50dd313c1b"
         "ab745879a5ad954a72c45a91c3a51d3c7adea98d82f8481e0e1e03674a6f3fb7", 64);
 
-    if (secp256k1_schnorr_verify(sig, msg, 32, pubkey)) {
+    if (echo_schnorr_verify(sig, msg, 32, pubkey)) {
         test_case("Vector 2: valid signature");
         test_pass();
     } else {
@@ -226,7 +226,7 @@ static void test_schnorr_vector_3(void)
         "7eb0509757e246f19449885651611cb965ecc1a187dd51b64fda1edc9637d5ec"
         "97582b9cb13db3933705b32ba982af5af25fd78881ebb32771fc5922efc66ea3", 64);
 
-    if (secp256k1_schnorr_verify(sig, msg, 32, pubkey)) {
+    if (echo_schnorr_verify(sig, msg, 32, pubkey)) {
         test_case("Vector 3: msg not reduced");
         test_pass();
     } else {
@@ -247,7 +247,7 @@ static void test_schnorr_vector_4(void)
         "00000000000000000000003b78ce563f89a0ed9414f5aa28ad0d96d6795f9c63"
         "76afb1548af603b3eb45c9f8207dee1060cb71c04e80f593060b07d28308d7f4", 64);
 
-    if (secp256k1_schnorr_verify(sig, msg, 32, pubkey)) {
+    if (echo_schnorr_verify(sig, msg, 32, pubkey)) {
         test_case("Vector 4: r with leading zeros");
         test_pass();
     } else {
@@ -268,7 +268,7 @@ static void test_schnorr_vector_5(void)
         "6cff5c3ba86c69ea4b7376f31a9bcb4f74c1976089b2d9963da2e5543e177769"
         "69e89b4c5564d00349106b8497785dd7d1d713a8ae82b32fa79d5f7fc407d39b", 64);
 
-    if (!secp256k1_schnorr_verify(sig, msg, 32, pubkey)) {
+    if (!echo_schnorr_verify(sig, msg, 32, pubkey)) {
         test_case("Vector 5: reject pubkey not on curve");
         test_pass();
     } else {
@@ -289,7 +289,7 @@ static void test_schnorr_vector_6(void)
         "fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556"
         "3cc27944640ac607cd107ae10923d9ef7a73c643e166be5ebeafa34b1ac553e2", 64);
 
-    if (!secp256k1_schnorr_verify(sig, msg, 32, pubkey)) {
+    if (!echo_schnorr_verify(sig, msg, 32, pubkey)) {
         test_case("Vector 6: reject odd R.y");
         test_pass();
     } else {
@@ -310,7 +310,7 @@ static void test_schnorr_vector_7(void)
         "1fa62e331edbc21c394792d2ab1100a7b432b013df3f6ff4f99fcb33e0e1515f"
         "28890b3edb6e7189b630448b515ce4f8622a954cfe545735aaea5134fccdb2bd", 64);
 
-    if (!secp256k1_schnorr_verify(sig, msg, 32, pubkey)) {
+    if (!echo_schnorr_verify(sig, msg, 32, pubkey)) {
         test_case("Vector 7: reject negated message");
         test_pass();
     } else {
@@ -331,7 +331,7 @@ static void test_schnorr_vector_8(void)
         "6cff5c3ba86c69ea4b7376f31a9bcb4f74c1976089b2d9963da2e5543e177769"
         "961764b3aa9b2ffcb6ef947b6887a226e8d7c93e00c5ed0c1834ff0d0c2e6da6", 64);
 
-    if (!secp256k1_schnorr_verify(sig, msg, 32, pubkey)) {
+    if (!echo_schnorr_verify(sig, msg, 32, pubkey)) {
         test_case("Vector 8: reject negated s");
         test_pass();
     } else {
@@ -352,7 +352,7 @@ static void test_schnorr_vector_12(void)
         "fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f"
         "69e89b4c5564d00349106b8497785dd7d1d713a8ae82b32fa79d5f7fc407d39b", 64);
 
-    if (!secp256k1_schnorr_verify(sig, msg, 32, pubkey)) {
+    if (!echo_schnorr_verify(sig, msg, 32, pubkey)) {
         test_case("Vector 12: reject r == p");
         test_pass();
     } else {
@@ -373,7 +373,7 @@ static void test_schnorr_vector_13(void)
         "6cff5c3ba86c69ea4b7376f31a9bcb4f74c1976089b2d9963da2e5543e177769"
         "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141", 64);
 
-    if (!secp256k1_schnorr_verify(sig, msg, 32, pubkey)) {
+    if (!echo_schnorr_verify(sig, msg, 32, pubkey)) {
         test_case("Vector 13: reject s == n");
         test_pass();
     } else {
@@ -394,7 +394,7 @@ static void test_schnorr_vector_14(void)
         "6cff5c3ba86c69ea4b7376f31a9bcb4f74c1976089b2d9963da2e5543e177769"
         "69e89b4c5564d00349106b8497785dd7d1d713a8ae82b32fa79d5f7fc407d39b", 64);
 
-    if (!secp256k1_schnorr_verify(sig, msg, 32, pubkey)) {
+    if (!echo_schnorr_verify(sig, msg, 32, pubkey)) {
         test_case("Vector 14: reject pubkey >= p");
         test_pass();
     } else {
@@ -413,7 +413,7 @@ static void test_schnorr_vector_15(void)
         "71535db165ecd9fbbc046e5ffaea61186bb6ad436732fccc25291a55895464cf"
         "6069ce26bf03466228f19a3a62db8a649f2d560fac652827d1af0574e427ab63", 64);
 
-    if (secp256k1_schnorr_verify(sig, NULL, 0, pubkey)) {
+    if (echo_schnorr_verify(sig, NULL, 0, pubkey)) {
         test_case("Vector 15: empty message");
         test_pass();
     } else {
@@ -433,7 +433,7 @@ static void test_schnorr_vector_16(void)
         "08a20a0afef64124649232e0693c583ab1b9934ae63b4c3511f3ae1134c6a303"
         "ea3173bfea6683bd101fa5aa5dbc1996fe7cacfc5a577d33ec14564cec2bacbf", 64);
 
-    if (secp256k1_schnorr_verify(sig, msg, 1, pubkey)) {
+    if (echo_schnorr_verify(sig, msg, 1, pubkey)) {
         test_case("Vector 16: 1-byte message");
         test_pass();
     } else {
@@ -453,7 +453,7 @@ static void test_schnorr_vector_17(void)
         "5130f39a4059b43bc7cac09a19ece52b5d8699d1a71e3c52da9afdb6b50ac370"
         "c4a482b77bf960f8681540e25b6771ece1e5a37fd80e5a51897c5566a97ea5a5", 64);
 
-    if (secp256k1_schnorr_verify(sig, msg, 17, pubkey)) {
+    if (echo_schnorr_verify(sig, msg, 17, pubkey)) {
         test_case("Vector 17: 17-byte message");
         test_pass();
     } else {

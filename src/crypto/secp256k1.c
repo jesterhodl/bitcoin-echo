@@ -16,6 +16,7 @@
  */
 
 #include "secp256k1.h"
+#include "secp256k1_libsecp.h"
 #include "sha256.h"
 #include <stdint.h>
 #include <string.h>
@@ -1460,67 +1461,30 @@ int secp256k1_ecdsa_sig_parse_der_lax(secp256k1_ecdsa_sig_t *sig,
  *   7. If R = infinity, reject
  *   8. Accept if R.x mod n == r
  */
-int secp256k1_ecdsa_verify(const secp256k1_ecdsa_sig_t *sig,
-                           const uint8_t msg_hash[32],
-                           const secp256k1_point_t *pubkey) {
-  secp256k1_scalar_t e, w, u1, u2;
-  secp256k1_point_t R1, R2, R;
-  secp256k1_fe_t rx;
-  uint8_t rx_bytes[32];
-  secp256k1_scalar_t rx_scalar;
-  int i;
+int echo_ecdsa_verify(const secp256k1_ecdsa_sig_t *sig,
+                      const uint8_t msg_hash[32],
+                      const secp256k1_point_t *pubkey) {
+  /*
+   * Use libsecp256k1 for optimized verification.
+   * Convert our types to raw bytes and call the wrapper.
+   */
+  uint8_t sig_compact[64];
+  uint8_t pubkey_serialized[65];
 
   /* Check pubkey is not infinity */
   if (secp256k1_point_is_infinity(pubkey)) {
     return 0;
   }
 
-  /* Check pubkey is on curve */
-  if (!secp256k1_point_is_valid(pubkey)) {
-    return 0;
-  }
+  /* Convert signature (r, s) to compact format */
+  secp256k1_scalar_get_bytes(sig_compact, &sig->r);
+  secp256k1_scalar_get_bytes(sig_compact + 32, &sig->s);
 
-  /* e = message hash as scalar (reduced mod n) */
-  secp256k1_scalar_set_bytes(&e, msg_hash);
+  /* Serialize pubkey as uncompressed */
+  secp256k1_pubkey_serialize(pubkey_serialized, pubkey, 0);
 
-  /* w = s^(-1) mod n */
-  secp256k1_scalar_inv(&w, &sig->s);
-
-  /* u1 = e * w mod n */
-  secp256k1_scalar_mul(&u1, &e, &w);
-
-  /* u2 = r * w mod n */
-  secp256k1_scalar_mul(&u2, &sig->r, &w);
-
-  /* R1 = u1 * G */
-  secp256k1_point_mul_gen(&R1, &u1);
-
-  /* R2 = u2 * P */
-  secp256k1_point_mul(&R2, pubkey, &u2);
-
-  /* R = R1 + R2 */
-  secp256k1_point_add(&R, &R1, &R2);
-
-  /* If R = infinity, reject */
-  if (secp256k1_point_is_infinity(&R)) {
-    return 0;
-  }
-
-  /* Get R.x in affine coordinates */
-  secp256k1_point_get_xy(&rx, NULL, &R);
-
-  /* Convert to bytes, then to scalar (to reduce mod n) */
-  secp256k1_fe_get_bytes(rx_bytes, &rx);
-  secp256k1_scalar_set_bytes(&rx_scalar, rx_bytes);
-
-  /* Accept if rx_scalar == r */
-  for (i = 0; i < 8; i++) {
-    if (rx_scalar.limbs[i] != sig->r.limbs[i]) {
-      return 0;
-    }
-  }
-
-  return 1;
+  /* Call libsecp256k1 for fast verification */
+  return libsecp_ecdsa_verify(sig_compact, msg_hash, pubkey_serialized, 65);
 }
 
 /*
@@ -1538,8 +1502,8 @@ int secp256k1_ecdsa_verify(const secp256k1_ecdsa_sig_t *sig,
  *   3. Compute y = sqrt(y²), fail if no square root
  *   4. Return point with even y
  */
-int secp256k1_xonly_pubkey_parse(secp256k1_point_t *p,
-                                 const uint8_t xonly[32]) {
+int echo_xonly_pubkey_parse(secp256k1_point_t *p,
+                            const uint8_t xonly[32]) {
   secp256k1_fe_t x, y, x3, y2, seven;
 
   /* Load x-coordinate */
@@ -1570,8 +1534,8 @@ int secp256k1_xonly_pubkey_parse(secp256k1_point_t *p,
 /*
  * Serialize point to x-only format (32 bytes).
  */
-void secp256k1_xonly_pubkey_serialize(uint8_t xonly[32],
-                                      const secp256k1_point_t *p) {
+void echo_xonly_pubkey_serialize(uint8_t xonly[32],
+                                 const secp256k1_point_t *p) {
   secp256k1_fe_t x;
 
   secp256k1_point_get_xy(&x, NULL, p);
@@ -1637,105 +1601,8 @@ static void scalar_negate(secp256k1_scalar_t *r, const secp256k1_scalar_t *a) {
  *   7. If R is infinity or has_even_y(R) is false or x(R) != r, fail
  *   8. Return success
  */
-int secp256k1_schnorr_verify(const uint8_t sig[64], const uint8_t *msg,
-                             size_t msg_len, const uint8_t pubkey[32]) {
-  secp256k1_point_t P, R, sG, eP;
-  secp256k1_fe_t r_fe, Rx, Ry;
-  secp256k1_scalar_t s, e, neg_e;
-  uint8_t
-      challenge_input[32 + 32 + 1024]; /* r || pk || msg (max 1024 for msg) */
-  uint8_t challenge_hash[32];
-  uint8_t r_bytes[32], Rx_bytes[32];
-  int i;
-
-  /* For very large messages, we need dynamic allocation or streaming.
-   * For simplicity, we limit message size here. BIP-340 allows any size. */
-  if (msg_len > 1024) {
-    /* For messages > 1024 bytes, use streaming approach */
-    sha256_ctx_t ctx;
-    uint8_t tag_hash[32];
-
-    sha256((const uint8_t *)"BIP0340/challenge", 17, tag_hash);
-    sha256_init(&ctx);
-    sha256_update(&ctx, tag_hash, 32);
-    sha256_update(&ctx, tag_hash, 32);
-    sha256_update(&ctx, sig, 32);      /* r */
-    sha256_update(&ctx, pubkey, 32);   /* pk */
-    sha256_update(&ctx, msg, msg_len); /* msg */
-    sha256_final(&ctx, challenge_hash);
-  } else {
-    /* Build challenge input: r || pk || msg */
-    memcpy(challenge_input, sig, 32);           /* r */
-    memcpy(challenge_input + 32, pubkey, 32);   /* pk */
-    memcpy(challenge_input + 64, msg, msg_len); /* msg */
-
-    /* e = tagged_hash("BIP0340/challenge", r || pk || msg) */
-    secp256k1_schnorr_tagged_hash(challenge_hash, "BIP0340/challenge",
-                                  challenge_input, 64 + msg_len);
-  }
-
-  /* 1. P = lift_x(pk) */
-  if (!secp256k1_xonly_pubkey_parse(&P, pubkey)) {
-    return 0;
-  }
-
-  /* 2. Parse r and s from signature */
-  /* r is just bytes, check later if valid x-coordinate */
-  memcpy(r_bytes, sig, 32);
-
-  /* Check r < p by trying to load as field element */
-  if (!secp256k1_fe_set_bytes(&r_fe, r_bytes)) {
-    return 0; /* r >= p */
-  }
-
-  /* Load s as scalar (automatically reduced mod n) */
-  secp256k1_scalar_set_bytes(&s, sig + 32);
-
-  /* Check s < n by comparing original bytes with what we loaded */
-  {
-    uint8_t s_check[32];
-    secp256k1_scalar_get_bytes(s_check, &s);
-    if (memcmp(s_check, sig + 32, 32) != 0) {
-      return 0; /* s >= n (was reduced) */
-    }
-  }
-
-  /* 5. e = int(challenge_hash) mod n */
-  secp256k1_scalar_set_bytes(&e, challenge_hash);
-
-  /* 6. R = s*G - e*P = s*G + (-e)*P */
-  scalar_negate(&neg_e, &e);
-
-  /* Compute s*G */
-  secp256k1_point_mul_gen(&sG, &s);
-
-  /* Compute (-e)*P */
-  secp256k1_point_mul(&eP, &P, &neg_e);
-
-  /* R = sG + (-e)P */
-  secp256k1_point_add(&R, &sG, &eP);
-
-  /* 7a. If R is infinity, fail */
-  if (secp256k1_point_is_infinity(&R)) {
-    return 0;
-  }
-
-  /* 7b. Get R coordinates */
-  secp256k1_point_get_xy(&Rx, &Ry, &R);
-
-  /* 7c. Check has_even_y(R) */
-  if (secp256k1_fe_is_odd(&Ry)) {
-    return 0;
-  }
-
-  /* 7d. Check x(R) == r */
-  secp256k1_fe_get_bytes(Rx_bytes, &Rx);
-  for (i = 0; i < 32; i++) {
-    if (Rx_bytes[i] != r_bytes[i]) {
-      return 0;
-    }
-  }
-
-  /* 8. Success */
-  return 1;
+int echo_schnorr_verify(const uint8_t sig[64], const uint8_t *msg,
+                        size_t msg_len, const uint8_t pubkey[32]) {
+  /* Use libsecp256k1's optimized Schnorr verification */
+  return libsecp_schnorr_verify(sig, msg, msg_len, pubkey);
 }

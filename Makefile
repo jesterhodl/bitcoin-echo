@@ -6,6 +6,19 @@ CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -O2 -Iinclude -pthread
 LDFLAGS = -pthread
 TARGET  = echo
 
+# libsecp256k1 configuration
+# We compile the vendored libsecp256k1 with Schnorr support enabled
+LIBSECP_CFLAGS = -DENABLE_MODULE_EXTRAKEYS -DENABLE_MODULE_SCHNORRSIG \
+                 -Ilib/secp256k1/include -Ilib/secp256k1/src \
+                 -Wno-unused-function -Wno-pedantic -w
+LIBSECP_SRCS   = lib/secp256k1/src/secp256k1.c \
+                 lib/secp256k1/src/precomputed_ecmult.c \
+                 lib/secp256k1/src/precomputed_ecmult_gen.c
+LIBSECP_OBJS   = $(LIBSECP_SRCS:.c=.o)
+SECP_WRAPPER_OBJ = src/crypto/secp256k1_libsecp.o
+# All libsecp deps needed for tests using secp256k1
+LIBSECP_DEPS   = $(SECP_WRAPPER_OBJ) $(LIBSECP_OBJS)
+
 # Source files (will be populated as implementation progresses)
 SRCS    = src/main.c \
           src/platform/posix.c \
@@ -13,6 +26,7 @@ SRCS    = src/main.c \
           src/crypto/sha1.c \
           src/crypto/ripemd160.c \
           src/crypto/secp256k1.c \
+          src/crypto/secp256k1_libsecp.c \
           src/consensus/serialize.c \
           src/consensus/tx.c \
           src/consensus/block.c \
@@ -89,11 +103,26 @@ TEST_INTEGRATION     = test/unit/test_integration
 
 all: $(TARGET)
 
-$(TARGET): $(OBJS)
-	$(CC) $(LDFLAGS) -o $@ $(OBJS)
+$(TARGET): $(OBJS) $(LIBSECP_OBJS)
+	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(LIBSECP_OBJS)
 
+# Default rule for our source files
 %.o: %.c
 	$(CC) $(CFLAGS) -c -o $@ $<
+
+# libsecp256k1 compilation rules
+lib/secp256k1/src/secp256k1.o: lib/secp256k1/src/secp256k1.c
+	$(CC) -std=c11 -O2 $(LIBSECP_CFLAGS) -c -o $@ $<
+
+lib/secp256k1/src/precomputed_ecmult.o: lib/secp256k1/src/precomputed_ecmult.c
+	$(CC) -std=c11 -O2 $(LIBSECP_CFLAGS) -c -o $@ $<
+
+lib/secp256k1/src/precomputed_ecmult_gen.o: lib/secp256k1/src/precomputed_ecmult_gen.c
+	$(CC) -std=c11 -O2 $(LIBSECP_CFLAGS) -c -o $@ $<
+
+# Wrapper file needs libsecp flags for include paths
+src/crypto/secp256k1_libsecp.o: src/crypto/secp256k1_libsecp.c
+	$(CC) $(CFLAGS) $(LIBSECP_CFLAGS) -c -o $@ $<
 
 # Test utility object file
 TEST_UTILS_OBJ = test/unit/test_utils.o
@@ -108,19 +137,19 @@ $(TEST_SHA256): test/unit/test_sha256.c src/crypto/sha256.c  $(TEST_UTILS_OBJ)
 $(TEST_RIPEMD160): test/unit/test_ripemd160.c src/crypto/ripemd160.c src/crypto/sha256.c  $(TEST_UTILS_OBJ)
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(TEST_SECP256K1_FE): test/unit/test_secp256k1_fe.c src/crypto/secp256k1.c src/crypto/sha256.c  $(TEST_UTILS_OBJ)
+$(TEST_SECP256K1_FE): test/unit/test_secp256k1_fe.c src/crypto/secp256k1.c src/crypto/sha256.c $(TEST_UTILS_OBJ) $(LIBSECP_DEPS)
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(TEST_SECP256K1_GROUP): test/unit/test_secp256k1_group.c src/crypto/secp256k1.c src/crypto/sha256.c  $(TEST_UTILS_OBJ)
+$(TEST_SECP256K1_GROUP): test/unit/test_secp256k1_group.c src/crypto/secp256k1.c src/crypto/sha256.c $(TEST_UTILS_OBJ) $(LIBSECP_DEPS)
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(TEST_ECDSA): test/unit/test_ecdsa.c src/crypto/secp256k1.c src/crypto/sha256.c  $(TEST_UTILS_OBJ)
+$(TEST_ECDSA): test/unit/test_ecdsa.c src/crypto/secp256k1.c src/crypto/sha256.c $(TEST_UTILS_OBJ) $(LIBSECP_DEPS)
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(TEST_SCHNORR): test/unit/test_schnorr.c src/crypto/secp256k1.c src/crypto/sha256.c  $(TEST_UTILS_OBJ)
+$(TEST_SCHNORR): test/unit/test_schnorr.c src/crypto/secp256k1.c src/crypto/sha256.c $(TEST_UTILS_OBJ) $(LIBSECP_DEPS)
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(TEST_SIG_VERIFY): test/unit/test_sig_verify.c src/consensus/sig_verify.c src/crypto/secp256k1.c src/crypto/sha256.c  $(TEST_UTILS_OBJ)
+$(TEST_SIG_VERIFY): test/unit/test_sig_verify.c src/consensus/sig_verify.c src/crypto/secp256k1.c src/crypto/sha256.c $(TEST_UTILS_OBJ) $(LIBSECP_DEPS)
 	$(CC) $(CFLAGS) -o $@ $^
 
 $(TEST_SERIALIZE): test/unit/test_serialize.c src/consensus/serialize.c  $(TEST_UTILS_OBJ)
@@ -135,25 +164,25 @@ $(TEST_BLOCK): test/unit/test_block.c src/consensus/block.c src/consensus/tx.c s
 $(TEST_MERKLE): test/unit/test_merkle.c src/consensus/merkle.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c  $(TEST_UTILS_OBJ)
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(TEST_SCRIPT): test/unit/test_script.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c src/crypto/sha1.c src/crypto/ripemd160.c src/crypto/secp256k1.c  $(TEST_UTILS_OBJ)
+$(TEST_SCRIPT): test/unit/test_script.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c src/crypto/sha1.c src/crypto/ripemd160.c src/crypto/secp256k1.c $(TEST_UTILS_OBJ) $(LIBSECP_DEPS)
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(TEST_STACK): test/unit/test_stack.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c src/crypto/sha1.c src/crypto/ripemd160.c src/crypto/secp256k1.c  $(TEST_UTILS_OBJ)
+$(TEST_STACK): test/unit/test_stack.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c src/crypto/sha1.c src/crypto/ripemd160.c src/crypto/secp256k1.c $(TEST_UTILS_OBJ) $(LIBSECP_DEPS)
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(TEST_OPCODES): test/unit/test_opcodes.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c src/crypto/sha1.c src/crypto/ripemd160.c src/crypto/secp256k1.c  $(TEST_UTILS_OBJ)
+$(TEST_OPCODES): test/unit/test_opcodes.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c src/crypto/sha1.c src/crypto/ripemd160.c src/crypto/secp256k1.c $(TEST_UTILS_OBJ) $(LIBSECP_DEPS)
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(TEST_P2SH): test/unit/test_p2sh.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c src/crypto/sha1.c src/crypto/ripemd160.c src/crypto/secp256k1.c  $(TEST_UTILS_OBJ)
+$(TEST_P2SH): test/unit/test_p2sh.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c src/crypto/sha1.c src/crypto/ripemd160.c src/crypto/secp256k1.c $(TEST_UTILS_OBJ) $(LIBSECP_DEPS)
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(TEST_TIMELOCK): test/unit/test_timelock.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c src/crypto/sha1.c src/crypto/ripemd160.c src/crypto/secp256k1.c  $(TEST_UTILS_OBJ)
+$(TEST_TIMELOCK): test/unit/test_timelock.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c src/crypto/sha1.c src/crypto/ripemd160.c src/crypto/secp256k1.c $(TEST_UTILS_OBJ) $(LIBSECP_DEPS)
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(TEST_SCRIPT_VECTORS): test/unit/test_script_vectors.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/tx.c src/consensus/serialize.c src/consensus/merkle.c src/consensus/block.c src/crypto/sha256.c src/crypto/sha1.c src/crypto/ripemd160.c src/crypto/secp256k1.c  $(TEST_UTILS_OBJ)
+$(TEST_SCRIPT_VECTORS): test/unit/test_script_vectors.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/tx.c src/consensus/serialize.c src/consensus/merkle.c src/consensus/block.c src/crypto/sha256.c src/crypto/sha1.c src/crypto/ripemd160.c src/crypto/secp256k1.c $(TEST_UTILS_OBJ) $(LIBSECP_DEPS)
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(TEST_TX_VALIDATE): test/unit/test_tx_validate.c src/consensus/tx_validate.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c src/crypto/sha1.c src/crypto/ripemd160.c src/crypto/secp256k1.c  $(TEST_UTILS_OBJ)
+$(TEST_TX_VALIDATE): test/unit/test_tx_validate.c src/consensus/tx_validate.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c src/crypto/sha1.c src/crypto/ripemd160.c src/crypto/secp256k1.c $(TEST_UTILS_OBJ) $(LIBSECP_DEPS)
 	$(CC) $(CFLAGS) -o $@ $^
 
 $(TEST_BLOCK_VALIDATE): test/unit/test_block_validate.c src/consensus/block_validate.c src/consensus/block.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c src/consensus/merkle.c  $(TEST_UTILS_OBJ)
@@ -168,7 +197,7 @@ $(TEST_UTXO): test/unit/test_utxo.c src/consensus/utxo.c  $(TEST_UTILS_OBJ)
 $(TEST_CHAINSTATE): test/unit/test_chainstate.c src/consensus/chainstate.c src/consensus/utxo.c src/consensus/block.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c  $(TEST_UTILS_OBJ)
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(TEST_CONSENSUS): test/unit/test_consensus.c src/consensus/consensus.c src/consensus/chainstate.c src/consensus/utxo.c src/consensus/block_validate.c src/consensus/tx_validate.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/merkle.c src/consensus/block.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c src/crypto/sha1.c src/crypto/ripemd160.c src/crypto/secp256k1.c src/platform/posix.c src/app/log.c $(TEST_UTILS_OBJ)
+$(TEST_CONSENSUS): test/unit/test_consensus.c src/consensus/consensus.c src/consensus/chainstate.c src/consensus/utxo.c src/consensus/block_validate.c src/consensus/tx_validate.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/merkle.c src/consensus/block.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c src/crypto/sha1.c src/crypto/ripemd160.c src/crypto/secp256k1.c src/platform/posix.c src/app/log.c $(TEST_UTILS_OBJ) $(LIBSECP_DEPS)
 	$(CC) $(CFLAGS) -o $@ $^
 
 $(TEST_BLOCK_STORAGE): test/unit/test_block_storage.c src/storage/blocks.c src/platform/posix.c src/consensus/block.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c  $(TEST_UTILS_OBJ)
@@ -201,34 +230,34 @@ $(TEST_RELAY): test/unit/test_relay.c src/protocol/relay.c src/protocol/peer.c s
 $(TEST_SYNC): test/unit/test_sync.c src/protocol/sync.c src/protocol/peer.c src/protocol/serialize.c src/protocol/messages.c src/consensus/chainstate.c src/consensus/utxo.c src/consensus/block.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c src/platform/posix.c src/app/log.c $(TEST_UTILS_OBJ)
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(TEST_MEMPOOL): test/unit/test_mempool.c src/protocol/mempool.c src/consensus/tx_validate.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/utxo.c src/consensus/block.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c src/crypto/sha1.c src/crypto/ripemd160.c src/crypto/secp256k1.c  $(TEST_UTILS_OBJ)
+$(TEST_MEMPOOL): test/unit/test_mempool.c src/protocol/mempool.c src/consensus/tx_validate.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/utxo.c src/consensus/block.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c src/crypto/sha1.c src/crypto/ripemd160.c src/crypto/secp256k1.c $(TEST_UTILS_OBJ) $(LIBSECP_DEPS)
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(TEST_NODE): test/unit/test_node.c src/app/node.c src/app/log.c src/protocol/mempool.c src/protocol/sync.c src/protocol/discovery.c src/protocol/peer.c src/protocol/relay.c src/protocol/serialize.c src/protocol/messages.c src/consensus/consensus.c src/consensus/chainstate.c src/consensus/utxo.c src/consensus/block_validate.c src/consensus/tx_validate.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/merkle.c src/consensus/block.c src/consensus/tx.c src/consensus/serialize.c src/storage/blocks.c src/storage/db.c src/storage/utxo_db.c src/storage/block_index_db.c src/crypto/sha256.c src/crypto/sha1.c src/crypto/ripemd160.c src/crypto/secp256k1.c src/platform/posix.c lib/sqlite/sqlite3.c  $(TEST_UTILS_OBJ)
+$(TEST_NODE): test/unit/test_node.c src/app/node.c src/app/log.c src/protocol/mempool.c src/protocol/sync.c src/protocol/discovery.c src/protocol/peer.c src/protocol/relay.c src/protocol/serialize.c src/protocol/messages.c src/consensus/consensus.c src/consensus/chainstate.c src/consensus/utxo.c src/consensus/block_validate.c src/consensus/tx_validate.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/merkle.c src/consensus/block.c src/consensus/tx.c src/consensus/serialize.c src/storage/blocks.c src/storage/db.c src/storage/utxo_db.c src/storage/block_index_db.c src/crypto/sha256.c src/crypto/sha1.c src/crypto/ripemd160.c src/crypto/secp256k1.c src/platform/posix.c lib/sqlite/sqlite3.c $(TEST_UTILS_OBJ) $(LIBSECP_DEPS)
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(TEST_EVENT_LOOP): test/unit/test_event_loop.c src/app/log.c src/protocol/mempool.c src/protocol/sync.c src/protocol/discovery.c src/protocol/peer.c src/protocol/relay.c src/protocol/serialize.c src/protocol/messages.c src/consensus/consensus.c src/consensus/chainstate.c src/consensus/utxo.c src/consensus/block_validate.c src/consensus/tx_validate.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/merkle.c src/consensus/block.c src/consensus/tx.c src/consensus/serialize.c src/storage/blocks.c src/storage/db.c src/storage/utxo_db.c src/storage/block_index_db.c src/crypto/sha256.c src/crypto/sha1.c src/crypto/ripemd160.c src/crypto/secp256k1.c src/platform/posix.c lib/sqlite/sqlite3.c  $(TEST_UTILS_OBJ)
+$(TEST_EVENT_LOOP): test/unit/test_event_loop.c src/app/log.c src/protocol/mempool.c src/protocol/sync.c src/protocol/discovery.c src/protocol/peer.c src/protocol/relay.c src/protocol/serialize.c src/protocol/messages.c src/consensus/consensus.c src/consensus/chainstate.c src/consensus/utxo.c src/consensus/block_validate.c src/consensus/tx_validate.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/merkle.c src/consensus/block.c src/consensus/tx.c src/consensus/serialize.c src/storage/blocks.c src/storage/db.c src/storage/utxo_db.c src/storage/block_index_db.c src/crypto/sha256.c src/crypto/sha1.c src/crypto/ripemd160.c src/crypto/secp256k1.c src/platform/posix.c lib/sqlite/sqlite3.c $(TEST_UTILS_OBJ) $(LIBSECP_DEPS)
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(TEST_RPC): test/unit/test_rpc.c src/app/rpc.c src/app/node.c src/app/log.c src/protocol/mempool.c src/protocol/sync.c src/protocol/discovery.c src/protocol/peer.c src/protocol/relay.c src/protocol/serialize.c src/protocol/messages.c src/consensus/consensus.c src/consensus/chainstate.c src/consensus/utxo.c src/consensus/block_validate.c src/consensus/tx_validate.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/merkle.c src/consensus/block.c src/consensus/tx.c src/consensus/serialize.c src/storage/blocks.c src/storage/db.c src/storage/utxo_db.c src/storage/block_index_db.c src/crypto/sha256.c src/crypto/sha1.c src/crypto/ripemd160.c src/crypto/secp256k1.c src/platform/posix.c lib/sqlite/sqlite3.c  $(TEST_UTILS_OBJ)
+$(TEST_RPC): test/unit/test_rpc.c src/app/rpc.c src/app/node.c src/app/log.c src/protocol/mempool.c src/protocol/sync.c src/protocol/discovery.c src/protocol/peer.c src/protocol/relay.c src/protocol/serialize.c src/protocol/messages.c src/consensus/consensus.c src/consensus/chainstate.c src/consensus/utxo.c src/consensus/block_validate.c src/consensus/tx_validate.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/merkle.c src/consensus/block.c src/consensus/tx.c src/consensus/serialize.c src/storage/blocks.c src/storage/db.c src/storage/utxo_db.c src/storage/block_index_db.c src/crypto/sha256.c src/crypto/sha1.c src/crypto/ripemd160.c src/crypto/secp256k1.c src/platform/posix.c lib/sqlite/sqlite3.c $(TEST_UTILS_OBJ) $(LIBSECP_DEPS)
 	$(CC) $(CFLAGS) -o $@ $^
 
 $(TEST_LOG): test/unit/test_log.c src/app/log.c src/platform/posix.c  $(TEST_UTILS_OBJ)
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(TEST_PRUNING): test/unit/test_pruning.c src/storage/blocks.c src/storage/block_index_db.c src/storage/db.c src/app/node.c src/app/log.c src/protocol/mempool.c src/protocol/sync.c src/protocol/discovery.c src/protocol/peer.c src/protocol/relay.c src/protocol/serialize.c src/protocol/messages.c src/consensus/consensus.c src/consensus/chainstate.c src/consensus/utxo.c src/consensus/block_validate.c src/consensus/tx_validate.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/merkle.c src/consensus/block.c src/consensus/tx.c src/consensus/serialize.c src/storage/utxo_db.c src/crypto/sha256.c src/crypto/sha1.c src/crypto/ripemd160.c src/crypto/secp256k1.c src/platform/posix.c lib/sqlite/sqlite3.c  $(TEST_UTILS_OBJ)
+$(TEST_PRUNING): test/unit/test_pruning.c src/storage/blocks.c src/storage/block_index_db.c src/storage/db.c src/app/node.c src/app/log.c src/protocol/mempool.c src/protocol/sync.c src/protocol/discovery.c src/protocol/peer.c src/protocol/relay.c src/protocol/serialize.c src/protocol/messages.c src/consensus/consensus.c src/consensus/chainstate.c src/consensus/utxo.c src/consensus/block_validate.c src/consensus/tx_validate.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/merkle.c src/consensus/block.c src/consensus/tx.c src/consensus/serialize.c src/storage/utxo_db.c src/crypto/sha256.c src/crypto/sha1.c src/crypto/ripemd160.c src/crypto/secp256k1.c src/platform/posix.c lib/sqlite/sqlite3.c $(TEST_UTILS_OBJ) $(LIBSECP_DEPS)
 	$(CC) $(CFLAGS) -o $@ $^
 
 $(TEST_MINING): test/unit/test_mining.c src/app/mining.c src/consensus/block.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c  $(TEST_UTILS_OBJ)
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(TEST_INTEGRATION): test/unit/test_integration.c src/app/node.c src/app/log.c src/app/mining.c src/protocol/mempool.c src/protocol/sync.c src/protocol/discovery.c src/protocol/peer.c src/protocol/relay.c src/protocol/serialize.c src/protocol/messages.c src/consensus/consensus.c src/consensus/chainstate.c src/consensus/utxo.c src/consensus/block_validate.c src/consensus/tx_validate.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/merkle.c src/consensus/block.c src/consensus/tx.c src/consensus/serialize.c src/storage/blocks.c src/storage/db.c src/storage/utxo_db.c src/storage/block_index_db.c src/crypto/sha256.c src/crypto/sha1.c src/crypto/ripemd160.c src/crypto/secp256k1.c src/platform/posix.c lib/sqlite/sqlite3.c  $(TEST_UTILS_OBJ)
+$(TEST_INTEGRATION): test/unit/test_integration.c src/app/node.c src/app/log.c src/app/mining.c src/protocol/mempool.c src/protocol/sync.c src/protocol/discovery.c src/protocol/peer.c src/protocol/relay.c src/protocol/serialize.c src/protocol/messages.c src/consensus/consensus.c src/consensus/chainstate.c src/consensus/utxo.c src/consensus/block_validate.c src/consensus/tx_validate.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/merkle.c src/consensus/block.c src/consensus/tx.c src/consensus/serialize.c src/storage/blocks.c src/storage/db.c src/storage/utxo_db.c src/storage/block_index_db.c src/crypto/sha256.c src/crypto/sha1.c src/crypto/ripemd160.c src/crypto/secp256k1.c src/platform/posix.c lib/sqlite/sqlite3.c $(TEST_UTILS_OBJ) $(LIBSECP_DEPS)
 	$(CC) $(CFLAGS) -o $@ $^
 
 test: $(TEST_SHA256) $(TEST_RIPEMD160) $(TEST_SECP256K1_FE) $(TEST_SECP256K1_GROUP) $(TEST_ECDSA) $(TEST_SCHNORR) $(TEST_SIG_VERIFY) $(TEST_SERIALIZE) $(TEST_TX) $(TEST_BLOCK) $(TEST_MERKLE) $(TEST_SCRIPT) $(TEST_STACK) $(TEST_OPCODES) $(TEST_P2SH) $(TEST_TIMELOCK) $(TEST_TX_VALIDATE) $(TEST_BLOCK_VALIDATE) $(TEST_COINBASE) $(TEST_UTXO) $(TEST_CHAINSTATE) $(TEST_CONSENSUS) $(TEST_BLOCK_STORAGE) $(TEST_DB) $(TEST_UTXO_DB) $(TEST_BLOCK_INDEX_DB) $(TEST_PROTOCOL) $(TEST_PROTOCOL_SERIALIZE) $(TEST_PEER) $(TEST_DISCOVERY) $(TEST_RELAY) $(TEST_SYNC) $(TEST_MEMPOOL) $(TEST_NODE) $(TEST_EVENT_LOOP) $(TEST_RPC) $(TEST_LOG) $(TEST_PRUNING) $(TEST_MINING) $(TEST_INTEGRATION)
 	@./test/run_all_tests.sh
 
 clean:
-	rm -f $(TARGET) $(OBJS) $(TEST_SHA256) $(TEST_RIPEMD160) $(TEST_SECP256K1_FE) $(TEST_SECP256K1_GROUP) $(TEST_ECDSA) $(TEST_SCHNORR) $(TEST_SIG_VERIFY) $(TEST_SERIALIZE) $(TEST_TX) $(TEST_BLOCK) $(TEST_MERKLE) $(TEST_SCRIPT) $(TEST_STACK) $(TEST_OPCODES) $(TEST_P2SH) $(TEST_TIMELOCK) $(TEST_SCRIPT_VECTORS) $(TEST_TX_VALIDATE) $(TEST_BLOCK_VALIDATE) $(TEST_COINBASE) $(TEST_UTXO) $(TEST_CHAINSTATE) $(TEST_CONSENSUS) $(TEST_BLOCK_STORAGE) $(TEST_DB) $(TEST_UTXO_DB) $(TEST_BLOCK_INDEX_DB) $(TEST_PROTOCOL) $(TEST_PROTOCOL_SERIALIZE) $(TEST_PEER) $(TEST_DISCOVERY) $(TEST_RELAY) $(TEST_SYNC) $(TEST_MEMPOOL) $(TEST_NODE) $(TEST_EVENT_LOOP) $(TEST_RPC) $(TEST_LOG) $(TEST_PRUNING) $(TEST_MINING) $(TEST_INTEGRATION)
+	rm -f $(TARGET) $(OBJS) $(LIBSECP_OBJS) $(TEST_SHA256) $(TEST_RIPEMD160) $(TEST_SECP256K1_FE) $(TEST_SECP256K1_GROUP) $(TEST_ECDSA) $(TEST_SCHNORR) $(TEST_SIG_VERIFY) $(TEST_SERIALIZE) $(TEST_TX) $(TEST_BLOCK) $(TEST_MERKLE) $(TEST_SCRIPT) $(TEST_STACK) $(TEST_OPCODES) $(TEST_P2SH) $(TEST_TIMELOCK) $(TEST_SCRIPT_VECTORS) $(TEST_TX_VALIDATE) $(TEST_BLOCK_VALIDATE) $(TEST_COINBASE) $(TEST_UTXO) $(TEST_CHAINSTATE) $(TEST_CONSENSUS) $(TEST_BLOCK_STORAGE) $(TEST_DB) $(TEST_UTXO_DB) $(TEST_BLOCK_INDEX_DB) $(TEST_PROTOCOL) $(TEST_PROTOCOL_SERIALIZE) $(TEST_PEER) $(TEST_DISCOVERY) $(TEST_RELAY) $(TEST_SYNC) $(TEST_MEMPOOL) $(TEST_NODE) $(TEST_EVENT_LOOP) $(TEST_RPC) $(TEST_LOG) $(TEST_PRUNING) $(TEST_MINING) $(TEST_INTEGRATION)
 	find src -name '*.o' -delete
 	find lib -name '*.o' -delete
