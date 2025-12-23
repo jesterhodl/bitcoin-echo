@@ -574,6 +574,14 @@ typedef struct {
   size_t codesep_pos;         /* Position after last OP_CODESEPARATOR */
 
   /*
+   * Currently executing script tracking.
+   * Needed for proper OP_CODESEPARATOR handling when sig ops are in scriptSig.
+   */
+  const uint8_t *exec_script;  /* Currently executing script */
+  size_t exec_script_len;      /* Length of currently executing script */
+  size_t exec_script_pos;      /* Current position in executing script */
+
+  /*
    * Signature hash cache for BIP-143 (SegWit v0).
    * These are precomputed once per transaction for efficiency.
    */

@@ -22,6 +22,24 @@
 #include <string.h>
 
 /*
+ * libsecp256k1 direct includes for Taproot tweak verification
+ */
+#include "../../lib/secp256k1/include/secp256k1.h"
+#include "../../lib/secp256k1/include/secp256k1_extrakeys.h"
+
+/*
+ * Static libsecp256k1 context for Taproot operations.
+ */
+static secp256k1_context *g_script_ctx = NULL;
+
+static secp256k1_context *get_script_context(void) {
+  if (g_script_ctx == NULL) {
+    g_script_ctx = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
+  }
+  return g_script_ctx;
+}
+
+/*
  * Initialize a mutable script to empty state.
  */
 void script_mut_init(script_mut_t *script) {
@@ -1481,6 +1499,11 @@ echo_result_t script_context_init(script_context_t *ctx, uint32_t flags) {
   memset(ctx->hash_amounts, 0, 32);
   memset(ctx->hash_scriptpubkeys, 0, 32);
 
+  /* Initialize executing script tracking (for OP_CODESEPARATOR) */
+  ctx->exec_script = NULL;
+  ctx->exec_script_len = 0;
+  ctx->exec_script_pos = 0;
+
   return ECHO_OK;
 }
 
@@ -2926,13 +2949,20 @@ echo_result_t script_exec_op(script_context_t *ctx, const script_op_t *op) {
   /* OP_CODESEPARATOR: Mark position for signature hash computation */
   if (opcode == OP_CODESEPARATOR) {
     /*
-     * In legacy scripts, OP_CODESEPARATOR updates the scriptCode
-     * used in signature hash computation to exclude everything
-     * before and including this opcode.
+     * OP_CODESEPARATOR updates the scriptCode used in signature hash
+     * computation. The subscript for sighash starts from the byte
+     * immediately after this opcode.
      *
-     * For now, we just note that it was executed. Full sighash
-     * computation will track the position.
+     * Critical: We update script_code to point to the currently executing
+     * script. This handles the rare but valid case where signature operations
+     * appear in scriptSig alongside OP_CODESEPARATOR (e.g., block 163685).
+     *
+     * exec_script_pos was set by script_execute to the position AFTER
+     * this opcode, which is exactly where the subscript should start.
      */
+    ctx->script_code = ctx->exec_script;
+    ctx->script_code_len = ctx->exec_script_len;
+    ctx->codesep_pos = ctx->exec_script_pos;
     return ECHO_OK;
   }
 
@@ -3001,6 +3031,7 @@ echo_result_t script_exec_op(script_context_t *ctx, const script_op_t *op) {
         uint32_t sig_flags = (ctx->flags & SCRIPT_VERIFY_DERSIG)
                                  ? SIG_VERIFY_STRICT_DER
                                  : 0;
+
         if (sig_verify(SIG_ECDSA, sig_elem.data, actual_sig_len, sighash,
                        pubkey_elem.data, pubkey_elem.len, sig_flags)) {
           result = ECHO_TRUE;
@@ -3325,11 +3356,28 @@ echo_result_t script_execute(script_context_t *ctx, const uint8_t *data,
     return ECHO_OK;
   }
 
+  /*
+   * Track the currently executing script.
+   * This is needed for proper OP_CODESEPARATOR handling when signature
+   * operations appear in scriptSig (rare but valid). When OP_CODESEPARATOR
+   * executes, it updates script_code to point to the current script.
+   */
+  ctx->exec_script = data;
+  ctx->exec_script_len = len;
+  ctx->exec_script_pos = 0;
+
   script_iter_t iter;
   script_iter_init(&iter, data, len);
 
   script_op_t op;
   while (script_iter_next(&iter, &op)) {
+    /*
+     * Update position BEFORE executing opcode.
+     * iter.pos is now at the byte AFTER the current opcode.
+     * OP_CODESEPARATOR needs this to set codesep_pos correctly.
+     */
+    ctx->exec_script_pos = iter.pos;
+
     echo_result_t res = script_exec_op(ctx, &op);
     if (res != ECHO_OK) {
       return res;
@@ -3681,12 +3729,20 @@ echo_result_t sighash_legacy(script_context_t *ctx, uint32_t sighash_type,
    * Legacy sighash requires serializing a modified transaction.
    * This is complex because we need to:
    * 1. Clear all input scripts except the one being signed
-   * 2. Replace that script with scriptCode
+   * 2. Replace that script with scriptCode (starting from codesep_pos)
    * 3. Handle SIGHASH_SINGLE and SIGHASH_NONE edge cases
    *
    * For now, we implement basic SIGHASH_ALL support.
    * Full legacy sighash is complex and rarely needed for new code.
    */
+
+  /*
+   * The subscript for sighash is the portion of script_code starting
+   * from codesep_pos. This handles OP_CODESEPARATOR which updates
+   * script_code and sets codesep_pos to exclude everything before it.
+   */
+  const uint8_t *subscript = ctx->script_code + ctx->codesep_pos;
+  size_t subscript_len = ctx->script_code_len - ctx->codesep_pos;
 
   /* Calculate approximate buffer size needed */
   const tx_t *tx = ctx->tx;
@@ -3699,7 +3755,7 @@ echo_result_t sighash_legacy(script_context_t *ctx, uint32_t sighash_type,
   for (size_t i = 0; i < tx->input_count; i++) {
     buf_size += 32 + 4; /* outpoint */
     if (i == ctx->input_index) {
-      buf_size += 9 + ctx->script_code_len; /* scriptCode */
+      buf_size += 9 + subscript_len; /* scriptCode */
     } else {
       buf_size += 1; /* empty script */
     }
@@ -3749,18 +3805,17 @@ echo_result_t sighash_legacy(script_context_t *ctx, uint32_t sighash_type,
 
     /* Script */
     if (i == ctx->input_index) {
-      /* Use scriptCode for the input being signed */
-      size_t len = ctx->script_code_len;
-      if (len < 0xfd) {
-        buf[pos++] = (uint8_t)len;
+      /* Use subscript (script_code from codesep_pos) for the input being signed */
+      if (subscript_len < 0xfd) {
+        buf[pos++] = (uint8_t)subscript_len;
       } else {
         buf[pos++] = 0xfd;
-        buf[pos++] = (uint8_t)(len & 0xff);
-        buf[pos++] = (uint8_t)((len >> 8) & 0xff);
+        buf[pos++] = (uint8_t)(subscript_len & 0xff);
+        buf[pos++] = (uint8_t)((subscript_len >> 8) & 0xff);
       }
-      if (len > 0) {
-        memcpy(buf + pos, ctx->script_code, len);
-        pos += len;
+      if (subscript_len > 0) {
+        memcpy(buf + pos, subscript, subscript_len);
+        pos += subscript_len;
       }
     } else {
       /* Empty script for other inputs */
@@ -4411,9 +4466,6 @@ echo_result_t taproot_verify_merkle_proof(const uint8_t leaf_hash[32],
                                           const uint8_t internal_key[32],
                                           const uint8_t output_key[32],
                                           uint8_t parity) {
-  /* Parity check is deferred - see comment at end of function */
-  (void)parity;
-
   if (leaf_hash == NULL || internal_key == NULL || output_key == NULL) {
     return ECHO_ERR_NULL_PARAM;
   }
@@ -4446,34 +4498,23 @@ echo_result_t taproot_verify_merkle_proof(const uint8_t leaf_hash[32],
   uint8_t tweak[32];
   compute_taproot_tweak(internal_key, current, tweak);
 
-  /* Compute P + t*G where P is the internal key */
-  secp256k1_point_t P, tG, Q;
+  /*
+   * Use libsecp256k1 to verify: output_key == internal_key + tweak*G
+   * This also properly verifies the parity bit.
+   */
+  secp256k1_context *ctx = get_script_context();
 
-  /* Parse internal key as x-only point */
-  if (!echo_xonly_pubkey_parse(&P, internal_key)) {
+  /* Parse internal key as x-only pubkey */
+  secp256k1_xonly_pubkey internal_pk;
+  if (!secp256k1_xonly_pubkey_parse(ctx, &internal_pk, internal_key)) {
     return ECHO_ERR_SCRIPT_ERROR;
   }
 
-  /* Compute t*G */
-  secp256k1_scalar_t t;
-  secp256k1_scalar_set_bytes(&t, tweak);
-  secp256k1_point_mul_gen(&tG, &t);
-
-  /* Q = P + t*G */
-  secp256k1_point_add(&Q, &P, &tG);
-
-  /* Serialize Q as x-only and compare with output_key */
-  uint8_t computed_key[32];
-  echo_xonly_pubkey_serialize(computed_key, &Q);
-
-  if (memcmp(computed_key, output_key, 32) != 0) {
+  /* Verify the tweak: output_key should equal internal_key + tweak*G */
+  if (!secp256k1_xonly_pubkey_tweak_add_check(ctx, output_key, parity,
+                                               &internal_pk, tweak)) {
     return ECHO_ERR_SCRIPT_ERROR;
   }
-
-  /* Check parity matches */
-  /* The parity bit indicates whether Q.y is even (0) or odd (1) */
-  /* After serialization, we need to check if the actual y parity matches */
-  /* For now, we skip this check as it requires more introspection into Q */
 
   return ECHO_OK;
 }

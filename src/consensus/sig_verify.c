@@ -7,6 +7,10 @@
  * All signature verification in the consensus engine flows through
  * this single point.
  *
+ * IMPLEMENTATION NOTE:
+ * We call libsecp256k1 directly for maximum performance. No wrapper
+ * layers, no intermediate type conversions. Raw bytes in, boolean out.
+ *
  * SUCCESSION GUIDANCE FOR FUTURE DEVELOPERS:
  *
  * When the Bitcoin network adopts a quantum-resistant signature scheme,
@@ -25,21 +29,46 @@
  */
 
 #include "sig_verify.h"
-#include "secp256k1.h"
-#include "../crypto/secp256k1_libsecp.h"
 #include <stddef.h>
 #include <stdint.h>
+
+/*
+ * libsecp256k1 direct includes - no wrapper layer
+ */
+#include "../../lib/secp256k1/include/secp256k1.h"
+#include "../../lib/secp256k1/include/secp256k1_schnorrsig.h"
+#include "../../lib/secp256k1/include/secp256k1_extrakeys.h"
+#include "../../lib/secp256k1/contrib/lax_der_parsing.h"
+
+/*
+ * Static libsecp256k1 context - lazily initialized, never freed.
+ * SECP256K1_CONTEXT_NONE is sufficient for verification-only operations.
+ */
+static secp256k1_context *g_ctx = NULL;
+
+static secp256k1_context *get_context(void) {
+  if (g_ctx == NULL) {
+    g_ctx = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
+  }
+  return g_ctx;
+}
 
 /*
  * Verify a signature against a message hash and public key.
  *
  * Dispatches to the appropriate verification function based on type.
+ * Calls libsecp256k1 directly for maximum performance.
  */
 int sig_verify(sig_type_t type, const uint8_t *sig, size_t sig_len,
                const uint8_t *hash, const uint8_t *pubkey, size_t pubkey_len,
                uint32_t flags) {
   /* Validate inputs */
   if (sig == NULL || hash == NULL || pubkey == NULL) {
+    return 0;
+  }
+
+  secp256k1_context *ctx = get_context();
+  if (ctx == NULL) {
     return 0;
   }
 
@@ -67,31 +96,32 @@ int sig_verify(sig_type_t type, const uint8_t *sig, size_t sig_len,
       return 0;
     }
 
-    /*
-     * For strict DER (post-BIP-66 blocks), call libsecp256k1 directly
-     * with the raw bytes - no intermediate parsing overhead.
-     *
-     * For lax DER (pre-BIP-66 historical blocks), use our lax parser
-     * then convert to compact format for libsecp256k1.
-     */
-    if (flags & SIG_VERIFY_STRICT_DER) {
-      /* Fast path: direct libsecp256k1 call with raw DER bytes */
-      return libsecp_ecdsa_verify_der(sig, sig_len, hash, pubkey, pubkey_len);
-    } else {
-      /* Slow path: lax DER parsing for pre-BIP-66 historical signatures */
-      secp256k1_ecdsa_sig_t ecdsa_sig;
-      uint8_t sig_compact[64];
+    /* Parse public key */
+    secp256k1_pubkey pk;
+    if (!secp256k1_ec_pubkey_parse(ctx, &pk, pubkey, pubkey_len)) {
+      return 0;
+    }
 
-      if (!secp256k1_ecdsa_sig_parse_der_lax(&ecdsa_sig, sig, sig_len)) {
+    /* Parse signature - strict or lax depending on flags */
+    secp256k1_ecdsa_signature parsed_sig;
+    if (flags & SIG_VERIFY_STRICT_DER) {
+      /* Post-BIP-66: strict DER parsing */
+      if (!secp256k1_ecdsa_signature_parse_der(ctx, &parsed_sig, sig,
+                                               sig_len)) {
         return 0;
       }
-
-      /* Convert to compact format for libsecp256k1 */
-      secp256k1_scalar_get_bytes(sig_compact, &ecdsa_sig.r);
-      secp256k1_scalar_get_bytes(sig_compact + 32, &ecdsa_sig.s);
-
-      return libsecp_ecdsa_verify(sig_compact, hash, pubkey, pubkey_len);
+    } else {
+      /* Pre-BIP-66: lax DER parsing for historical signatures */
+      if (!ecdsa_signature_parse_der_lax(ctx, &parsed_sig, sig, sig_len)) {
+        return 0;
+      }
     }
+
+    /* Normalize to lower-S (required for Bitcoin consensus) */
+    secp256k1_ecdsa_signature_normalize(ctx, &parsed_sig, &parsed_sig);
+
+    /* Verify */
+    return secp256k1_ecdsa_verify(ctx, &parsed_sig, hash, &pk);
   }
 
   case SIG_SCHNORR: {
@@ -100,8 +130,7 @@ int sig_verify(sig_type_t type, const uint8_t *sig, size_t sig_len,
      *
      * Signature: 64 bytes (r || s)
      * Public key: 32 bytes (x-only)
-     * Hash: 32-byte sighash (note: Schnorr uses the raw message,
-     *       but in Bitcoin context this is always the sighash)
+     * Hash: 32-byte sighash
      */
 
     /* Validate signature length (exactly 64 bytes) */
@@ -114,11 +143,14 @@ int sig_verify(sig_type_t type, const uint8_t *sig, size_t sig_len,
       return 0;
     }
 
-    /*
-     * Call libsecp256k1 directly with raw bytes.
-     * For BIP-340 Schnorr, the 'hash' parameter is the 32-byte sighash.
-     */
-    return libsecp_schnorr_verify(sig, hash, 32, pubkey);
+    /* Parse x-only public key */
+    secp256k1_xonly_pubkey xonly_pk;
+    if (!secp256k1_xonly_pubkey_parse(ctx, &xonly_pk, pubkey)) {
+      return 0;
+    }
+
+    /* Verify BIP-340 Schnorr signature */
+    return secp256k1_schnorrsig_verify(ctx, sig, hash, 32, &xonly_pk);
   }
 
   default:
@@ -134,10 +166,10 @@ int sig_verify(sig_type_t type, const uint8_t *sig, size_t sig_len,
  */
 int sig_type_known(sig_type_t type) {
   switch (type) {
-  case SIG_ECDSA:
-  case SIG_SCHNORR:
-    return 1;
-  default:
-    return 0;
+    case SIG_ECDSA:
+    case SIG_SCHNORR:
+      return 1;
+    default:
+      return 0;
   }
 }

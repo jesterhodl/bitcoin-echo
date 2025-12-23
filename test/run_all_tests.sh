@@ -67,10 +67,6 @@ run_test() {
 # Run all tests
 run_test "test/unit/test_sha256" "SHA-256 tests"
 run_test "test/unit/test_ripemd160" "RIPEMD-160 tests"
-run_test "test/unit/test_secp256k1_fe" "secp256k1 field tests"
-run_test "test/unit/test_secp256k1_group" "secp256k1 group tests"
-run_test "test/unit/test_ecdsa" "ECDSA tests"
-run_test "test/unit/test_schnorr" "Schnorr tests"
 run_test "test/unit/test_sig_verify" "Signature Interface tests"
 run_test "test/unit/test_serialize" "Serialization tests"
 run_test "test/unit/test_tx" "Transaction tests"
