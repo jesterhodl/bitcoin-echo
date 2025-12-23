@@ -56,9 +56,18 @@ while [ $(date +%s) -lt $END_TIME ]; do
     LAST_STARVE_MS=$STARVE_MS
 
     # Determine bottleneck indicator
-    if [ "$VAL_DELTA" -gt 0 ] && [ "$STARVE_DELTA" -gt 0 ]; then
-      VAL_PCT=$((VAL_DELTA * 100 / (VAL_DELTA + STARVE_DELTA)))
-      if [ "$VAL_PCT" -gt 70 ]; then
+    if [ "$VAL_DELTA" -gt 0 ] || [ "$STARVE_DELTA" -gt 0 ]; then
+      TOTAL_DELTA=$((VAL_DELTA + STARVE_DELTA))
+      if [ "$TOTAL_DELTA" -gt 0 ]; then
+        VAL_PCT=$((VAL_DELTA * 100 / TOTAL_DELTA))
+      else
+        VAL_PCT=50
+      fi
+      if [ "$STARVE_DELTA" -eq 0 ]; then
+        BOTTLENECK="CPU"  # Pure CPU-bound: no waiting for blocks
+      elif [ "$VAL_DELTA" -eq 0 ]; then
+        BOTTLENECK="NET"  # Pure network-bound: no validation happening
+      elif [ "$VAL_PCT" -gt 70 ]; then
         BOTTLENECK="CPU"
       elif [ "$VAL_PCT" -lt 30 ]; then
         BOTTLENECK="NET"
@@ -96,15 +105,24 @@ if [ "$SAMPLES" -gt 0 ]; then
 fi
 
 # Final bottleneck analysis
-if [ "$VAL_MS" -gt 0 ] && [ "$STARVE_MS" -gt 0 ]; then
+if [ "$VAL_MS" -gt 0 ] || [ "$STARVE_MS" -gt 0 ]; then
   TOTAL_TIME=$((VAL_MS + STARVE_MS))
-  VAL_PCT=$((VAL_MS * 100 / TOTAL_TIME))
-  STARVE_PCT=$((STARVE_MS * 100 / TOTAL_TIME))
+  if [ "$TOTAL_TIME" -gt 0 ]; then
+    VAL_PCT=$((VAL_MS * 100 / TOTAL_TIME))
+    STARVE_PCT=$((STARVE_MS * 100 / TOTAL_TIME))
+  else
+    VAL_PCT=50
+    STARVE_PCT=50
+  fi
   echo ""
   echo "Bottleneck Analysis:"
   echo "  Validation time: ${VAL_MS}ms (${VAL_PCT}%)"
   echo "  Starvation time: ${STARVE_MS}ms (${STARVE_PCT}%)"
-  if [ "$VAL_PCT" -gt 70 ]; then
+  if [ "$STARVE_MS" -eq 0 ]; then
+    echo "  -> CPU-BOUND (100%): Network always ready, optimize validation"
+  elif [ "$VAL_MS" -eq 0 ]; then
+    echo "  -> NETWORK-BOUND (100%): Always waiting for blocks"
+  elif [ "$VAL_PCT" -gt 70 ]; then
     echo "  -> CPU-BOUND: Optimize signature verification or UTXO operations"
   elif [ "$STARVE_PCT" -gt 70 ]; then
     echo "  -> NETWORK-BOUND: Improve peer management or increase download window"
