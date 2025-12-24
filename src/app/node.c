@@ -104,6 +104,21 @@ struct node {
   hash256_t invalid_blocks[NODE_MAX_INVALID_BLOCKS];
   size_t invalid_block_count;
   size_t invalid_block_write_idx;  /* Ring buffer write position */
+
+  /*
+   * UTXO Delta Accumulator (Session IBD optimization)
+   *
+   * Instead of flushing ALL UTXOs at each checkpoint, we only:
+   *   - DELETE spent outpoints (accumulated here)
+   *   - INSERT newly created UTXOs (collected at flush time by filtering
+   *     the in-memory UTXO set by height > last_checkpoint)
+   *
+   * This reduces checkpoint I/O from ~6.6M to ~150k operations.
+   */
+  #define UTXO_ACCUM_INITIAL_CAPACITY 65536
+  outpoint_t *accum_spent;           /* Array of spent outpoints */
+  size_t accum_spent_count;
+  size_t accum_spent_capacity;
 };
 
 /*
@@ -114,6 +129,7 @@ struct node {
 
 static echo_result_t node_init_directories(node_t *node);
 static echo_result_t node_flush_utxo_set_to_db(node_t *node, uint32_t height);
+static echo_result_t node_flush_utxo_deltas_to_db(node_t *node, uint32_t height);
 static echo_result_t node_init_databases(node_t *node);
 static echo_result_t node_init_consensus(node_t *node);
 static echo_result_t node_restore_chain_state(node_t *node);
@@ -152,6 +168,68 @@ static echo_result_t sync_cb_get_block_hash_at_height(uint32_t height,
 static size_t sync_cb_cull_slow_peers(size_t target_count, void *ctx);
 static void sync_cb_evict_peer(peer_t *peer, const char *reason, void *ctx);
 static void sync_cb_request_new_peers(size_t count, void *ctx);
+
+/*
+ * ============================================================================
+ * UTXO DELTA ACCUMULATOR
+ * ============================================================================
+ *
+ * Functions to manage the UTXO delta accumulator for efficient checkpointing.
+ */
+
+/**
+ * Initialize the spent outpoint accumulator.
+ */
+static echo_result_t node_accum_init(node_t *node) {
+  node->accum_spent = calloc(UTXO_ACCUM_INITIAL_CAPACITY, sizeof(outpoint_t));
+  if (node->accum_spent == NULL) {
+    return ECHO_ERR_NOMEM;
+  }
+  node->accum_spent_count = 0;
+  node->accum_spent_capacity = UTXO_ACCUM_INITIAL_CAPACITY;
+
+  return ECHO_OK;
+}
+
+/**
+ * Add a spent outpoint to the accumulator.
+ */
+static echo_result_t node_accum_add_spent(node_t *node, const outpoint_t *outpoint) {
+  if (node->accum_spent == NULL) {
+    return ECHO_ERR_INVALID;
+  }
+
+  /* Grow array if needed */
+  if (node->accum_spent_count >= node->accum_spent_capacity) {
+    size_t new_cap = node->accum_spent_capacity * 2;
+    outpoint_t *new_arr = realloc(node->accum_spent, new_cap * sizeof(outpoint_t));
+    if (new_arr == NULL) {
+      return ECHO_ERR_NOMEM;
+    }
+    node->accum_spent = new_arr;
+    node->accum_spent_capacity = new_cap;
+  }
+
+  node->accum_spent[node->accum_spent_count++] = *outpoint;
+  return ECHO_OK;
+}
+
+/**
+ * Clear the accumulator (reset count).
+ */
+static void node_accum_clear(node_t *node) {
+  node->accum_spent_count = 0;
+}
+
+/**
+ * Free the accumulator array entirely.
+ */
+static void node_accum_free(node_t *node) {
+  free(node->accum_spent);
+  node->accum_spent = NULL;
+  node->accum_spent_count = 0;
+  node->accum_spent_capacity = 0;
+}
 
 /*
  * ============================================================================
@@ -342,6 +420,14 @@ node_t *node_create(const node_config_t *config) {
 
     /* Step 5: Initialize sync manager (full node only) - Session 9.6.1 */
     result = node_init_sync(node);
+    if (result != ECHO_OK) {
+      node_cleanup(node);
+      free(node);
+      return NULL;
+    }
+
+    /* Step 5b: Initialize UTXO delta accumulator for efficient checkpointing */
+    result = node_accum_init(node);
     if (result != ECHO_OK) {
       node_cleanup(node);
       free(node);
@@ -685,44 +771,34 @@ static echo_result_t node_restore_chain_state(node_t *node) {
   log_info(LOG_COMP_MAIN, "Checkpoint restored: validated_height=%u", validated_height);
 
   /*
-   * CRITICAL: Invalidate stored blocks that are ahead of the checkpoint.
+   * OPTIMIZATION: Keep stored blocks above the checkpoint for revalidation.
    *
-   * Stored blocks ahead of the checkpoint were downloaded in a previous session
-   * that crashed/stopped before checkpointing. They cannot be validated because
-   * the UTXO set doesn't match - we'd get "Missing input UTXO" errors.
+   * Previously, we invalidated stored blocks above the checkpoint, forcing
+   * re-download. But the blocks themselves are valid Bitcoin blocks - only
+   * the UTXO set needs rebuilding. The sync code already handles loading
+   * stored blocks from disk and revalidating them (see sync.c lines 1615-1643).
    *
-   * The fix is simple: mark those blocks as "not stored" so they get re-downloaded.
-   * This ensures stored blocks always match the UTXO state.
+   * By keeping stored blocks, we can validate from disk at ~50+ blk/s instead
+   * of waiting for network downloads at ~5 blk/s.
    */
   if (validated_height > 0 && node->block_index_db_open) {
-    /* Invalidate stored blocks in database */
-    db_stmt_t invalidate_stmt;
-    echo_result_t inv_result = db_prepare(
+    /* Count stored blocks above checkpoint for logging */
+    db_stmt_t count_stmt;
+    echo_result_t count_result = db_prepare(
         &node->block_index_db.db,
-        "UPDATE blocks SET data_file = -1, data_pos = 0 WHERE height > ?",
-        &invalidate_stmt);
-    if (inv_result == ECHO_OK) {
-      db_bind_int(&invalidate_stmt, 1, (int64_t)validated_height);
-      inv_result = db_step(&invalidate_stmt);
-      db_stmt_finalize(&invalidate_stmt);
-      if (inv_result == ECHO_OK || inv_result == ECHO_DONE) {
-        log_info(LOG_COMP_MAIN,
-                 "Invalidated stored blocks above checkpoint height %u",
-                 validated_height);
-      }
-    }
-
-    /* Also invalidate in-memory block_index entries */
-    for (uint32_t h = validated_height + 1; h <= best_entry.height; h++) {
-      block_index_entry_t entry;
-      if (block_index_db_get_chain_block(&node->block_index_db, h, &entry) ==
-          ECHO_OK) {
-        block_index_t *idx = block_index_map_lookup(map, &entry.hash);
-        if (idx != NULL) {
-          idx->data_file = BLOCK_DATA_NOT_STORED;
-          idx->data_pos = 0;
+        "SELECT COUNT(*) FROM blocks WHERE height > ? AND data_file >= 0",
+        &count_stmt);
+    if (count_result == ECHO_OK) {
+      db_bind_int(&count_stmt, 1, (int64_t)validated_height);
+      if (db_step(&count_stmt) == ECHO_OK) {
+        int64_t stored_count = db_column_int(&count_stmt, 0);
+        if (stored_count > 0) {
+          log_info(LOG_COMP_MAIN,
+                   "Keeping %lld stored blocks above checkpoint for revalidation",
+                   (long long)stored_count);
         }
       }
+      db_stmt_finalize(&count_stmt);
     }
   }
 
@@ -1562,6 +1638,25 @@ static echo_result_t sync_cb_validate_and_apply_block(const block_t *block,
   }
 
   /*
+   * Accumulate spent outpoints for delta-based checkpoint flushing.
+   * We only track spent outpoints here - created UTXOs are collected at
+   * checkpoint time by filtering the in-memory UTXO set by height.
+   */
+  if (node->ibd_mode && node->accum_spent != NULL) {
+    for (size_t tx_idx = 0; tx_idx < block->tx_count; tx_idx++) {
+      const tx_t *tx = &block->txs[tx_idx];
+      /* Skip coinbase - it has no real inputs */
+      if (tx_is_coinbase(tx)) {
+        continue;
+      }
+      /* Add each spent input's prevout to accumulator */
+      for (size_t in_idx = 0; in_idx < tx->input_count; in_idx++) {
+        node_accum_add_spent(node, &tx->inputs[in_idx].prevout);
+      }
+    }
+  }
+
+  /*
    * Update block index database with validated status.
    * Note: Block data storage is already done when block was received.
    */
@@ -1595,17 +1690,22 @@ static echo_result_t sync_cb_validate_and_apply_block(const block_t *block,
   }
 
   /*
-   * IBD checkpoint: Flush UTXO set and save validated tip every 5000 blocks.
+   * IBD checkpoint: Flush UTXO deltas and save validated tip every 5000 blocks.
    * This ensures we can resume from a known-good state on restart.
+   *
+   * Delta flush optimization: Instead of flushing all ~6.6M UTXOs, we only
+   * INSERT newly created UTXOs (height > last_checkpoint) and DELETE spent
+   * outpoints accumulated since the last checkpoint. This reduces checkpoint
+   * I/O from ~6.6M to ~150k operations.
    */
 #define UTXO_CHECKPOINT_INTERVAL 5000
   uint32_t height = consensus_get_height(node->consensus);
   if (node->ibd_mode && node->utxo_db_open &&
       height % UTXO_CHECKPOINT_INTERVAL == 0 && height > 0) {
-    log_info(LOG_COMP_DB, "IBD checkpoint at height %u - flushing UTXO set...",
+    log_info(LOG_COMP_DB, "IBD checkpoint at height %u - flushing UTXO deltas...",
              height);
 
-    echo_result_t flush_result = node_flush_utxo_set_to_db(node, height);
+    echo_result_t flush_result = node_flush_utxo_deltas_to_db(node, height);
     if (flush_result == ECHO_OK) {
       node->last_utxo_persist_height = height;
 
@@ -1622,7 +1722,7 @@ static echo_result_t sync_cb_validate_and_apply_block(const block_t *block,
       log_info(LOG_COMP_DB, "Checkpoint saved at height %u (UTXO + validated tip)",
                height);
     } else {
-      log_error(LOG_COMP_DB, "Failed to flush UTXO set at checkpoint: %d",
+      log_error(LOG_COMP_DB, "Failed to flush UTXO deltas at checkpoint: %d",
                 flush_result);
     }
   }
@@ -2221,6 +2321,9 @@ void node_destroy(node_t *node) {
  * Cleanup all node resources.
  */
 static void node_cleanup(node_t *node) {
+  /* Free UTXO delta accumulator */
+  node_accum_free(node);
+
   /* Destroy sync manager */
   if (node->sync_mgr != NULL) {
     sync_destroy(node->sync_mgr);
@@ -3574,6 +3677,158 @@ static echo_result_t node_flush_utxo_set_to_db(node_t *node, uint32_t height) {
            "(rate=%.1f/ms)",
            (unsigned long)flush_elapsed, ctx.inserted, ctx.skipped,
            flush_elapsed > 0 ? (double)ctx.inserted / flush_elapsed : 0.0);
+
+  return ECHO_OK;
+}
+
+/*
+ * ============================================================================
+ * DELTA-BASED UTXO FLUSH (IBD Optimization)
+ * ============================================================================
+ *
+ * Instead of flushing all ~6.6M UTXOs at each checkpoint, we:
+ *   1. INSERT only UTXOs created since last checkpoint (height > threshold)
+ *   2. DELETE only UTXOs that were spent since last checkpoint
+ *
+ * This reduces checkpoint I/O from ~6.6M to ~150k operations (5000 blocks).
+ */
+
+/* Context for collecting newly created UTXOs */
+typedef struct {
+  utxo_db_t *udb;
+  uint32_t min_height;       /* Only collect entries with height > min_height */
+  size_t inserted;
+  size_t skipped;
+  echo_result_t result;
+} utxo_delta_flush_ctx_t;
+
+/* Callback to insert newly created UTXOs */
+static bool utxo_delta_flush_callback(const utxo_entry_t *entry, void *user_data) {
+  utxo_delta_flush_ctx_t *ctx = (utxo_delta_flush_ctx_t *)user_data;
+  if (ctx == NULL || entry == NULL) {
+    return false;
+  }
+
+  /* Only insert UTXOs created after the last checkpoint */
+  if (entry->height <= ctx->min_height) {
+    ctx->skipped++;
+    return true; /* Continue iteration */
+  }
+
+  /* Insert new UTXO */
+  echo_result_t result = utxo_db_insert(ctx->udb, entry);
+  if (result == ECHO_OK) {
+    ctx->inserted++;
+  } else if (result == ECHO_ERR_EXISTS) {
+    /* Already exists - shouldn't happen but handle gracefully */
+    ctx->skipped++;
+  } else {
+    ctx->result = result;
+    return false; /* Stop iteration on error */
+  }
+
+  return true; /* Continue iteration */
+}
+
+/**
+ * Flush UTXO deltas to database (optimized checkpoint).
+ *
+ * Instead of flushing all UTXOs, this function:
+ *   1. Iterates in-memory UTXO set, INSERTs entries with height > last_checkpoint
+ *   2. DELETEs all spent outpoints accumulated since last checkpoint
+ *
+ * Parameters:
+ *   node   - The node
+ *   height - Current block height (for logging)
+ *
+ * Returns:
+ *   ECHO_OK on success, error code on failure
+ */
+static echo_result_t node_flush_utxo_deltas_to_db(node_t *node, uint32_t height) {
+  if (node == NULL || node->consensus == NULL) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  uint64_t flush_start = plat_monotonic_ms();
+
+  /* Get the chainstate UTXO set */
+  chainstate_t *chainstate = consensus_get_chainstate(node->consensus);
+  if (chainstate == NULL) {
+    return ECHO_ERR_INVALID;
+  }
+
+  const utxo_set_t *utxo_set = chainstate_get_utxo_set(chainstate);
+  if (utxo_set == NULL) {
+    return ECHO_ERR_INVALID;
+  }
+
+  size_t utxo_count = utxo_set_size(utxo_set);
+  log_info(LOG_COMP_DB,
+           "Delta flush at height %u: %zu in-memory UTXOs, %zu spent outpoints",
+           height, utxo_count, node->accum_spent_count);
+
+  /* Begin transaction for atomic delta update */
+  echo_result_t result = db_begin(&node->utxo_db.db);
+  if (result != ECHO_OK) {
+    log_error(LOG_COMP_DB, "Failed to begin delta flush transaction: %d", result);
+    return result;
+  }
+
+  /*
+   * Step 1: DELETE spent outpoints.
+   * Some may not exist in DB (created and spent in same interval) - that's fine.
+   */
+  size_t deleted = 0;
+  for (size_t i = 0; i < node->accum_spent_count; i++) {
+    result = utxo_db_delete(&node->utxo_db, &node->accum_spent[i]);
+    if (result == ECHO_OK) {
+      deleted++;
+    } else if (result != ECHO_ERR_NOT_FOUND) {
+      /* Real error - rollback and fail */
+      log_error(LOG_COMP_DB, "Failed to delete spent UTXO: %d", result);
+      (void)db_rollback(&node->utxo_db.db);
+      return result;
+    }
+    /* ECHO_ERR_NOT_FOUND is fine - UTXO was created and spent in same interval */
+  }
+
+  /*
+   * Step 2: INSERT newly created UTXOs (height > last_checkpoint).
+   * We iterate the full in-memory set but only insert entries above the threshold.
+   */
+  utxo_delta_flush_ctx_t ctx = {
+      .udb = &node->utxo_db,
+      .min_height = node->last_utxo_persist_height,
+      .inserted = 0,
+      .skipped = 0,
+      .result = ECHO_OK,
+  };
+
+  utxo_set_foreach(utxo_set, utxo_delta_flush_callback, &ctx);
+
+  if (ctx.result != ECHO_OK) {
+    log_error(LOG_COMP_DB, "Delta flush INSERT failed: %d", ctx.result);
+    (void)db_rollback(&node->utxo_db.db);
+    return ctx.result;
+  }
+
+  /* Commit transaction */
+  result = db_commit(&node->utxo_db.db);
+  if (result != ECHO_OK) {
+    log_error(LOG_COMP_DB, "Failed to commit delta flush transaction: %d", result);
+    return result;
+  }
+
+  /* Clear accumulators for next interval */
+  node_accum_clear(node);
+
+  /* Log results */
+  uint64_t flush_elapsed = plat_monotonic_ms() - flush_start;
+  log_info(LOG_COMP_DB,
+           "Delta flush complete in %lums: %zu inserted, %zu deleted, %zu skipped "
+           "(vs %zu total UTXOs)",
+           (unsigned long)flush_elapsed, ctx.inserted, deleted, ctx.skipped,
+           utxo_count);
 
   return ECHO_OK;
 }

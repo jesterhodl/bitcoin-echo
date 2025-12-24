@@ -1594,21 +1594,42 @@ echo_result_t sync_handle_block(sync_manager_t *mgr, peer_t *peer,
         block_index_map_t *idx_map =
             chainstate_get_block_index_map(mgr->chainstate);
 
-        /* Search for a block at next_height with stored data */
-        /* Note: We need to find BY HEIGHT which requires scanning */
-        /* For now, check if we have any pending blocks at this height */
+        /*
+         * Look up block by height using callback (works for stored blocks
+         * from previous sessions that aren't in the queue).
+         */
         hash256_t next_hash;
-        if (block_queue_find_by_height(mgr->block_queue, next_height,
+        bool found_block = false;
+
+        /* First try the height lookup callback (finds stored blocks) */
+        if (mgr->callbacks.get_block_hash_at_height &&
+            mgr->callbacks.get_block_hash_at_height(next_height, &next_hash,
+                                                    mgr->callbacks.ctx) == ECHO_OK) {
+          next_index = block_index_map_lookup(idx_map, &next_hash);
+          if (next_index != NULL) {
+            found_block = true;
+            log_debug(LOG_COMP_SYNC,
+                      "Found block at height %u via callback, data_file=%u",
+                      next_height, next_index->data_file);
+          }
+        }
+
+        /* Fall back to queue lookup if callback didn't find it */
+        if (!found_block &&
+            block_queue_find_by_height(mgr->block_queue, next_height,
                                        &next_hash) == ECHO_OK) {
           next_index = block_index_map_lookup(idx_map, &next_hash);
+          if (next_index != NULL) {
+            found_block = true;
+            log_debug(LOG_COMP_SYNC,
+                      "Found block at height %u in queue, data_file=%u",
+                      next_height, next_index->data_file);
+          }
+        }
+
+        if (!found_block) {
           log_debug(LOG_COMP_SYNC,
-                    "Found block at height %u in queue, index=%p, data_file=%u",
-                    next_height, (void *)next_index,
-                    next_index ? next_index->data_file : 0xFFFFFFFF);
-        } else {
-          /* Block not in queue - might already be validated or not known */
-          log_debug(LOG_COMP_SYNC,
-                    "Block at height %u not found in queue", next_height);
+                    "Block at height %u not found", next_height);
           break;
         }
 
@@ -1630,6 +1651,9 @@ echo_result_t sync_handle_block(sync_manager_t *mgr, peer_t *peer,
           log_debug(LOG_COMP_SYNC,
                     "Failed to load stored block at height %u: %d",
                     next_height, load_result);
+          /* Mark as not stored so we don't keep retrying (file may be pruned) */
+          next_index->data_file = BLOCK_DATA_NOT_STORED;
+          next_index->data_pos = 0;
           break;
         }
 
@@ -2080,9 +2104,110 @@ static void queue_blocks_from_headers(sync_manager_t *mgr) {
 }
 
 /**
+ * Request critical zone blocks with redundancy.
+ *
+ * Critical zone = first N blocks from validated tip. These are requested from
+ * multiple peers simultaneously to eliminate head-of-line blocking. First
+ * response wins; duplicates are discarded by block storage layer.
+ *
+ * Returns number of racing requests made.
+ */
+static size_t request_critical_zone_blocks(sync_manager_t *mgr) {
+  uint32_t validated_height = chainstate_get_height(mgr->chainstate);
+  size_t racing_requests = 0;
+
+  /* Need callback to look up block hash by height */
+  if (!mgr->callbacks.get_block_hash_at_height) {
+    return 0;
+  }
+
+  /* Find the first SYNC_CRITICAL_ZONE_SIZE pending blocks */
+  for (uint32_t h = validated_height + 1;
+       h <= validated_height + SYNC_CRITICAL_ZONE_SIZE; h++) {
+
+    /* Look up block hash at this height */
+    hash256_t block_hash;
+    if (mgr->callbacks.get_block_hash_at_height(h, &block_hash,
+                                                 mgr->callbacks.ctx) != ECHO_OK) {
+      continue;  /* No header for this height yet */
+    }
+
+    /* Check if already in-flight from enough peers */
+    size_t current_inflight = 0;
+    for (size_t i = 0; i < mgr->peer_count; i++) {
+      peer_sync_state_t *ps = &mgr->peers[i];
+      for (size_t j = 0; j < ps->blocks_in_flight_count; j++) {
+        if (memcmp(&ps->blocks_in_flight[j], &block_hash, sizeof(hash256_t)) == 0) {
+          current_inflight++;
+          break;
+        }
+      }
+    }
+
+    /* Already have enough redundancy for this block */
+    if (current_inflight >= SYNC_CRITICAL_ZONE_REDUNDANCY) {
+      continue;
+    }
+
+    /* Request from additional peers to reach redundancy target */
+    size_t needed = SYNC_CRITICAL_ZONE_REDUNDANCY - current_inflight;
+    for (size_t i = 0; i < mgr->peer_count && needed > 0; i++) {
+      peer_sync_state_t *ps = &mgr->peers[i];
+
+      /* Skip if not ready or no capacity */
+      if (!ps->peer || !peer_is_ready(ps->peer)) continue;
+      if (ps->blocks_in_flight_count >= SYNC_MAX_BLOCKS_PER_PEER) continue;
+
+      /* Skip if already has this block in-flight */
+      bool already_has = false;
+      for (size_t j = 0; j < ps->blocks_in_flight_count; j++) {
+        if (memcmp(&ps->blocks_in_flight[j], &block_hash, sizeof(hash256_t)) == 0) {
+          already_has = true;
+          break;
+        }
+      }
+      if (already_has) continue;
+
+      /* Request this critical block from this peer */
+      ps->blocks_in_flight[ps->blocks_in_flight_count] = block_hash;
+      ps->block_request_time[ps->blocks_in_flight_count] = plat_time_ms();
+      ps->blocks_in_flight_count++;
+
+      if (mgr->callbacks.send_getdata_blocks) {
+        mgr->callbacks.send_getdata_blocks(ps->peer, &block_hash, 1,
+                                           mgr->callbacks.ctx);
+      }
+
+      racing_requests++;
+      needed--;
+    }
+  }
+
+  if (racing_requests > 0) {
+    log_info(LOG_COMP_SYNC, "Critical zone: %zu racing requests for blocks %u-%u",
+             racing_requests, validated_height + 1,
+             validated_height + SYNC_CRITICAL_ZONE_SIZE);
+  } else {
+    /* Debug why no racing happened */
+    static uint64_t last_no_race_log = 0;
+    uint64_t now = plat_time_ms();
+    if (now - last_no_race_log >= 5000) {
+      last_no_race_log = now;
+      log_info(LOG_COMP_SYNC, "Critical zone: no racing (peers=%zu, validated=%u)",
+               mgr->peer_count, validated_height);
+    }
+  }
+
+  return racing_requests;
+}
+
+/**
  * Request blocks from peers.
  */
 static void request_blocks(sync_manager_t *mgr) {
+  /* First: ensure critical zone blocks have redundant requests */
+  request_critical_zone_blocks(mgr);
+
   /* Track blocks to request per peer for batched getdata */
   hash256_t blocks_for_peer[SYNC_MAX_BLOCKS_PER_PEER];
   size_t blocks_count = 0;
@@ -2449,17 +2574,35 @@ void sync_tick(sync_manager_t *mgr) {
       while (blocks_validated_this_tick < max_per_tick) {
         uint32_t next_height = validated_height + 1;
         hash256_t next_hash;
+        bool found_block = false;
 
-        /* Find the next block in queue */
-        if (block_queue_find_by_height(mgr->block_queue, next_height,
-                                       &next_hash) != ECHO_OK) {
-          break; /* Not in queue */
-        }
-
-        /* Check if it's already stored */
         block_index_map_t *idx_map =
             chainstate_get_block_index_map(mgr->chainstate);
-        block_index_t *next_index = block_index_map_lookup(idx_map, &next_hash);
+        block_index_t *next_index = NULL;
+
+        /* First try height callback (finds stored blocks from prev session) */
+        if (mgr->callbacks.get_block_hash_at_height &&
+            mgr->callbacks.get_block_hash_at_height(next_height, &next_hash,
+                                                    mgr->callbacks.ctx) == ECHO_OK) {
+          next_index = block_index_map_lookup(idx_map, &next_hash);
+          if (next_index != NULL) {
+            found_block = true;
+          }
+        }
+
+        /* Fall back to queue lookup */
+        if (!found_block &&
+            block_queue_find_by_height(mgr->block_queue, next_height,
+                                       &next_hash) == ECHO_OK) {
+          next_index = block_index_map_lookup(idx_map, &next_hash);
+          if (next_index != NULL) {
+            found_block = true;
+          }
+        }
+
+        if (!found_block) {
+          break; /* Block not found */
+        }
 
         if (next_index == NULL ||
             next_index->data_file == BLOCK_DATA_NOT_STORED) {
@@ -2474,6 +2617,11 @@ void sync_tick(sync_manager_t *mgr) {
 
         if (load_result != ECHO_OK) {
           block_free(&stored_block);
+          /* Mark as not stored so we don't keep retrying (file may be pruned) */
+          if (next_index != NULL) {
+            next_index->data_file = BLOCK_DATA_NOT_STORED;
+            next_index->data_pos = 0;
+          }
           break;
         }
 

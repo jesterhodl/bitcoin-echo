@@ -61,6 +61,12 @@
 /* Timeout decay factor when blocks connect successfully (0.85) */
 #define SYNC_STALLING_TIMEOUT_DECAY 0.85
 
+/* Critical zone: request first N blocks from multiple peers to reduce
+ * head-of-line blocking. First response wins, duplicates discarded.
+ */
+#define SYNC_CRITICAL_ZONE_SIZE 8
+#define SYNC_CRITICAL_ZONE_REDUNDANCY 8
+
 /* Minimum time between header sync attempts with same peer (5 seconds) */
 #define SYNC_HEADER_RETRY_INTERVAL_MS 5000
 
