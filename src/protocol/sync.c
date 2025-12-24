@@ -957,27 +957,56 @@ static bool force_request_critical_block(sync_manager_t *mgr,
     return false;
   }
 
-  /* Find ANY sync candidate peer, prefer one with fewer in-flight blocks */
+  /* Find a sync candidate peer that DOESN'T already have this block in-flight.
+   * The whole point of force-requesting is that the current peer(s) are slow,
+   * so we must try a DIFFERENT peer to have any chance of success.
+   */
   peer_sync_state_t *best = NULL;
   size_t best_inflight = SIZE_MAX;
 
   for (size_t i = 0; i < mgr->peer_count; i++) {
     peer_sync_state_t *ps = &mgr->peers[i];
-    if (ps->sync_candidate && peer_is_ready(ps->peer)) {
-      /* Allow exceeding capacity by 1 for critical blocks */
-      if (ps->blocks_in_flight_count < SYNC_MAX_BLOCKS_PER_PEER + 1) {
-        if (ps->blocks_in_flight_count < best_inflight) {
-          best_inflight = ps->blocks_in_flight_count;
-          best = ps;
-        }
+    if (!ps->sync_candidate || !peer_is_ready(ps->peer)) {
+      continue;
+    }
+
+    /* CRITICAL: Skip peers that already have this block in-flight */
+    bool already_has = false;
+    for (size_t j = 0; j < ps->blocks_in_flight_count; j++) {
+      if (memcmp(&ps->blocks_in_flight[j], hash, sizeof(hash256_t)) == 0) {
+        already_has = true;
+        break;
+      }
+    }
+    if (already_has) {
+      continue;  /* This peer is already slow on this block, try another */
+    }
+
+    /* Allow exceeding capacity by 1 for critical blocks */
+    if (ps->blocks_in_flight_count < SYNC_MAX_BLOCKS_PER_PEER + 1) {
+      if (ps->blocks_in_flight_count < best_inflight) {
+        best_inflight = ps->blocks_in_flight_count;
+        best = ps;
       }
     }
   }
 
   if (!best) {
+    /* Count how many peers already have this block */
+    size_t already_have = 0;
+    for (size_t i = 0; i < mgr->peer_count; i++) {
+      peer_sync_state_t *ps = &mgr->peers[i];
+      for (size_t j = 0; j < ps->blocks_in_flight_count; j++) {
+        if (memcmp(&ps->blocks_in_flight[j], hash, sizeof(hash256_t)) == 0) {
+          already_have++;
+          break;
+        }
+      }
+    }
     log_warn(LOG_COMP_SYNC,
-             "force_request_critical_block: no available peer for height %u",
-             height);
+             "force_request_critical_block: no NEW peer for height %u "
+             "(already requested from %zu peers)",
+             height, already_have);
     return false;
   }
 
@@ -989,6 +1018,7 @@ static bool force_request_critical_block(sync_manager_t *mgr,
     best->blocks_in_flight[best->blocks_in_flight_count] = *hash;
     best->block_request_time[best->blocks_in_flight_count] = plat_time_ms();
     best->blocks_in_flight_count++;
+    best->blocks_requested++;
   }
 
   /* Send immediate getdata request */
@@ -1906,7 +1936,30 @@ void sync_process_timeouts(sync_manager_t *mgr) {
         continue;
       }
     }
-    /* Core-style: only disconnect peers that actually stall - no proactive eviction */
+
+    /* Block delivery rate check: disconnect peers that accept requests
+     * but don't deliver blocks. This catches peers with headers but no
+     * block data - ping RTT doesn't measure block delivery ability.
+     *
+     * Thresholds: 50+ requests, <20% delivery, AND connected 30+ seconds.
+     * The time requirement prevents culling peers before they've had a
+     * chance to deliver - racing sends many requests in seconds.
+     */
+    if (ps->peer && ps->blocks_requested >= 50) {
+      uint64_t connected_ms = now - ps->peer->connect_time;
+      if (connected_ms >= 30000) {
+        uint32_t delivery_pct = (ps->blocks_received * 100) / ps->blocks_requested;
+        if (delivery_pct < 20) {
+          log_info(LOG_COMP_SYNC,
+                   "Disconnecting poor-delivery peer: %u/%u blocks (%u%%) over %llus",
+                   ps->blocks_received, ps->blocks_requested, delivery_pct,
+                   (unsigned long long)(connected_ms / 1000));
+          peer_disconnect(ps->peer, PEER_DISCONNECT_MISBEHAVING,
+                          "Poor block delivery rate during IBD");
+          continue;
+        }
+      }
+    }
   }
 }
 
@@ -2172,6 +2225,7 @@ static size_t request_critical_zone_blocks(sync_manager_t *mgr) {
       ps->blocks_in_flight[ps->blocks_in_flight_count] = block_hash;
       ps->block_request_time[ps->blocks_in_flight_count] = plat_time_ms();
       ps->blocks_in_flight_count++;
+      ps->blocks_requested++;
 
       if (mgr->callbacks.send_getdata_blocks) {
         mgr->callbacks.send_getdata_blocks(ps->peer, &block_hash, 1,
@@ -2184,17 +2238,34 @@ static size_t request_critical_zone_blocks(sync_manager_t *mgr) {
   }
 
   if (racing_requests > 0) {
-    log_info(LOG_COMP_SYNC, "Critical zone: %zu racing requests for blocks %u-%u",
-             racing_requests, validated_height + 1,
-             validated_height + SYNC_CRITICAL_ZONE_SIZE);
+    log_debug(LOG_COMP_SYNC, "Critical zone: %zu racing requests for blocks %u-%u",
+              racing_requests, validated_height + 1,
+              validated_height + SYNC_CRITICAL_ZONE_SIZE);
   } else {
-    /* Debug why no racing happened */
+    /* Debug why no racing happened - log peer capacity every 5s */
     static uint64_t last_no_race_log = 0;
     uint64_t now = plat_time_ms();
     if (now - last_no_race_log >= 5000) {
       last_no_race_log = now;
-      log_info(LOG_COMP_SYNC, "Critical zone: no racing (peers=%zu, validated=%u)",
-               mgr->peer_count, validated_height);
+
+      /* Count peers with capacity vs full */
+      size_t peers_ready = 0, peers_full = 0, peers_not_ready = 0;
+      for (size_t i = 0; i < mgr->peer_count; i++) {
+        peer_sync_state_t *ps = &mgr->peers[i];
+        if (!ps->peer || !peer_is_ready(ps->peer)) {
+          peers_not_ready++;
+        } else if (ps->blocks_in_flight_count >= SYNC_MAX_BLOCKS_PER_PEER) {
+          peers_full++;
+        } else {
+          peers_ready++;
+        }
+      }
+
+      log_info(LOG_COMP_SYNC,
+               "Critical zone: NO RACING | peers=%zu (ready=%zu full=%zu notready=%zu) "
+               "| validated=%u",
+               mgr->peer_count, peers_ready, peers_full, peers_not_ready,
+               validated_height);
     }
   }
 
@@ -2285,6 +2356,7 @@ static void request_blocks(sync_manager_t *mgr) {
       ps->blocks_in_flight[ps->blocks_in_flight_count] = hash;
       ps->block_request_time[ps->blocks_in_flight_count] = plat_time_ms();
       ps->blocks_in_flight_count++;
+      ps->blocks_requested++;
     }
 
     /* Collect for batched getdata */
@@ -2457,6 +2529,15 @@ void sync_tick(sync_manager_t *mgr) {
       uint32_t eta_hours = (uint32_t)(eta_sec / 3600);
       uint32_t eta_mins = (uint32_t)((eta_sec % 3600) / 60);
 
+      /* Compute bottleneck analysis */
+      uint32_t total_blocks = mgr->blocks_ready + mgr->blocks_starved;
+      float ready_pct = total_blocks > 0
+                            ? (100.0f * mgr->blocks_ready / total_blocks)
+                            : 0.0f;
+      float starved_pct = total_blocks > 0
+                              ? (100.0f * mgr->blocks_starved / total_blocks)
+                              : 0.0f;
+
       log_info(LOG_COMP_SYNC,
                "[IBD] height=%u/%u (%.1f%%) | %.1f blk/s | "
                "pending=%zu inflight=%zu | ETA=%uh%02um",
@@ -2464,6 +2545,15 @@ void sync_tick(sync_manager_t *mgr) {
                progress.sync_percentage, blocks_per_sec,
                (size_t)progress.blocks_pending,
                (size_t)progress.blocks_in_flight, eta_hours, eta_mins);
+
+      log_info(LOG_COMP_SYNC,
+               "[BOTTLENECK] ready=%u(%.0f%%) starved=%u(%.0f%%) | "
+               "validation=%llums starvation=%llums | peers=%zu",
+               mgr->blocks_ready, ready_pct,
+               mgr->blocks_starved, starved_pct,
+               (unsigned long long)mgr->total_validation_ms,
+               (unsigned long long)mgr->total_starvation_ms,
+               mgr->peer_count);
     }
     uint32_t our_best_height =
         mgr->best_header ? mgr->best_header->height : 0;

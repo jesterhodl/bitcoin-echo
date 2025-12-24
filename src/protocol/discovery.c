@@ -553,6 +553,11 @@ void discovery_mark_address_free(peer_addr_manager_t *manager,
     entry->in_use = ECHO_FALSE;
     if (success) {
       discovery_mark_success(manager, addr);
+    } else {
+      /* Mark as unreachable on failure - this removes the +500000 reachable
+       * bonus and applies the heavy -50000/attempt penalty, preventing
+       * immediate reconnection to misbehaving peers */
+      entry->reachable = ECHO_FALSE;
     }
   }
 }

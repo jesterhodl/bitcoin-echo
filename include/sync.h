@@ -141,6 +141,7 @@ typedef struct {
   uint64_t avg_headers_latency_ms; /* Average headers response time */
   uint64_t avg_block_latency_ms;   /* Average block download time */
   uint32_t timeout_count;          /* Number of timeouts from this peer */
+  uint32_t blocks_requested;       /* Blocks requested from this peer */
 
   /* Latency tracking for metrics */
   uint64_t first_block_time;  /* When peer started delivering blocks (ms) */

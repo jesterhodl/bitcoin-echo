@@ -561,11 +561,17 @@ static bool validate_block_internal(const consensus_engine_t *engine,
   ECHO_ASSERT(engine != NULL);
   ECHO_ASSERT(block != NULL);
 
-  /* IBD profiling - track validation timing */
+  /* IBD profiling - track validation timing by phase */
   uint64_t block_start = plat_monotonic_ms();
+  uint64_t header_time = 0;
+  uint64_t txid_time = 0;
+  uint64_t merkle_time = 0;
+  uint64_t utxo_lookup_time = 0;
   uint64_t script_time_total = 0;
   uint64_t sameblock_time_total = 0;
+  uint64_t coinbase_time = 0;
   size_t total_inputs = 0;
+  size_t utxo_lookups = 0;
   size_t scripts_verified = 0;
   size_t sameblock_lookups = 0;
 
@@ -574,9 +580,11 @@ static bool validate_block_internal(const consensus_engine_t *engine,
   }
 
   /* First validate the header */
+  uint64_t header_start = plat_monotonic_ms();
   if (!consensus_validate_header(engine, &block->header, result)) {
     return false;
   }
+  header_time = plat_monotonic_ms() - header_start;
 
   uint32_t height = get_block_height(engine, &block->header);
 
@@ -614,6 +622,7 @@ static bool validate_block_internal(const consensus_engine_t *engine,
    * By computing once upfront, we eliminate 2x redundant SHA256d per transaction.
    * For a 1000-tx block, this saves ~2000 SHA256d operations.
    */
+  uint64_t txid_start = plat_monotonic_ms();
   hash256_t *block_txids = NULL;
   if (block->tx_count > 0) {
     block_txids = malloc(block->tx_count * sizeof(hash256_t));
@@ -623,6 +632,7 @@ static bool validate_block_internal(const consensus_engine_t *engine,
       }
     }
   }
+  txid_time = plat_monotonic_ms() - txid_start;
 
   /* Check for duplicate txids */
   size_t dup_idx;
@@ -636,6 +646,7 @@ static bool validate_block_internal(const consensus_engine_t *engine,
   }
 
   /* Verify merkle root using pre-computed TXIDs (avoids recomputing them) */
+  uint64_t merkle_start = plat_monotonic_ms();
   block_validation_error_t merkle_error;
   if (!block_validate_merkle_root_with_txids(block, block_txids, &merkle_error)) {
     if (result != NULL) {
@@ -645,6 +656,7 @@ static bool validate_block_internal(const consensus_engine_t *engine,
     free(block_txids);
     return false;
   }
+  merkle_time = plat_monotonic_ms() - merkle_start;
 
   /* Validate block size/weight */
   block_validation_error_t size_error;
@@ -690,7 +702,10 @@ static bool validate_block_internal(const consensus_engine_t *engine,
 
     for (size_t in_idx = 0; in_idx < tx->input_count; in_idx++) {
       const outpoint_t *outpoint = &tx->inputs[in_idx].prevout;
+      uint64_t utxo_start = plat_monotonic_ms();
       const utxo_entry_t *utxo = consensus_lookup_utxo(engine, outpoint);
+      utxo_lookup_time += plat_monotonic_ms() - utxo_start;
+      utxo_lookups++;
 
       /* UTXO info for script validation */
       utxo_info_t utxo_info;
@@ -811,6 +826,7 @@ static bool validate_block_internal(const consensus_engine_t *engine,
   }
 
   /* Validate coinbase */
+  uint64_t coinbase_start = plat_monotonic_ms();
   satoshi_t subsidy = coinbase_subsidy(height);
   satoshi_t max_coinbase_value = subsidy + total_fees;
 
@@ -824,6 +840,7 @@ static bool validate_block_internal(const consensus_engine_t *engine,
     free(block_txids);
     return false;
   }
+  coinbase_time = plat_monotonic_ms() - coinbase_start;
 
   /* Validate witness commitment if SegWit active */
   if (height >= CONSENSUS_SEGWIT_HEIGHT) {
@@ -841,14 +858,21 @@ static bool validate_block_internal(const consensus_engine_t *engine,
   /* IBD profiling - log validation timing */
   uint64_t block_elapsed = plat_monotonic_ms() - block_start;
 
-  /* Only log detailed timing for blocks that take >10ms or every 1000 blocks */
-  if (block_elapsed > 10 || height % 1000 == 0) {
+  /* Log detailed timing for blocks that take >5ms or every 100 blocks */
+  if (block_elapsed > 5 || height % 100 == 0) {
     log_info(LOG_COMP_CONS,
-             "Block %u validated in %lums (%zu txs, %zu inputs, "
-             "scripts=%lums/%zu, sameblock=%lums/%zu)",
-             height, (unsigned long)block_elapsed, block->tx_count,
-             total_inputs, (unsigned long)script_time_total, scripts_verified,
-             (unsigned long)sameblock_time_total, sameblock_lookups);
+             "VALIDATE h=%u total=%lums | hdr=%lu txid=%lu merkle=%lu "
+             "utxo=%lu/%zu scripts=%lu/%zu sameblk=%lu/%zu cb=%lu | "
+             "txs=%zu ins=%zu skip=%s",
+             height, (unsigned long)block_elapsed,
+             (unsigned long)header_time, (unsigned long)txid_time,
+             (unsigned long)merkle_time,
+             (unsigned long)utxo_lookup_time, utxo_lookups,
+             (unsigned long)script_time_total, scripts_verified,
+             (unsigned long)sameblock_time_total, sameblock_lookups,
+             (unsigned long)coinbase_time,
+             block->tx_count, total_inputs,
+             skip_scripts ? "Y" : "N");
   }
 
   /* Return TXIDs to caller if requested, otherwise free them */
