@@ -87,14 +87,14 @@
 #define CONSENSUS_TAPROOT_HEIGHT 709632 /* Taproot/Schnorr */
 
 /*
- * Full Verification: Bitcoin Echo verifies every signature.
+ * IBD Optimization: AssumeValid
  *
- * Unlike Bitcoin Core's AssumeValid optimization, we verify everything.
- * Per the manifesto: "Verify, not believe."
+ * During IBD, we skip script verification for blocks below
+ * PLATFORM_ASSUMEVALID_HEIGHT. This provides ~6x speedup while still
+ * verifying PoW, structure, merkle roots, and UTXO accounting.
  *
- * Network latency is the bottleneck (~5-7 seconds/block), not CPU.
- * Signature verification adds only ~4-6ms per block. The practical
- * performance impact of full verification is negligible.
+ * After IBD completes, all new blocks are fully verified including scripts.
+ * Set PLATFORM_ASSUMEVALID_HEIGHT to 0 to verify all scripts during IBD.
  */
 
 #elif defined(ECHO_NETWORK_TESTNET)

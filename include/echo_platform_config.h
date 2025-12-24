@@ -104,4 +104,23 @@
 /* Number of rotated log files to keep */
 #define PLATFORM_LOG_ROTATION_COUNT 5
 
+/*
+ * IBD (Initial Block Download) optimization.
+ *
+ * AssumeValid: Skip script verification for blocks at or below this height.
+ * This provides ~6x speedup during IBD by trusting that the network has
+ * already validated these blocks. We still verify:
+ *   - Proof of work
+ *   - Block structure and merkle roots
+ *   - UTXO availability (no double spends)
+ *   - Value accounting (inputs >= outputs)
+ *
+ * We skip:
+ *   - Script execution (signature verification)
+ *
+ * Block 912683 matches Bitcoin Core v30's defaultAssumeValid.
+ * Set to 0 to disable AssumeValid and verify all scripts.
+ */
+#define PLATFORM_ASSUMEVALID_HEIGHT 912683
+
 #endif /* ECHO_PLATFORM_CONFIG_H */

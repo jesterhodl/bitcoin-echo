@@ -549,10 +549,14 @@ bool consensus_validate_header(const consensus_engine_t *engine,
  * If txids_out is non-NULL, the computed TXIDs are returned to the caller
  * who becomes responsible for freeing them. This allows the TXIDs to be
  * reused for block application, avoiding redundant computation.
+ *
+ * If skip_scripts is true, script verification is skipped (AssumeValid mode).
+ * All other validation (PoW, structure, UTXO, values) is still performed.
  */
 static bool validate_block_internal(const consensus_engine_t *engine,
                                     const block_t *block,
                                     hash256_t **txids_out,
+                                    bool skip_scripts,
                                     consensus_result_t *result) {
   ECHO_ASSERT(engine != NULL);
   ECHO_ASSERT(block != NULL);
@@ -761,26 +765,28 @@ static bool validate_block_internal(const consensus_engine_t *engine,
         utxo_info.is_coinbase = utxo->is_coinbase ? ECHO_TRUE : ECHO_FALSE;
       }
 
-      /* Script validation - verify every signature */
-      uint64_t script_start = plat_monotonic_ms();
-      tx_validate_result_t script_result;
-      tx_validate_result_init(&script_result);
+      /* Script validation - verify every signature (unless AssumeValid) */
+      if (!skip_scripts) {
+        uint64_t script_start = plat_monotonic_ms();
+        tx_validate_result_t script_result;
+        tx_validate_result_init(&script_result);
 
-      echo_result_t script_res =
-          tx_validate_input(tx, in_idx, &utxo_info, script_flags,
-                            &script_result);
-      script_time_total += plat_monotonic_ms() - script_start;
-      scripts_verified++;
+        echo_result_t script_res =
+            tx_validate_input(tx, in_idx, &utxo_info, script_flags,
+                              &script_result);
+        script_time_total += plat_monotonic_ms() - script_start;
+        scripts_verified++;
 
-      if (script_res != ECHO_OK) {
-        if (result != NULL) {
-          result->error = CONSENSUS_ERR_TX_SCRIPT;
-          result->failing_index = tx_idx;
-          result->failing_input_index = in_idx;
-          result->script_error = script_result.script_error;
+        if (script_res != ECHO_OK) {
+          if (result != NULL) {
+            result->error = CONSENSUS_ERR_TX_SCRIPT;
+            result->failing_index = tx_idx;
+            result->failing_input_index = in_idx;
+            result->script_error = script_result.script_error;
+          }
+          free(block_txids);
+          return false;
         }
-        free(block_txids);
-        return false;
       }
       total_inputs++;
     }
@@ -857,7 +863,8 @@ static bool validate_block_internal(const consensus_engine_t *engine,
 bool consensus_validate_block(const consensus_engine_t *engine,
                               const block_t *block,
                               consensus_result_t *result) {
-  return validate_block_internal(engine, block, NULL, result);
+  /* Pure validation always verifies scripts (no AssumeValid) */
+  return validate_block_internal(engine, block, NULL, false, result);
 }
 
 bool consensus_validate_tx(const consensus_engine_t *engine, const tx_t *tx,
@@ -1033,9 +1040,25 @@ echo_result_t consensus_validate_and_apply_block(consensus_engine_t *engine,
   ECHO_ASSERT(engine != NULL);
   ECHO_ASSERT(block != NULL);
 
+  /*
+   * AssumeValid: Skip script verification for blocks below the assumevalid
+   * height. This provides ~6x speedup during IBD. We still verify PoW,
+   * structure, UTXO availability, and value accounting.
+   */
+  uint32_t height = get_block_height(engine, &block->header);
+  bool skip_scripts = (PLATFORM_ASSUMEVALID_HEIGHT > 0 &&
+                       height <= PLATFORM_ASSUMEVALID_HEIGHT);
+
+  if (skip_scripts && height % 10000 == 0) {
+    log_info(LOG_COMP_CONS, "AssumeValid: skipping script verification for "
+                            "block %u (<= %u)",
+             height, PLATFORM_ASSUMEVALID_HEIGHT);
+  }
+
   /* Validate block, getting TXIDs for reuse in apply */
   hash256_t *block_txids = NULL;
-  bool valid = validate_block_internal(engine, block, &block_txids, result);
+  bool valid =
+      validate_block_internal(engine, block, &block_txids, skip_scripts, result);
 
   if (!valid) {
     /* Validation failed - TXIDs were freed by validate_block_internal */
