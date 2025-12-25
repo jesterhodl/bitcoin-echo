@@ -1117,10 +1117,13 @@ void sync_add_peer(sync_manager_t *mgr, peer_t *peer, int32_t height) {
 
   /* Peer is sync candidate if:
    * 1. They have blocks we need (height > our_height)
-   * 2. They can serve full blocks (SERVICE_NODE_NETWORK)
+   * 2. They can serve full historical blocks (full archival node)
    *
-   * Pruned nodes (SERVICE_NODE_NETWORK_LIMITED only) can't serve historical
-   * blocks, making them useless for IBD. We must have SERVICE_NODE_NETWORK.
+   * Per BIP-159:
+   *   - Pruned nodes: MUST NOT set NODE_NETWORK, only NODE_NETWORK_LIMITED
+   *   - Full archival nodes: Set NODE_NETWORK, MAY also set NODE_NETWORK_LIMITED
+   *
+   * So checking NODE_NETWORK is sufficient - if set, peer can serve all blocks.
    */
   uint32_t our_height = chainstate_get_height(mgr->chainstate);
   echo_bool_t has_blocks = (height > (int32_t)our_height);
@@ -1951,14 +1954,17 @@ void sync_process_timeouts(sync_manager_t *mgr) {
      * but don't deliver blocks. This catches peers with headers but no
      * block data - ping RTT doesn't measure block delivery ability.
      *
-     * Thresholds: 50+ requests, <20% delivery, AND connected 15+ seconds.
-     * Reduced from 30s to 15s for more aggressive bad peer removal.
+     * With racing, peers may lose races to faster peers. But a peer with
+     * 0% delivery after 50+ requests is truly broken, not just slow.
+     * Good peers should have at least SOME deliveries from racing.
+     *
+     * Thresholds: 50+ requests, <10% delivery, AND connected 60+ seconds.
      */
     if (ps->peer && ps->blocks_requested >= 50) {
       uint64_t connected_ms = now - ps->peer->connect_time;
-      if (connected_ms >= 15000) {
+      if (connected_ms >= 60000) {
         uint32_t delivery_pct = (ps->blocks_received * 100) / ps->blocks_requested;
-        if (delivery_pct < 20) {
+        if (delivery_pct < 10) {
           log_info(LOG_COMP_SYNC,
                    "Disconnecting poor-delivery peer: %u/%u blocks (%u%%) over %llus",
                    ps->blocks_received, ps->blocks_requested, delivery_pct,

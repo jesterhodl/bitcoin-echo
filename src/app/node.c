@@ -2680,10 +2680,12 @@ static void node_handle_peer_message(node_t *node, peer_t *peer,
        * During IBD, disconnect pruned peers immediately to free connection
        * slots for full archival nodes that can serve historical blocks.
        *
-       * SERVICE_NODE_NETWORK (bit 0) = full archival node
-       * SERVICE_NODE_NETWORK_LIMITED (bit 10) = pruned node (~288 blocks)
+       * Per BIP-159:
+       *   - Pruned nodes: MUST NOT set NODE_NETWORK, only NODE_NETWORK_LIMITED
+       *   - Full archival nodes: Set NODE_NETWORK, MAY also set NODE_NETWORK_LIMITED
        *
-       * A peer with only LIMITED and not NETWORK is useless for IBD.
+       * So checking NODE_NETWORK is sufficient - if set, peer can serve all blocks.
+       * Full nodes often signal BOTH bits, so we must NOT reject based on LIMITED.
        */
       bool is_full_node = (peer->services & SERVICE_NODE_NETWORK) != 0;
       bool is_ibd = node->ibd_mode;
@@ -2735,9 +2737,14 @@ static void node_handle_peer_message(node_t *node, peer_t *peer,
   case MSG_ADDR:
     /* Update address manager with new addresses */
     if (msg->payload.addr.count > 0 && msg->payload.addr.addresses != NULL) {
-      discovery_add_addresses(&node->addr_manager,
+      size_t before = discovery_get_address_count(&node->addr_manager);
+      size_t added = discovery_add_addresses(&node->addr_manager,
                               msg->payload.addr.addresses,
                               msg->payload.addr.count);
+      log_info(LOG_COMP_NET, "Got %zu addr from %s, added %zu (total: %zu)",
+               (size_t)msg->payload.addr.count, peer->address, added,
+               discovery_get_address_count(&node->addr_manager));
+      (void)before; /* Suppress unused warning */
     }
     break;
 
@@ -3343,6 +3350,9 @@ echo_result_t node_maintenance(node_t *node) {
       break;
     }
 
+    /* Mark in-use IMMEDIATELY to prevent selecting same address in next loop iteration */
+    discovery_mark_address_in_use(&node->addr_manager, &addr);
+
     /* Find empty slot */
     bool connected = false;
     for (size_t i = 0; i < NODE_MAX_PEERS; i++) {
@@ -3356,8 +3366,7 @@ echo_result_t node_maintenance(node_t *node) {
         log_info(LOG_COMP_NET, "Attempting outbound connection to %s:%u",
                  ip_str, addr.port);
 
-        /* Mark address as in-use and record attempt BEFORE connecting */
-        discovery_mark_address_in_use(&node->addr_manager, &addr);
+        /* Record attempt (in_use already marked after select) */
         discovery_mark_attempt(&node->addr_manager, &addr);
 
         uint64_t nonce = generate_nonce();
@@ -3386,6 +3395,8 @@ echo_result_t node_maintenance(node_t *node) {
     }
     attempts++;
     if (!connected) {
+      /* Release address - we marked it in_use but couldn't use it */
+      discovery_mark_address_free(&node->addr_manager, &addr, ECHO_FALSE);
       break; /* No empty slots available */
     }
   }
