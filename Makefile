@@ -2,7 +2,7 @@
 # Build once. Build right. Stop.
 
 CC      = cc
-CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -O2 -Iinclude -pthread
+CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -O2 -g -Iinclude -pthread
 LDFLAGS = -pthread
 TARGET  = echo
 

@@ -28,6 +28,7 @@
 #include "log.h"
 #include "peer.h"
 #include "platform.h"
+#include "protocol.h"
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -1114,14 +1115,23 @@ void sync_add_peer(sync_manager_t *mgr, peer_t *peer, int32_t height) {
   ps->peer = peer;
   ps->start_height = height;
 
-  /* Peer is sync candidate if they have blocks we need */
+  /* Peer is sync candidate if:
+   * 1. They have blocks we need (height > our_height)
+   * 2. They can serve full blocks (SERVICE_NODE_NETWORK)
+   *
+   * Pruned nodes (SERVICE_NODE_NETWORK_LIMITED only) can't serve historical
+   * blocks, making them useless for IBD. We must have SERVICE_NODE_NETWORK.
+   */
   uint32_t our_height = chainstate_get_height(mgr->chainstate);
-  ps->sync_candidate = (height > (int32_t)our_height);
+  echo_bool_t has_blocks = (height > (int32_t)our_height);
+  echo_bool_t can_serve_full = (peer->services & SERVICE_NODE_NETWORK) != 0;
+  ps->sync_candidate = has_blocks && can_serve_full;
 
   log_info(LOG_COMP_SYNC, "Added peer %s to sync_mgr: height=%d, our_height=%u, "
-           "sync_candidate=%s, state=%s",
-           peer->address, height, our_height,
+           "services=0x%llx, sync_candidate=%s%s, state=%s",
+           peer->address, height, our_height, (unsigned long long)peer->services,
            ps->sync_candidate ? "yes" : "no",
+           (has_blocks && !can_serve_full) ? " (PRUNED - rejected)" : "",
            peer_state_string(peer->state));
 
   /* Check if we should trigger ping contest countdown.
@@ -1941,13 +1951,12 @@ void sync_process_timeouts(sync_manager_t *mgr) {
      * but don't deliver blocks. This catches peers with headers but no
      * block data - ping RTT doesn't measure block delivery ability.
      *
-     * Thresholds: 50+ requests, <20% delivery, AND connected 30+ seconds.
-     * The time requirement prevents culling peers before they've had a
-     * chance to deliver - racing sends many requests in seconds.
+     * Thresholds: 50+ requests, <20% delivery, AND connected 15+ seconds.
+     * Reduced from 30s to 15s for more aggressive bad peer removal.
      */
     if (ps->peer && ps->blocks_requested >= 50) {
       uint64_t connected_ms = now - ps->peer->connect_time;
-      if (connected_ms >= 30000) {
+      if (connected_ms >= 15000) {
         uint32_t delivery_pct = (ps->blocks_received * 100) / ps->blocks_requested;
         if (delivery_pct < 20) {
           log_info(LOG_COMP_SYNC,
@@ -2207,6 +2216,8 @@ static size_t request_critical_zone_blocks(sync_manager_t *mgr) {
     for (size_t i = 0; i < mgr->peer_count && needed > 0; i++) {
       peer_sync_state_t *ps = &mgr->peers[i];
 
+      /* Skip if not a sync candidate (pruned peers can't serve historical blocks) */
+      if (!ps->sync_candidate) continue;
       /* Skip if not ready or no capacity */
       if (!ps->peer || !peer_is_ready(ps->peer)) continue;
       if (ps->blocks_in_flight_count >= SYNC_MAX_BLOCKS_PER_PEER) continue;
@@ -2248,11 +2259,13 @@ static size_t request_critical_zone_blocks(sync_manager_t *mgr) {
     if (now - last_no_race_log >= 5000) {
       last_no_race_log = now;
 
-      /* Count peers with capacity vs full */
-      size_t peers_ready = 0, peers_full = 0, peers_not_ready = 0;
+      /* Count sync-eligible peers with capacity vs full */
+      size_t peers_ready = 0, peers_full = 0, peers_not_ready = 0, peers_pruned = 0;
       for (size_t i = 0; i < mgr->peer_count; i++) {
         peer_sync_state_t *ps = &mgr->peers[i];
-        if (!ps->peer || !peer_is_ready(ps->peer)) {
+        if (!ps->sync_candidate) {
+          peers_pruned++;
+        } else if (!ps->peer || !peer_is_ready(ps->peer)) {
           peers_not_ready++;
         } else if (ps->blocks_in_flight_count >= SYNC_MAX_BLOCKS_PER_PEER) {
           peers_full++;
@@ -2262,9 +2275,9 @@ static size_t request_critical_zone_blocks(sync_manager_t *mgr) {
       }
 
       log_info(LOG_COMP_SYNC,
-               "Critical zone: NO RACING | peers=%zu (ready=%zu full=%zu notready=%zu) "
+               "Critical zone: NO RACING | peers=%zu (ready=%zu full=%zu notready=%zu pruned=%zu) "
                "| validated=%u",
-               mgr->peer_count, peers_ready, peers_full, peers_not_ready,
+               mgr->peer_count, peers_ready, peers_full, peers_not_ready, peers_pruned,
                validated_height);
     }
   }

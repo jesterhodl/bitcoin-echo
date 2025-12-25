@@ -63,9 +63,13 @@
 
 /* Critical zone: request first N blocks from multiple peers to reduce
  * head-of-line blocking. First response wins, duplicates discarded.
+ *
+ * REDUNDANCY=32 means request from ALL connected peers. This maximizes
+ * the chance of finding a peer with the block data, since many peers
+ * are pruned or don't serve historical blocks.
  */
 #define SYNC_CRITICAL_ZONE_SIZE 8
-#define SYNC_CRITICAL_ZONE_REDUNDANCY 8
+#define SYNC_CRITICAL_ZONE_REDUNDANCY 32
 
 /* Minimum time between header sync attempts with same peer (5 seconds) */
 #define SYNC_HEADER_RETRY_INTERVAL_MS 5000

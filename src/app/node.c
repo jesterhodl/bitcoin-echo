@@ -719,8 +719,9 @@ static echo_result_t node_restore_chain_state(node_t *node) {
     if (index != NULL) {
       index->chainwork = entry.chainwork;
       index->on_main_chain = (entry.status & BLOCK_STATUS_VALID_CHAIN) != 0;
-      /* Restore block data file position (for stored blocks) */
-      if (entry.data_file >= 0) {
+      /* Restore block data file position (for stored blocks).
+       * Skip if block is pruned - the file no longer exists. */
+      if (entry.data_file >= 0 && !(entry.status & BLOCK_STATUS_PRUNED)) {
         index->data_file = (uint32_t)entry.data_file;
         index->data_pos = entry.data_pos;
       }
@@ -2667,6 +2668,9 @@ static void node_handle_peer_message(node_t *node, peer_t *peer,
     /* Verack handled during handshake in peer.c */
     /* When handshake complete, add peer to sync manager */
     if (peer_is_ready(peer)) {
+      /* Add peer to sync manager. Pruned peers will be marked as
+       * non-sync-candidates in sync_add_peer() based on SERVICE_NODE_NETWORK.
+       * We keep them connected for address discovery and tx relay. */
       if (node->sync_mgr != NULL) {
         sync_add_peer(node->sync_mgr, peer, peer->start_height);
       }
@@ -3199,7 +3203,72 @@ echo_result_t node_maintenance(node_t *node) {
   /* Task 3: Evict stale mempool transactions (future session) */
   /* Mempool maintenance will be added when mempool_tick() is implemented */
 
-  /* Task 4: Attempt outbound connections if below target */
+  /*
+   * Task 4: Cleanup disconnected peers
+   *
+   * IMPORTANT: This must run BEFORE attempting new connections to avoid
+   * a race condition where:
+   * 1. Peer A disconnects, slot marked DISCONNECTED
+   * 2. Task 5 (old order) would run new connection, reusing slot for Peer B
+   * 3. Sync manager still has stale reference to Peer A via this slot
+   * 4. Sync manager accesses Peer B's data thinking it's Peer A = crash
+   *
+   * By cleaning up first, we ensure sync_remove_peer is called before
+   * the slot can be reused.
+   */
+  for (size_t i = 0; i < NODE_MAX_PEERS; i++) {
+    peer_t *peer = &node->peers[i];
+    /*
+     * Check for disconnected peers that need cleanup.
+     * peer->address[0] != '\0' indicates this slot was previously used.
+     * The socket may already be NULL (cleaned up by peer_disconnect).
+     */
+    if (peer->state == PEER_STATE_DISCONNECTED && peer->address[0] != '\0') {
+      /* Remove from sync manager before cleaning up */
+      if (node->sync_mgr != NULL) {
+        sync_remove_peer(node->sync_mgr, peer);
+      }
+
+      /* Release address back to discovery pool (for outbound peers only) */
+      if (!peer->inbound) {
+        net_addr_t peer_addr;
+        if (discovery_parse_address(peer->address, peer->port, &peer_addr) ==
+            ECHO_OK) {
+          /*
+           * Determine success based on disconnect reason:
+           * - USER disconnect or long-lived connection = success
+           * - MISBEHAVING, PROTOCOL_ERROR, immediate disconnect = failure
+           */
+          echo_bool_t was_success = ECHO_FALSE;
+          uint64_t connection_duration_ms =
+              plat_time_ms() - peer->connect_time;
+
+          /* Consider successful if connection lasted > 5 minutes */
+          if (connection_duration_ms > 300000) {
+            was_success = ECHO_TRUE;
+          } else if (peer->disconnect_reason == PEER_DISCONNECT_USER) {
+            was_success = ECHO_TRUE;
+          }
+
+          discovery_mark_address_free(&node->addr_manager, &peer_addr,
+                                      was_success);
+
+          if (!was_success) {
+            log_debug(LOG_COMP_NET,
+                      "Released failed address %s:%u (reason=%d, duration=%llu "
+                      "ms)",
+                      peer->address, peer->port, peer->disconnect_reason,
+                      (unsigned long long)connection_duration_ms);
+          }
+        }
+      }
+
+      /* Re-initialize to clean state (clears address, making slot available) */
+      peer_init(peer);
+    }
+  }
+
+  /* Task 5: Attempt outbound connections if below target */
   size_t outbound_count = 0;
   for (size_t i = 0; i < NODE_MAX_PEERS; i++) {
     if (peer_is_connected(&node->peers[i]) && !node->peers[i].inbound) {
@@ -3224,19 +3293,19 @@ echo_result_t node_maintenance(node_t *node) {
   }
 
   /*
-   * Try multiple connections per cycle when far below target.
-   * During audition, be more aggressive to fill slots quickly.
+   * Try multiple connections per cycle when below target.
+   * During IBD, bandwidth is critical - fill peer slots aggressively.
    * - During audition: try up to 16 connections per cycle
-   * - Below 25%: try up to 8 connections per cycle
-   * - Below 50%: try up to 4 connections per cycle
-   * - Otherwise: try 1 connection per cycle
+   * - Below 50%: try up to 8 connections per cycle
+   * - Below 75%: try up to 4 connections per cycle
+   * - Below target: try up to 2 connections per cycle
    */
-  size_t max_attempts = 1;
+  size_t max_attempts = 2; /* Always try at least 2 when below target */
   if (audition_active) {
     max_attempts = 16; /* Aggressive during audition */
-  } else if (outbound_count < target_peers / 4) {
-    max_attempts = 8;
   } else if (outbound_count < target_peers / 2) {
+    max_attempts = 8;
+  } else if (outbound_count < (target_peers * 3) / 4) {
     max_attempts = 4;
   }
 
@@ -3300,59 +3369,6 @@ echo_result_t node_maintenance(node_t *node) {
     attempts++;
     if (!connected) {
       break; /* No empty slots available */
-    }
-  }
-
-  /* Task 5: Cleanup disconnected peers */
-  for (size_t i = 0; i < NODE_MAX_PEERS; i++) {
-    peer_t *peer = &node->peers[i];
-    /*
-     * Check for disconnected peers that need cleanup.
-     * peer->address[0] != '\0' indicates this slot was previously used.
-     * The socket may already be NULL (cleaned up by peer_disconnect).
-     */
-    if (peer->state == PEER_STATE_DISCONNECTED && peer->address[0] != '\0') {
-      /* Remove from sync manager before cleaning up */
-      if (node->sync_mgr != NULL) {
-        sync_remove_peer(node->sync_mgr, peer);
-      }
-
-      /* Release address back to discovery pool (for outbound peers only) */
-      if (!peer->inbound) {
-        net_addr_t peer_addr;
-        if (discovery_parse_address(peer->address, peer->port, &peer_addr) ==
-            ECHO_OK) {
-          /*
-           * Determine success based on disconnect reason:
-           * - USER disconnect or long-lived connection = success
-           * - MISBEHAVING, PROTOCOL_ERROR, immediate disconnect = failure
-           */
-          echo_bool_t was_success = ECHO_FALSE;
-          uint64_t connection_duration_ms =
-              plat_time_ms() - peer->connect_time;
-
-          /* Consider successful if connection lasted > 5 minutes */
-          if (connection_duration_ms > 300000) {
-            was_success = ECHO_TRUE;
-          } else if (peer->disconnect_reason == PEER_DISCONNECT_USER) {
-            was_success = ECHO_TRUE;
-          }
-
-          discovery_mark_address_free(&node->addr_manager, &peer_addr,
-                                      was_success);
-
-          if (!was_success) {
-            log_debug(LOG_COMP_NET,
-                      "Released failed address %s:%u (reason=%d, duration=%llu "
-                      "ms)",
-                      peer->address, peer->port, peer->disconnect_reason,
-                      (unsigned long long)connection_duration_ms);
-          }
-        }
-      }
-
-      /* Re-initialize to clean state (clears address, making slot available) */
-      peer_init(peer);
     }
   }
 

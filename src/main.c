@@ -322,6 +322,15 @@ int main(int argc, char *argv[]) {
   signal(SIGINT, signal_handler);
   signal(SIGTERM, signal_handler);
 
+  /*
+   * Ignore SIGPIPE - this signal is sent when we write to a socket
+   * that has been closed by the remote peer. Without this, the default
+   * action is to terminate the process immediately with no error message.
+   * By ignoring it, send() returns -1 with errno=EPIPE instead, which
+   * we handle as a normal network error.
+   */
+  signal(SIGPIPE, SIG_IGN);
+
   /* Create RPC server */
   log_info(LOG_COMP_MAIN, "Starting RPC server on port %u...", config.rpc_port);
   rpc_config_t rpc_config;
