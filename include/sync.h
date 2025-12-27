@@ -26,6 +26,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* Forward declaration for chase event system (Phase 3 IBD rewrite) */
+typedef struct chase_dispatcher chase_dispatcher_t;
+
 /* ============================================================================
  * Constants
  * ============================================================================
@@ -358,13 +361,16 @@ typedef struct {
  *                     Use SYNC_BLOCK_DOWNLOAD_WINDOW_PRUNED for pruned nodes,
  *                     SYNC_BLOCK_DOWNLOAD_WINDOW_ARCHIVAL for archival nodes,
  *                     or 0 for default (archival).
+ *   dispatcher      - Chase event dispatcher for validation pipeline (Phase 3).
+ *                     Pass NULL to use legacy callback-based validation.
  *
  * Returns:
  *   Newly allocated sync manager, or NULL on failure
  */
 sync_manager_t *sync_create(chainstate_t *chainstate,
                             const sync_callbacks_t *callbacks,
-                            uint32_t download_window);
+                            uint32_t download_window,
+                            chase_dispatcher_t *dispatcher);
 
 /**
  * Destroy sync manager and free resources.

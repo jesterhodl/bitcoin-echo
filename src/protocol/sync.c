@@ -13,6 +13,7 @@
 #include "sync.h"
 #include "block.h"
 #include "chainstate.h"
+#include "chase.h"
 #include "download_mgr.h"
 #include "echo_config.h"
 #include "echo_types.h"
@@ -115,6 +116,9 @@ struct sync_manager {
 
   /* Performance-based download manager for peer throughput tracking */
   download_mgr_t *download_mgr;
+
+  /* Chase event dispatcher for validation pipeline (Phase 3 IBD rewrite) */
+  chase_dispatcher_t *dispatcher;
 };
 
 /* ============================================================================
@@ -468,7 +472,8 @@ static size_t count_sync_peers(const sync_manager_t *mgr) {
 
 sync_manager_t *sync_create(chainstate_t *chainstate,
                             const sync_callbacks_t *callbacks,
-                            uint32_t download_window) {
+                            uint32_t download_window,
+                            chase_dispatcher_t *dispatcher) {
   if (!chainstate || !callbacks) {
     return NULL;
   }
@@ -496,6 +501,7 @@ sync_manager_t *sync_create(chainstate_t *chainstate,
 
   mgr->chainstate = chainstate;
   mgr->callbacks = *callbacks;
+  mgr->dispatcher = dispatcher;
   mgr->mode = SYNC_MODE_IDLE;
   mgr->peer_count = 0;
   mgr->download_window = download_window;
@@ -1034,6 +1040,15 @@ echo_result_t sync_handle_block(sync_manager_t *mgr, peer_t *peer,
   if (block_index) {
     download_mgr_block_complete(mgr->download_mgr, &block_hash,
                                 block_index->height);
+
+    /*
+     * Fire CHASE_CHECKED to notify validation chaser (Phase 3 IBD rewrite).
+     * This signals that a block has been downloaded and is ready for
+     * parallel validation by chaser_validate.
+     */
+    if (mgr->dispatcher != NULL) {
+      chase_notify_height(mgr->dispatcher, CHASE_CHECKED, block_index->height);
+    }
   }
 
   mgr->blocks_received_total++;

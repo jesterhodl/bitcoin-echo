@@ -1,0 +1,239 @@
+/**
+ * chaser_confirm.c — Sequential block confirmation chaser
+ *
+ * Confirms validated blocks to chainstate in height order.
+ *
+ * Copyright (c) 2024 Bitcoin Echo
+ * SPDX-License-Identifier: MIT
+ */
+
+#include "chaser_confirm.h"
+
+#include <stdlib.h>
+#include <string.h>
+
+/* Forward declarations */
+static int confirm_start(chaser_t *self);
+static bool confirm_handle_event(chaser_t *self, chase_event_t event,
+                                 chase_value_t value);
+static void confirm_stop(chaser_t *self);
+static void confirm_destroy(chaser_t *self);
+
+static const chaser_vtable_t confirm_vtable = {
+    .start = confirm_start,
+    .handle_event = confirm_handle_event,
+    .stop = confirm_stop,
+    .destroy = confirm_destroy,
+};
+
+/*
+ * Chaser Implementation
+ */
+
+chaser_confirm_t *chaser_confirm_create(node_t *node,
+                                        chase_dispatcher_t *dispatcher,
+                                        chainstate_t *chainstate) {
+    chaser_confirm_t *chaser = calloc(1, sizeof(chaser_confirm_t));
+    if (!chaser) {
+        return NULL;
+    }
+
+    /* Initialize base chaser */
+    if (chaser_init(&chaser->base, &confirm_vtable, node, dispatcher,
+                    "confirm") != 0) {
+        free(chaser);
+        return NULL;
+    }
+
+    chaser->chainstate = chainstate;
+    chaser->confirmed_height = 0;
+    chaser->fork_point = 0;
+    chaser->top_checkpoint = 0; /* TODO: Get from config */
+
+    return chaser;
+}
+
+void chaser_confirm_destroy(chaser_confirm_t *chaser) {
+    if (!chaser) {
+        return;
+    }
+
+    chaser_stop(&chaser->base);
+    chaser_destroy(&chaser->base);
+}
+
+uint32_t chaser_confirm_height(chaser_confirm_t *chaser) {
+    if (!chaser) {
+        return 0;
+    }
+
+    chaser_lock(&chaser->base);
+    uint32_t height = chaser->confirmed_height;
+    chaser_unlock(&chaser->base);
+    return height;
+}
+
+confirm_result_t chaser_confirm_block(chaser_confirm_t *chaser, uint32_t height,
+                                      const uint8_t block_hash[32]) {
+    if (!chaser) {
+        return CONFIRM_ERROR_INTERNAL;
+    }
+
+    (void)block_hash; /* TODO: Use for block lookup */
+
+    chaser_lock(&chaser->base);
+
+    /* Must be next block in sequence */
+    if (height != chaser->confirmed_height + 1) {
+        chaser_unlock(&chaser->base);
+        return CONFIRM_ERROR_INTERNAL;
+    }
+
+    /* TODO: Apply block to chainstate */
+    /* For now, just update height */
+    chaser->confirmed_height = height;
+
+    chaser_unlock(&chaser->base);
+
+    /* Notify that block is organized */
+    chaser_notify_height(&chaser->base, CHASE_ORGANIZED, height);
+
+    return CONFIRM_SUCCESS;
+}
+
+bool chaser_confirm_is_bypass(chaser_confirm_t *chaser, uint32_t height) {
+    if (!chaser) {
+        return false;
+    }
+
+    /* Bypass confirmation for blocks at or below checkpoint */
+    return height <= chaser->top_checkpoint;
+}
+
+bool chaser_confirm_reorganize(chaser_confirm_t *chaser, uint32_t fork_point) {
+    if (!chaser) {
+        return false;
+    }
+
+    chaser_lock(&chaser->base);
+
+    /* Can't reorganize below confirmed height if it's below fork point */
+    if (fork_point > chaser->confirmed_height) {
+        chaser_unlock(&chaser->base);
+        return false;
+    }
+
+    /* Roll back to fork point */
+    /* TODO: Actually undo chainstate changes */
+    uint32_t old_height = chaser->confirmed_height;
+
+    /* Notify reorganization for each block rolled back */
+    for (uint32_t h = old_height; h > fork_point; h--) {
+        chaser_notify_height(&chaser->base, CHASE_REORGANIZED, h);
+    }
+
+    chaser->confirmed_height = fork_point;
+    chaser->fork_point = fork_point;
+
+    chaser_unlock(&chaser->base);
+
+    return true;
+}
+
+/*
+ * Chaser Virtual Methods
+ */
+
+static int confirm_start(chaser_t *self) {
+    chaser_confirm_t *chaser = (chaser_confirm_t *)self;
+
+    /* Get confirmed height from chainstate */
+    /* TODO: Query chainstate for current height */
+    chaser->confirmed_height = 0;
+
+    return 0;
+}
+
+static bool confirm_handle_event(chaser_t *self, chase_event_t event,
+                                 chase_value_t value) {
+    chaser_confirm_t *chaser = (chaser_confirm_t *)self;
+
+    if (chaser_is_closed(self)) {
+        return false;
+    }
+
+    /* Stop processing during suspension */
+    if (chaser_is_suspended(self)) {
+        return true;
+    }
+
+    switch (event) {
+    case CHASE_RESUME:
+    case CHASE_START:
+    case CHASE_BUMP:
+        /* Check for blocks to confirm */
+        /* TODO: Query database for validated blocks ready to confirm */
+        break;
+
+    case CHASE_VALID:
+        /* Block has been validated */
+        /* value.height is the validated block height */
+        {
+            uint32_t height = value.height;
+            uint32_t confirmed = chaser_confirm_height(chaser);
+
+            /* Can only confirm if all previous blocks are confirmed */
+            if (height == confirmed + 1) {
+                /* TODO: Get block hash from database */
+                uint8_t hash[32] = {0};
+                bool bypass = chaser_confirm_is_bypass(chaser, height);
+
+                if (bypass) {
+                    /* Just update height for checkpoint blocks */
+                    chaser_lock(&chaser->base);
+                    chaser->confirmed_height = height;
+                    chaser_unlock(&chaser->base);
+                    chaser_notify_height(&chaser->base, CHASE_ORGANIZED, height);
+                } else {
+                    chaser_confirm_block(chaser, height, hash);
+                }
+
+                chaser_set_position(self, height);
+
+                /* Bump to check for more blocks */
+                chaser_notify_height(&chaser->base, CHASE_BUMP, 0);
+            }
+        }
+        break;
+
+    case CHASE_REGRESSED:
+    case CHASE_DISORGANIZED:
+        /* Regression - may need to reorganize */
+        {
+            uint32_t branch_point = value.height;
+            if (branch_point < chaser_confirm_height(chaser)) {
+                chaser_confirm_reorganize(chaser, branch_point);
+                chaser_set_position(self, branch_point);
+            }
+        }
+        break;
+
+    case CHASE_STOP:
+        return false;
+
+    default:
+        break;
+    }
+
+    return true;
+}
+
+static void confirm_stop(chaser_t *self) {
+    (void)self;
+    /* Nothing special to do on stop */
+}
+
+static void confirm_destroy(chaser_t *self) {
+    chaser_confirm_t *chaser = (chaser_confirm_t *)self;
+    free(chaser);
+}

@@ -26,6 +26,10 @@
 #include "block_index_db.h"
 #include "blocks_storage.h"
 #include "chainstate.h"
+#include "chase.h"
+#include "chaser.h"
+#include "chaser_confirm.h"
+#include "chaser_validate.h"
 #include "consensus.h"
 #include "discovery.h"
 #include "echo_config.h"
@@ -88,6 +92,11 @@ struct node {
   /* Sync manager */
   sync_manager_t *sync_mgr;
 
+  /* Chase event system (Phase 3 IBD rewrite) */
+  chase_dispatcher_t *dispatcher;
+  chaser_validate_t *chaser_validate;
+  chaser_confirm_t *chaser_confirm;
+
   /* Peer discovery and management */
   peer_addr_manager_t addr_manager;
   peer_t peers[NODE_MAX_PEERS];
@@ -136,6 +145,7 @@ static echo_result_t node_restore_chain_state(node_t *node);
 static echo_result_t node_init_mempool(node_t *node);
 static echo_result_t node_init_discovery(node_t *node);
 static echo_result_t node_init_sync(node_t *node);
+static echo_result_t node_init_chase(node_t *node);
 static void node_cleanup(node_t *node);
 static echo_result_t node_cleanup_orphan_block_files(node_t *node);
 
@@ -395,6 +405,14 @@ node_t *node_create(const node_config_t *config) {
 
     /* Step 3: Initialize consensus engine (full node only) */
     result = node_init_consensus(node);
+    if (result != ECHO_OK) {
+      node_cleanup(node);
+      free(node);
+      return NULL;
+    }
+
+    /* Step 3b: Initialize chase event system (full node only) */
+    result = node_init_chase(node);
     if (result != ECHO_OK) {
       node_cleanup(node);
       free(node);
@@ -938,6 +956,52 @@ static echo_result_t node_init_consensus(node_t *node) {
     return result;
   }
 
+  return ECHO_OK;
+}
+
+/**
+ * Initialize chase event system and chasers.
+ *
+ * Creates the event dispatcher and validation/confirmation chasers.
+ * These components handle parallel block validation and sequential
+ * confirmation as part of the IBD rewrite (Phase 3).
+ */
+static echo_result_t node_init_chase(node_t *node) {
+  /* Create chase event dispatcher */
+  node->dispatcher = chase_dispatcher_create();
+  if (node->dispatcher == NULL) {
+    log_error(LOG_COMP_MAIN, "Failed to create chase dispatcher");
+    return ECHO_ERR_OUT_OF_MEMORY;
+  }
+
+  /* Get chainstate for chasers */
+  chainstate_t *chainstate = consensus_get_chainstate(node->consensus);
+  if (chainstate == NULL) {
+    log_error(LOG_COMP_MAIN, "Failed to get chainstate for chasers");
+    return ECHO_ERR_INVALID;
+  }
+
+  /*
+   * Create validation chaser with threadpool.
+   * Worker count 0 = auto-detect CPU count.
+   * Max backlog 0 = default (50 concurrent validations).
+   */
+  node->chaser_validate = chaser_validate_create(
+      node, node->dispatcher, chainstate, 0, 0);
+  if (node->chaser_validate == NULL) {
+    log_error(LOG_COMP_MAIN, "Failed to create validation chaser");
+    return ECHO_ERR_OUT_OF_MEMORY;
+  }
+
+  /* Create confirmation chaser (single-threaded, sequential) */
+  node->chaser_confirm = chaser_confirm_create(
+      node, node->dispatcher, chainstate);
+  if (node->chaser_confirm == NULL) {
+    log_error(LOG_COMP_MAIN, "Failed to create confirmation chaser");
+    return ECHO_ERR_OUT_OF_MEMORY;
+  }
+
+  log_info(LOG_COMP_MAIN, "Chase event system initialized");
   return ECHO_OK;
 }
 
@@ -1952,7 +2016,8 @@ static echo_result_t node_init_sync(node_t *node) {
   uint32_t download_window = node->config.prune_target_mb > 0
                                  ? SYNC_BLOCK_DOWNLOAD_WINDOW_PRUNED
                                  : SYNC_BLOCK_DOWNLOAD_WINDOW_ARCHIVAL;
-  node->sync_mgr = sync_create(chainstate, &callbacks, download_window);
+  node->sync_mgr = sync_create(chainstate, &callbacks, download_window,
+                               node->dispatcher);
   if (node->sync_mgr == NULL) {
     log_error(LOG_COMP_MAIN, "Failed to create sync manager");
     return ECHO_ERR_OUT_OF_MEMORY;
@@ -2113,6 +2178,29 @@ void node_destroy(node_t *node) {
 static void node_cleanup(node_t *node) {
   /* Free UTXO delta accumulator */
   node_accum_free(node);
+
+  /*
+   * Destroy chase event system (reverse order of creation).
+   * Signal CHASE_STOP first to allow chasers to drain their queues.
+   */
+  if (node->dispatcher != NULL) {
+    chase_notify_default(node->dispatcher, CHASE_STOP);
+  }
+
+  if (node->chaser_confirm != NULL) {
+    chaser_confirm_destroy(node->chaser_confirm);
+    node->chaser_confirm = NULL;
+  }
+
+  if (node->chaser_validate != NULL) {
+    chaser_validate_destroy(node->chaser_validate);
+    node->chaser_validate = NULL;
+  }
+
+  if (node->dispatcher != NULL) {
+    chase_dispatcher_destroy(node->dispatcher);
+    node->dispatcher = NULL;
+  }
 
   /* Destroy sync manager */
   if (node->sync_mgr != NULL) {
