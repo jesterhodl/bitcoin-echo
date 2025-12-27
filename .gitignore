@@ -7,6 +7,7 @@ echo.exe
 *.a
 *.so
 *.dylib
+*.tmp
 
 # Test binaries
 test/unit/test_*
