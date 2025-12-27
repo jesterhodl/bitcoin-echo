@@ -2695,19 +2695,6 @@ static echo_result_t rpc_getsyncstatus(node_t *node, const json_value_t *params,
   json_builder_append(builder, ",\"initialblockdownload\":");
   json_builder_bool(builder, node_stats.is_syncing);
 
-  /* Bottleneck diagnostics - helps identify network vs CPU bound sync */
-  json_builder_append(builder, ",\"blocks_ready\":");
-  json_builder_uint(builder, metrics.blocks_ready);
-
-  json_builder_append(builder, ",\"blocks_starved\":");
-  json_builder_uint(builder, metrics.blocks_starved);
-
-  json_builder_append(builder, ",\"total_validation_ms\":");
-  json_builder_uint(builder, metrics.total_validation_ms);
-
-  json_builder_append(builder, ",\"total_starvation_ms\":");
-  json_builder_uint(builder, metrics.total_starvation_ms);
-
   json_builder_append(builder, "}");
 
   return ECHO_OK;

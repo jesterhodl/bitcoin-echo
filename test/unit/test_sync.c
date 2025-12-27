@@ -557,7 +557,6 @@ static void test_sync_start(void) {
   sync_callbacks_t callbacks = {.ctx = &tctx};
 
   sync_manager_t *mgr = sync_create(chainstate, &callbacks, 0);
-  sync_skip_ping_contest(mgr);  /* Skip for testing */
   peer_t *peer = create_test_peer("192.168.1.1", 8333, 100000);
   sync_add_peer(mgr, peer, 100000);
 
@@ -657,7 +656,6 @@ static void test_sync_get_progress(void) {
   sync_callbacks_t callbacks = {.ctx = &tctx};
 
   sync_manager_t *mgr = sync_create(chainstate, &callbacks, 0);
-  sync_skip_ping_contest(mgr); /* Skip ping contest for unit test */
   peer_t *peer = create_test_peer("192.168.1.1", 8333, 100000);
   sync_add_peer(mgr, peer, 100000);
 
@@ -1035,7 +1033,6 @@ static void test_sync_tick_headers_mode(void) {
   sync_callbacks_t callbacks = {.ctx = &tctx};
 
   sync_manager_t *mgr = sync_create(chainstate, &callbacks, 0);
-  sync_skip_ping_contest(mgr); /* Skip ping contest for unit test */
   peer_t *peer = create_test_peer("192.168.1.1", 8333, 100000);
   sync_add_peer(mgr, peer, 100000);
   sync_start(mgr);
@@ -1095,7 +1092,6 @@ static void test_sync_send_getheaders_callback(void) {
   };
 
   sync_manager_t *mgr = sync_create(chainstate, &callbacks, 0);
-  sync_skip_ping_contest(mgr); /* Skip ping contest for unit test */
   peer_t *peer = create_test_peer("192.168.1.1", 8333, 100000);
   sync_add_peer(mgr, peer, 100000);
 

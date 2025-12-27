@@ -61,16 +61,6 @@
 /* Timeout decay factor when blocks connect successfully (0.85) */
 #define SYNC_STALLING_TIMEOUT_DECAY 0.85
 
-/* Critical zone: request first N blocks from multiple peers to reduce
- * head-of-line blocking. First response wins, duplicates discarded.
- *
- * REDUNDANCY=32 means request from ALL connected peers. This maximizes
- * the chance of finding a peer with the block data, since many peers
- * are pruned or don't serve historical blocks.
- */
-#define SYNC_CRITICAL_ZONE_SIZE 8
-#define SYNC_CRITICAL_ZONE_REDUNDANCY 32
-
 /* Minimum time between header sync attempts with same peer (5 seconds) */
 #define SYNC_HEADER_RETRY_INTERVAL_MS 5000
 
@@ -101,15 +91,14 @@
  */
 
 /**
- * Sync mode
+ * Sync mode (simplified for IBD rewrite - no ping contest)
  */
 typedef enum {
-  SYNC_MODE_IDLE,         /* Not syncing */
-  SYNC_MODE_PING_CONTEST, /* Measuring peer latency before headers sync */
-  SYNC_MODE_HEADERS,      /* Downloading headers */
-  SYNC_MODE_BLOCKS,       /* Downloading and validating blocks */
-  SYNC_MODE_DONE,         /* Sync complete, in steady state */
-  SYNC_MODE_STALLED       /* Sync stalled (no progress) */
+  SYNC_MODE_IDLE,    /* Not syncing */
+  SYNC_MODE_HEADERS, /* Downloading headers */
+  SYNC_MODE_BLOCKS,  /* Downloading and validating blocks */
+  SYNC_MODE_DONE,    /* Sync complete, in steady state */
+  SYNC_MODE_STALLED  /* Sync stalled (no progress) */
 } sync_mode_t;
 
 /**
@@ -127,13 +116,9 @@ typedef struct {
   hash256_t last_header_hash; /* Last header hash we sent getheaders for */
   uint32_t headers_received;  /* Number of headers received from this peer */
 
-  /* Block download state.
-   * Arrays sized for normal limit + 4 extra slots for critical blocks.
-   * The sync manager may exceed SYNC_MAX_BLOCKS_PER_PEER for the next
-   * needed block (validated_tip + 1) to prevent validation stalls.
-   */
-  hash256_t blocks_in_flight[SYNC_MAX_BLOCKS_PER_PEER + 4];  /* Pending blocks */
-  uint64_t block_request_time[SYNC_MAX_BLOCKS_PER_PEER + 4]; /* When requested */
+  /* Block download state */
+  hash256_t blocks_in_flight[SYNC_MAX_BLOCKS_PER_PEER];  /* Pending blocks */
+  uint64_t block_request_time[SYNC_MAX_BLOCKS_PER_PEER]; /* When requested */
   size_t blocks_in_flight_count;
   uint32_t blocks_received; /* Number of blocks received from this peer */
 
@@ -142,17 +127,9 @@ typedef struct {
   work256_t announced_work; /* Best work announced by peer (from headers) */
 
   /* Performance metrics */
-  uint64_t avg_headers_latency_ms; /* Average headers response time */
-  uint64_t avg_block_latency_ms;   /* Average block download time */
-  uint32_t timeout_count;          /* Number of timeouts from this peer */
-  uint32_t blocks_requested;       /* Blocks requested from this peer */
-
-  /* Latency tracking for metrics */
+  uint32_t timeout_count;     /* Number of timeouts from this peer */
+  uint32_t blocks_requested;  /* Blocks requested from this peer */
   uint64_t first_block_time;  /* When peer started delivering blocks (ms) */
-  uint64_t total_latency_ms;  /* Sum of all block download latencies */
-  uint32_t latency_samples;   /* Number of latency samples collected */
-
-  /* Session-based reputation (for racing prioritization) */
   uint64_t last_delivery_time; /* When peer last delivered a block (ms) */
 } peer_sync_state_t;
 
@@ -279,18 +256,6 @@ typedef struct {
                               size_t count, void *ctx);
 
   /**
-   * Send ping to a peer for RTT measurement.
-   *
-   * Called during ping contest to measure peer latency.
-   * The node should track the nonce and sent time in the peer.
-   *
-   * Parameters:
-   *   peer - Peer to send ping to
-   *   ctx  - User context
-   */
-  void (*send_ping)(peer_t *peer, void *ctx);
-
-  /**
    * Get block hash by height from the database.
    *
    * Used for efficient block queueing - avoids walking back through
@@ -344,50 +309,6 @@ typedef struct {
    *   ECHO_OK on success
    */
   echo_result_t (*flush_headers)(void *ctx);
-
-  /**
-   * Cull peers after audition phase - keep only the fastest performers.
-   *
-   * Called after the ping contest completes. The implementation should:
-   * 1. Sort connected peers by RTT (last_rtt_ms in peer_t)
-   * 2. Disconnect the slowest peers
-   * 3. Keep only target_count fastest peers
-   *
-   * Parameters:
-   *   target_count - Number of peers to keep
-   *   ctx          - User context
-   *
-   * Returns:
-   *   Number of peers actually culled
-   */
-  size_t (*cull_slow_peers)(size_t target_count, void *ctx);
-
-  /**
-   * Evict a peer during continuous rotation.
-   *
-   * Called during IBD when a peer is identified as a poor performer.
-   * The implementation should disconnect the peer and optionally
-   * trigger connection to a new peer from the address pool.
-   *
-   * Parameters:
-   *   peer   - Peer to evict
-   *   reason - Human-readable reason for eviction (for logging)
-   *   ctx    - User context
-   */
-  void (*evict_peer)(peer_t *peer, const char *reason, void *ctx);
-
-  /**
-   * Request new peer connections after rotation eviction.
-   *
-   * Called after evicting underperformers to immediately fill the slots
-   * with fresh peers from the address pool. This ensures we maintain
-   * peer count and continuously test new candidates.
-   *
-   * Parameters:
-   *   count - Number of new peers to connect to
-   *   ctx   - User context
-   */
-  void (*request_new_peers)(size_t count, void *ctx);
 
   /* Context pointer passed to all callbacks */
   void *ctx;
@@ -558,18 +479,6 @@ void sync_process_timeouts(sync_manager_t *mgr);
 void sync_tick(sync_manager_t *mgr);
 
 /**
- * Report a pong received from a peer.
- *
- * Called by the node when a pong is received during ping contest.
- * The peer's last_rtt_ms should already be updated before calling this.
- *
- * Parameters:
- *   mgr  - Sync manager
- *   peer - Peer that sent the pong
- */
-void sync_report_pong(sync_manager_t *mgr, peer_t *peer);
-
-/**
  * Get current sync progress.
  */
 void sync_get_progress(const sync_manager_t *mgr, sync_progress_t *progress);
@@ -589,30 +498,6 @@ bool sync_is_complete(const sync_manager_t *mgr);
  *   true if actively downloading headers or blocks
  */
 bool sync_is_ibd(const sync_manager_t *mgr);
-
-/**
- * Skip ping contest for testing purposes.
- *
- * When set, sync_start will go directly to HEADERS mode without
- * waiting for peers or running a ping contest.
- */
-void sync_skip_ping_contest(sync_manager_t *mgr);
-
-/**
- * Check if the audition phase is complete.
- *
- * During the audition phase, the node connects to many peers
- * (ECHO_AUDITION_PEER_COUNT) and measures their RTT via ping contest.
- * After culling, only the fastest ECHO_MAX_OUTBOUND_PEERS are kept.
- *
- * Use this to determine the current peer limit:
- * - During audition: allow up to ECHO_AUDITION_PEER_COUNT
- * - After audition: maintain only ECHO_MAX_OUTBOUND_PEERS
- *
- * Returns:
- *   true if audition is complete (culling has happened)
- */
-bool sync_is_audition_complete(const sync_manager_t *mgr);
 
 /* ============================================================================
  * Block Locator
@@ -838,12 +723,6 @@ typedef struct {
   uint64_t network_median_latency;  /* Network baseline latency (ms) */
   uint32_t active_sync_peers;       /* Peers actively contributing blocks */
   const char *mode_string;          /* Human-readable sync mode */
-
-  /* Bottleneck diagnostics: helps identify network vs CPU bound sync */
-  uint32_t blocks_ready;            /* Blocks where next was immediately ready */
-  uint32_t blocks_starved;          /* Blocks where we had to wait for next */
-  uint64_t total_validation_ms;     /* Cumulative time in consensus validation */
-  uint64_t total_starvation_ms;     /* Cumulative time waiting for blocks */
 } sync_metrics_t;
 
 /**

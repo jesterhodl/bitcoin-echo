@@ -161,13 +161,9 @@ static void sync_cb_send_getheaders(peer_t *peer, const hash256_t *locator,
                                     const hash256_t *stop_hash, void *ctx);
 static void sync_cb_send_getdata_blocks(peer_t *peer, const hash256_t *hashes,
                                         size_t count, void *ctx);
-static void sync_cb_send_ping(peer_t *peer, void *ctx);
 static echo_result_t sync_cb_get_block_hash_at_height(uint32_t height,
                                                        hash256_t *hash,
                                                        void *ctx);
-static size_t sync_cb_cull_slow_peers(size_t target_count, void *ctx);
-static void sync_cb_evict_peer(peer_t *peer, const char *reason, void *ctx);
-static void sync_cb_request_new_peers(size_t count, void *ctx);
 
 /*
  * ============================================================================
@@ -1866,209 +1862,6 @@ static void sync_cb_send_getdata_blocks(peer_t *peer, const hash256_t *hashes,
 }
 
 /**
- * Send ping to peer for RTT measurement during ping contest.
- */
-static void sync_cb_send_ping(peer_t *peer, void *ctx) {
-  (void)ctx;
-
-  if (peer == NULL || !peer_is_ready(peer)) {
-    return;
-  }
-
-  /* Build ping message */
-  msg_t ping;
-  memset(&ping, 0, sizeof(ping));
-  ping.type = MSG_PING;
-  ping.payload.ping.nonce = generate_nonce();
-
-  /* Track ping for RTT measurement */
-  peer->ping_nonce = ping.payload.ping.nonce;
-  peer->ping_sent_time = plat_time_ms();
-
-  peer_queue_message(peer, &ping);
-}
-
-/**
- * Cull slow peers after audition phase - keep only the fastest performers.
- *
- * Sorts all connected outbound peers by RTT and disconnects the slowest
- * to bring us down to target_count. This is the "dismissal" after auditions.
- */
-static size_t sync_cb_cull_slow_peers(size_t target_count, void *ctx) {
-  node_t *node = (node_t *)ctx;
-
-  /* Build array of outbound peers with their RTT */
-  struct {
-    peer_t *peer;
-    uint64_t rtt;
-  } candidates[NODE_MAX_PEERS];
-  size_t candidate_count = 0;
-
-  for (size_t i = 0; i < NODE_MAX_PEERS; i++) {
-    peer_t *peer = &node->peers[i];
-    if (peer_is_connected(peer) && !peer->inbound) {
-      candidates[candidate_count].peer = peer;
-      /* Use RTT if measured, otherwise treat as very slow */
-      candidates[candidate_count].rtt =
-          peer->last_rtt_ms > 0 ? peer->last_rtt_ms : UINT64_MAX;
-      candidate_count++;
-    }
-  }
-
-  if (candidate_count <= target_count) {
-    /* Already at or below target */
-    log_info(LOG_COMP_NET, "Cull: only %zu peers, target %zu - no culling needed",
-             candidate_count, target_count);
-    return 0;
-  }
-
-  /* Sort by RTT ascending (fastest first) - simple bubble sort */
-  for (size_t i = 0; i < candidate_count - 1; i++) {
-    for (size_t j = i + 1; j < candidate_count; j++) {
-      if (candidates[j].rtt < candidates[i].rtt) {
-        /* Swap */
-        peer_t *tmp_peer = candidates[i].peer;
-        uint64_t tmp_rtt = candidates[i].rtt;
-        candidates[i].peer = candidates[j].peer;
-        candidates[i].rtt = candidates[j].rtt;
-        candidates[j].peer = tmp_peer;
-        candidates[j].rtt = tmp_rtt;
-      }
-    }
-  }
-
-  /* Log the RTT distribution */
-  log_info(LOG_COMP_NET, "Audition RTT distribution (sorted):");
-  log_info(LOG_COMP_NET, "  Fastest: %s RTT=%llums",
-           candidates[0].peer->address,
-           (unsigned long long)candidates[0].rtt);
-  if (candidate_count > 1) {
-    size_t mid = candidate_count / 2;
-    log_info(LOG_COMP_NET, "  Median:  %s RTT=%llums",
-             candidates[mid].peer->address,
-             (unsigned long long)candidates[mid].rtt);
-  }
-  log_info(LOG_COMP_NET, "  Slowest: %s RTT=%llums",
-           candidates[candidate_count - 1].peer->address,
-           (unsigned long long)candidates[candidate_count - 1].rtt);
-
-  /* Disconnect slow peers (keep first target_count) */
-  size_t culled = 0;
-  for (size_t i = target_count; i < candidate_count; i++) {
-    peer_t *slow_peer = candidates[i].peer;
-    log_info(LOG_COMP_NET, "Dismissing slow peer %s (RTT=%llums, rank %zu/%zu)",
-             slow_peer->address, (unsigned long long)candidates[i].rtt,
-             i + 1, candidate_count);
-    peer_disconnect(slow_peer, PEER_DISCONNECT_USER,
-                    "Dismissed after audition (slow RTT)");
-    culled++;
-  }
-
-  return culled;
-}
-
-/**
- * Evict a peer during continuous rotation.
- *
- * Called during IBD when a peer is identified as a poor performer.
- * Disconnects the peer and relies on the node's connection management
- * to backfill with a new peer from the address pool.
- */
-static void sync_cb_evict_peer(peer_t *peer, const char *reason, void *ctx) {
-  node_t *node = (node_t *)ctx;
-  if (node == NULL || peer == NULL) {
-    return;
-  }
-
-  log_info(LOG_COMP_NET, "Evicting peer %s: %s", peer->address,
-           reason ? reason : "poor performance");
-
-  /* Disconnect the peer - node's event loop will clean up and try new peers */
-  peer_disconnect(peer, PEER_DISCONNECT_USER, reason);
-}
-
-/**
- * Request new peer connections from the address pool.
- *
- * Called after evicting underperformers during rotation to immediately
- * fill the slots with fresh peers. Uses the same connection logic as
- * the main event loop but triggers it immediately rather than waiting.
- */
-static void sync_cb_request_new_peers(size_t count, void *ctx) {
-  node_t *node = (node_t *)ctx;
-  if (node == NULL || count == 0) {
-    return;
-  }
-
-  size_t connected = 0;
-  size_t attempts = 0;
-  size_t max_attempts = count * 3; /* Try up to 3x addresses to fill slots */
-
-  while (connected < count && attempts < max_attempts) {
-    attempts++;
-
-    /* Select address from pool */
-    net_addr_t addr;
-    echo_result_t addr_result =
-        discovery_select_outbound_address(&node->addr_manager, &addr);
-    if (addr_result != ECHO_OK) {
-      log_debug(LOG_COMP_NET,
-                "No addresses available for replacement (connected %zu/%zu)",
-                connected, count);
-      break;
-    }
-
-    /* Find empty slot */
-    bool slot_found = false;
-    for (size_t i = 0; i < NODE_MAX_PEERS; i++) {
-      peer_t *peer = &node->peers[i];
-      if (!peer_is_connected(peer)) {
-        /* Convert IPv4-mapped IPv6 address to string */
-        char ip_str[64];
-        snprintf(ip_str, sizeof(ip_str), "%d.%d.%d.%d", addr.ip[12],
-                 addr.ip[13], addr.ip[14], addr.ip[15]);
-
-        log_info(LOG_COMP_NET, "Rotation replacement: connecting to %s:%u",
-                 ip_str, addr.port);
-
-        /* Mark address as in-use and record attempt */
-        discovery_mark_address_in_use(&node->addr_manager, &addr);
-        discovery_mark_attempt(&node->addr_manager, &addr);
-
-        uint64_t nonce = generate_nonce();
-        echo_result_t result = peer_connect(peer, ip_str, addr.port, nonce);
-        if (result == ECHO_OK) {
-          /* Send version message to start handshake */
-          uint32_t our_height = 0;
-          if (node->consensus != NULL) {
-            our_height = consensus_get_height(node->consensus);
-          }
-          uint64_t services = node_is_pruning_enabled(node) ? 0 : 1;
-          peer_send_version(peer, services, (int32_t)our_height, true);
-          connected++;
-        } else {
-          log_warn(LOG_COMP_NET, "Failed to connect to replacement %s:%u",
-                   ip_str, addr.port);
-          discovery_mark_address_free(&node->addr_manager, &addr, ECHO_FALSE);
-          /* Don't break - try another address */
-        }
-        slot_found = true;
-        break;
-      }
-    }
-
-    if (!slot_found) {
-      log_warn(LOG_COMP_NET, "No empty slots for replacement peers");
-      break;
-    }
-  }
-
-  log_info(LOG_COMP_NET, "Rotation replacement: connected %zu/%zu new peers "
-           "(tried %zu addresses)",
-           connected, count, attempts);
-}
-
-/**
  * Get block hash at height from the database.
  *
  * Used for efficient block queueing - avoids walking back through
@@ -2149,14 +1942,10 @@ static echo_result_t node_init_sync(node_t *node) {
       .validate_and_apply_block = sync_cb_validate_and_apply_block,
       .send_getheaders = sync_cb_send_getheaders,
       .send_getdata_blocks = sync_cb_send_getdata_blocks,
-      .send_ping = sync_cb_send_ping,
       .get_block_hash_at_height = sync_cb_get_block_hash_at_height,
       .begin_header_batch = sync_cb_begin_header_batch,
       .commit_header_batch = sync_cb_commit_header_batch,
       .flush_headers = NULL,
-      .cull_slow_peers = sync_cb_cull_slow_peers,
-      .evict_peer = sync_cb_evict_peer,
-      .request_new_peers = sync_cb_request_new_peers,
       .ctx = node};
 
   /* Create sync manager with appropriate download window for mode */
@@ -2726,11 +2515,6 @@ static void node_handle_peer_message(node_t *node, peer_t *peer,
       peer->ping_nonce = 0; /* Clear - ping answered */
       log_debug(LOG_COMP_NET, "Peer %s RTT: %llu ms",
                 peer->address, (unsigned long long)peer->last_rtt_ms);
-
-      /* Notify sync manager for ping contest */
-      if (node->sync_mgr != NULL) {
-        sync_report_pong(node->sync_mgr, peer);
-      }
     }
     break;
 
@@ -3301,34 +3085,25 @@ echo_result_t node_maintenance(node_t *node) {
     }
   }
 
-  /*
-   * AUDITION PHASE: During audition, connect to many peers to find the fastest.
-   * After audition completes (ping contest + culling), maintain normal count.
-   */
-  bool audition_active = node->sync_mgr &&
-                         !sync_is_audition_complete(node->sync_mgr);
-  size_t target_peers = audition_active ? (size_t)ECHO_AUDITION_PEER_COUNT
-                                        : (size_t)ECHO_MAX_OUTBOUND_PEERS;
+  /* Target outbound peer count */
+  size_t target_peers = (size_t)ECHO_MAX_OUTBOUND_PEERS;
 
   static uint64_t last_peer_log = 0;
   if (now - last_peer_log > 5000) { /* Log every 5 seconds */
-    log_info(LOG_COMP_NET, "Outbound peers: %zu/%zu%s", outbound_count,
-             target_peers, audition_active ? " (audition)" : "");
+    log_info(LOG_COMP_NET, "Outbound peers: %zu/%zu", outbound_count,
+             target_peers);
     last_peer_log = now;
   }
 
   /*
    * Try multiple connections per cycle when below target.
    * During IBD, bandwidth is critical - fill peer slots aggressively.
-   * - During audition: try up to 16 connections per cycle
    * - Below 50%: try up to 8 connections per cycle
    * - Below 75%: try up to 4 connections per cycle
    * - Below target: try up to 2 connections per cycle
    */
   size_t max_attempts = 2; /* Always try at least 2 when below target */
-  if (audition_active) {
-    max_attempts = 16; /* Aggressive during audition */
-  } else if (outbound_count < target_peers / 2) {
+  if (outbound_count < target_peers / 2) {
     max_attempts = 8;
   } else if (outbound_count < (target_peers * 3) / 4) {
     max_attempts = 4;
