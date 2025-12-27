@@ -105,6 +105,7 @@ typedef enum {
  * Peer sync state
  *
  * Tracks the sync state for each connected peer.
+ * Note: Block download tracking is now handled by download_mgr.
  */
 typedef struct {
   peer_t *peer;        /* The peer */
@@ -116,10 +117,7 @@ typedef struct {
   hash256_t last_header_hash; /* Last header hash we sent getheaders for */
   uint32_t headers_received;  /* Number of headers received from this peer */
 
-  /* Block download state */
-  hash256_t blocks_in_flight[SYNC_MAX_BLOCKS_PER_PEER];  /* Pending blocks */
-  uint64_t block_request_time[SYNC_MAX_BLOCKS_PER_PEER]; /* When requested */
-  size_t blocks_in_flight_count;
+  /* Block download state - tracking only, download_mgr manages assignments */
   uint32_t blocks_received; /* Number of blocks received from this peer */
 
   /* Peer chain info */
@@ -555,140 +553,6 @@ echo_result_t sync_build_locator_from(const block_index_map_t *index_map,
  */
 block_index_t *sync_find_locator_fork(const chainstate_t *state,
                                       const hash256_t *locator, size_t count);
-
-/* ============================================================================
- * Block Download Queue
- * ============================================================================
- */
-
-/**
- * Block download queue
- *
- * Manages the queue of blocks to download during sync.
- */
-typedef struct block_queue block_queue_t;
-
-/**
- * Create a block download queue.
- *
- * Parameters:
- *   capacity - Maximum blocks in queue
- *
- * Returns:
- *   Newly allocated queue, or NULL on failure
- */
-block_queue_t *block_queue_create(size_t capacity);
-
-/**
- * Destroy block queue.
- */
-void block_queue_destroy(block_queue_t *queue);
-
-/**
- * Add block to download queue.
- *
- * Parameters:
- *   queue  - The queue
- *   hash   - Block hash to download
- *   height - Expected block height (for ordering)
- *
- * Returns:
- *   ECHO_OK if added
- *   ECHO_ERR_FULL if queue is full
- *   ECHO_ERR_EXISTS if already in queue
- */
-echo_result_t block_queue_add(block_queue_t *queue, const hash256_t *hash,
-                              uint32_t height);
-
-/**
- * Get next block to download.
- *
- * Returns the lowest-height unassigned block.
- *
- * Parameters:
- *   queue  - The queue
- *   hash   - Output: block hash
- *   height - Output: block height
- *
- * Returns:
- *   ECHO_OK if block available
- *   ECHO_ERR_NOT_FOUND if no blocks available
- */
-echo_result_t block_queue_next(block_queue_t *queue, hash256_t *hash,
-                               uint32_t *height);
-
-/**
- * Find block in queue by height.
- *
- * Searches for a block at the specified height (pending or in-flight).
- * Used to check if we already have a stored block that can be validated.
- *
- * Parameters:
- *   queue  - The queue
- *   height - Block height to find
- *   hash   - Output: hash of block at this height
- *
- * Returns:
- *   ECHO_OK if found, ECHO_ERR_NOT_FOUND otherwise
- */
-echo_result_t block_queue_find_by_height(block_queue_t *queue, uint32_t height,
-                                         hash256_t *hash);
-
-/**
- * Mark block as assigned to peer for download.
- *
- * Parameters:
- *   queue - The queue
- *   hash  - Block hash
- *   peer  - Peer assigned to download
- */
-void block_queue_assign(block_queue_t *queue, const hash256_t *hash,
-                        peer_t *peer);
-
-/**
- * Mark block as downloaded and remove from queue.
- *
- * Parameters:
- *   queue - The queue
- *   hash  - Block hash
- */
-void block_queue_complete(block_queue_t *queue, const hash256_t *hash);
-
-/**
- * Unassign block (return to pending state).
- *
- * Used when peer disconnects or times out.
- *
- * Parameters:
- *   queue - The queue
- *   hash  - Block hash
- */
-void block_queue_unassign(block_queue_t *queue, const hash256_t *hash);
-
-/**
- * Unassign all blocks from a peer.
- */
-void block_queue_unassign_peer(block_queue_t *queue, peer_t *peer);
-
-/**
- * Get number of pending blocks (not yet assigned).
- */
-size_t block_queue_pending_count(const block_queue_t *queue);
-
-/**
- * Get number of in-flight blocks (assigned, awaiting download).
- */
-size_t block_queue_inflight_count(const block_queue_t *queue);
-
-/**
- * Get total number of blocks in queue.
- */
-size_t block_queue_size(const block_queue_t *queue);
-
-/**
- * Check if a block is in the queue.
- */
-bool block_queue_contains(const block_queue_t *queue, const hash256_t *hash);
 
 /* ============================================================================
  * Helper Functions

@@ -13,6 +13,7 @@
 #include "sync.h"
 #include "block.h"
 #include "chainstate.h"
+#include "download_mgr.h"
 #include "echo_config.h"
 #include "echo_types.h"
 #include "log.h"
@@ -29,30 +30,6 @@
  * Internal Structures
  * ============================================================================
  */
-
-/**
- * Block queue entry
- */
-typedef struct {
-  hash256_t hash;
-  uint32_t height;
-  peer_t *assigned_peer;
-  uint64_t request_time;
-  bool in_flight;
-  uint32_t retry_count;
-  bool valid; /* Entry is in use */
-} block_queue_entry_t;
-
-/**
- * Block download queue implementation
- */
-struct block_queue {
-  block_queue_entry_t *entries;
-  size_t capacity;
-  size_t count;
-  size_t pending_count;
-  size_t inflight_count;
-};
 
 /**
  * Maximum sync peers to track
@@ -92,9 +69,6 @@ struct sync_manager {
   /* Peer sync states */
   peer_sync_state_t peers[SYNC_MAX_PEERS];
   size_t peer_count;
-
-  /* Block download queue */
-  block_queue_t *block_queue;
 
   /* Sync timing */
   uint64_t start_time;
@@ -138,7 +112,38 @@ struct sync_manager {
   pending_header_t *pending_headers;      /* Dynamic array of pending headers */
   size_t pending_headers_count;           /* Number of queued headers */
   size_t pending_headers_capacity;        /* Allocated capacity */
+
+  /* Performance-based download manager for peer throughput tracking */
+  download_mgr_t *download_mgr;
 };
+
+/* ============================================================================
+ * Download Manager Callback Wrappers
+ * ============================================================================
+ */
+
+/**
+ * Callback wrapper: send getdata for blocks to peer.
+ * Adapts sync_manager callbacks to download_mgr callback signature.
+ */
+static void dm_send_getdata(peer_t *peer, const hash256_t *hashes, size_t count,
+                            void *ctx) {
+  sync_manager_t *mgr = (sync_manager_t *)ctx;
+  if (mgr->callbacks.send_getdata_blocks) {
+    mgr->callbacks.send_getdata_blocks(peer, hashes, count, mgr->callbacks.ctx);
+  }
+}
+
+/**
+ * Callback wrapper: disconnect a slow/misbehaving peer.
+ * For now, just log - actual disconnect is handled by peer management.
+ */
+static void dm_disconnect_peer(peer_t *peer, const char *reason, void *ctx) {
+  (void)ctx;
+  log_warn(LOG_COMP_SYNC, "Download manager requests disconnect of %s: %s",
+           peer->address, reason);
+  /* TODO: Actually disconnect the peer via peer_disconnect() */
+}
 
 /* ============================================================================
  * Rate Calculation Helper
@@ -245,249 +250,6 @@ static echo_result_t pending_headers_flush(sync_manager_t *mgr) {
   mgr->pending_headers_count = 0;
 
   return errors > 0 ? ECHO_ERR_IO : ECHO_OK;
-}
-
-/* ============================================================================
- * Block Queue Implementation
- * ============================================================================
- */
-
-block_queue_t *block_queue_create(size_t capacity) {
-  if (capacity == 0) {
-    return NULL;
-  }
-
-  block_queue_t *queue = calloc(1, sizeof(block_queue_t));
-  if (!queue) {
-    return NULL;
-  }
-
-  queue->entries = calloc(capacity, sizeof(block_queue_entry_t));
-  if (!queue->entries) {
-    free(queue);
-    return NULL;
-  }
-
-  queue->capacity = capacity;
-  queue->count = 0;
-  queue->pending_count = 0;
-  queue->inflight_count = 0;
-
-  return queue;
-}
-
-void block_queue_destroy(block_queue_t *queue) {
-  if (!queue) {
-    return;
-  }
-  free(queue->entries);
-  free(queue);
-}
-
-echo_result_t block_queue_add(block_queue_t *queue, const hash256_t *hash,
-                              uint32_t height) {
-  if (!queue || !hash) {
-    return ECHO_ERR_NULL_PARAM;
-  }
-
-  /* Check for duplicate */
-  for (size_t i = 0; i < queue->capacity; i++) {
-    if (queue->entries[i].valid &&
-        memcmp(&queue->entries[i].hash, hash, sizeof(hash256_t)) == 0) {
-      return ECHO_ERR_EXISTS;
-    }
-  }
-
-  /* Check capacity */
-  if (queue->count >= queue->capacity) {
-    return ECHO_ERR_FULL;
-  }
-
-  /* Find empty slot */
-  for (size_t i = 0; i < queue->capacity; i++) {
-    if (!queue->entries[i].valid) {
-      queue->entries[i].hash = *hash;
-      queue->entries[i].height = height;
-      queue->entries[i].assigned_peer = NULL;
-      queue->entries[i].request_time = 0;
-      queue->entries[i].in_flight = false;
-      queue->entries[i].retry_count = 0;
-      queue->entries[i].valid = true;
-      queue->count++;
-      queue->pending_count++;
-      return ECHO_OK;
-    }
-  }
-
-  return ECHO_ERR_FULL;
-}
-
-echo_result_t block_queue_next(block_queue_t *queue, hash256_t *hash,
-                               uint32_t *height) {
-  if (!queue || !hash || !height) {
-    return ECHO_ERR_NULL_PARAM;
-  }
-
-  /* Find lowest-height unassigned block */
-  uint32_t min_height = UINT32_MAX;
-  size_t min_idx = SIZE_MAX;
-
-  for (size_t i = 0; i < queue->capacity; i++) {
-    if (queue->entries[i].valid && !queue->entries[i].in_flight) {
-      if (queue->entries[i].height < min_height) {
-        min_height = queue->entries[i].height;
-        min_idx = i;
-      }
-    }
-  }
-
-  if (min_idx == SIZE_MAX) {
-    return ECHO_ERR_NOT_FOUND;
-  }
-
-  *hash = queue->entries[min_idx].hash;
-  *height = queue->entries[min_idx].height;
-  return ECHO_OK;
-}
-
-echo_result_t block_queue_find_by_height(block_queue_t *queue, uint32_t height,
-                                         hash256_t *hash) {
-  if (!queue || !hash) {
-    return ECHO_ERR_NULL_PARAM;
-  }
-
-  /* Find block at specified height (pending or in-flight) */
-  for (size_t i = 0; i < queue->capacity; i++) {
-    if (queue->entries[i].valid && queue->entries[i].height == height) {
-      *hash = queue->entries[i].hash;
-      return ECHO_OK;
-    }
-  }
-
-  return ECHO_ERR_NOT_FOUND;
-}
-
-void block_queue_assign(block_queue_t *queue, const hash256_t *hash,
-                        peer_t *peer) {
-  if (!queue || !hash || !peer) {
-    return;
-  }
-
-  for (size_t i = 0; i < queue->capacity; i++) {
-    if (queue->entries[i].valid &&
-        memcmp(&queue->entries[i].hash, hash, sizeof(hash256_t)) == 0) {
-      if (!queue->entries[i].in_flight) {
-        queue->pending_count--;
-        queue->inflight_count++;
-      }
-      queue->entries[i].assigned_peer = peer;
-      queue->entries[i].request_time = plat_time_ms();
-      queue->entries[i].in_flight = true;
-      return;
-    }
-  }
-}
-
-void block_queue_complete(block_queue_t *queue, const hash256_t *hash) {
-  if (!queue || !hash) {
-    return;
-  }
-
-  for (size_t i = 0; i < queue->capacity; i++) {
-    if (queue->entries[i].valid &&
-        memcmp(&queue->entries[i].hash, hash, sizeof(hash256_t)) == 0) {
-      if (queue->entries[i].in_flight) {
-        queue->inflight_count--;
-      } else {
-        queue->pending_count--;
-      }
-      queue->entries[i].valid = false;
-      queue->count--;
-      return;
-    }
-  }
-}
-
-void block_queue_unassign(block_queue_t *queue, const hash256_t *hash) {
-  if (!queue || !hash) {
-    return;
-  }
-
-  for (size_t i = 0; i < queue->capacity; i++) {
-    if (queue->entries[i].valid &&
-        memcmp(&queue->entries[i].hash, hash, sizeof(hash256_t)) == 0) {
-      if (queue->entries[i].in_flight) {
-        queue->entries[i].assigned_peer = NULL;
-        queue->entries[i].in_flight = false;
-        queue->entries[i].retry_count++;
-        queue->inflight_count--;
-        queue->pending_count++;
-      }
-      return;
-    }
-  }
-}
-
-void block_queue_unassign_peer(block_queue_t *queue, peer_t *peer) {
-  if (!queue || !peer) {
-    return;
-  }
-
-  for (size_t i = 0; i < queue->capacity; i++) {
-    if (queue->entries[i].valid && queue->entries[i].in_flight &&
-        queue->entries[i].assigned_peer == peer) {
-      queue->entries[i].assigned_peer = NULL;
-      queue->entries[i].in_flight = false;
-      queue->entries[i].retry_count++;
-      queue->inflight_count--;
-      queue->pending_count++;
-    }
-  }
-}
-
-size_t block_queue_pending_count(const block_queue_t *queue) {
-  return queue ? queue->pending_count : 0;
-}
-
-size_t block_queue_inflight_count(const block_queue_t *queue) {
-  return queue ? queue->inflight_count : 0;
-}
-
-size_t block_queue_size(const block_queue_t *queue) {
-  return queue ? queue->count : 0;
-}
-
-bool block_queue_contains(const block_queue_t *queue, const hash256_t *hash) {
-  if (!queue || !hash) {
-    return false;
-  }
-
-  for (size_t i = 0; i < queue->capacity; i++) {
-    if (queue->entries[i].valid &&
-        memcmp(&queue->entries[i].hash, hash, sizeof(hash256_t)) == 0) {
-      return true;
-    }
-  }
-  return false;
-}
-
-/**
- * Check if a block at a given height is pending (in queue but not in-flight).
- * Returns true if the block is pending and needs to be requested.
- */
-static bool block_queue_is_pending_at_height(const block_queue_t *queue,
-                                             uint32_t height) {
-  if (!queue) {
-    return false;
-  }
-
-  for (size_t i = 0; i < queue->capacity; i++) {
-    if (queue->entries[i].valid && queue->entries[i].height == height) {
-      /* Block found - is it pending (not in-flight)? */
-      return !queue->entries[i].in_flight;
-    }
-  }
-  return false;
 }
 
 /* ============================================================================
@@ -692,54 +454,6 @@ static peer_sync_state_t *get_headers_sync_peer(sync_manager_t *mgr) {
 }
 
 /**
- * Find best peer for block download.
- *
- * SIMPLIFIED Core-style selection:
- * 1. Must be sync_candidate (has blocks we need)
- * 2. Must be PEER_STATE_READY (handshake complete)
- * 3. Must have capacity: blocks_in_flight < 16
- * 4. Prefer peer with fewer in-flight (spread load)
- */
-static peer_sync_state_t *find_best_block_peer(sync_manager_t *mgr) {
-  peer_sync_state_t *best = NULL;
-  size_t best_inflight = SIZE_MAX;
-  size_t candidates = 0;
-  size_t not_sync_candidate = 0;
-  size_t not_ready = 0;
-  size_t no_capacity = 0;
-
-  for (size_t i = 0; i < mgr->peer_count; i++) {
-    peer_sync_state_t *ps = &mgr->peers[i];
-    bool ready = peer_is_ready(ps->peer);
-    bool has_capacity = ps->blocks_in_flight_count < SYNC_MAX_BLOCKS_PER_PEER;
-
-    if (!ps->sync_candidate) {
-      not_sync_candidate++;
-    } else if (!ready) {
-      not_ready++;
-    } else if (!has_capacity) {
-      no_capacity++;
-    } else {
-      candidates++;
-
-      /* Pick peer with fewest in-flight requests (spread load) */
-      if (ps->blocks_in_flight_count < best_inflight) {
-        best_inflight = ps->blocks_in_flight_count;
-        best = ps;
-      }
-    }
-  }
-
-  if (candidates == 0) {
-    log_info(LOG_COMP_SYNC,
-             "find_best_block_peer: no candidates (peers=%zu, "
-             "not_sync_candidate=%zu, not_ready=%zu, no_capacity=%zu)",
-             mgr->peer_count, not_sync_candidate, not_ready, no_capacity);
-  }
-  return best;
-}
-
-/**
  * Count sync-eligible peers.
  */
 static size_t count_sync_peers(const sync_manager_t *mgr) {
@@ -769,8 +483,13 @@ sync_manager_t *sync_create(chainstate_t *chainstate,
     return NULL;
   }
 
-  mgr->block_queue = block_queue_create(download_window);
-  if (!mgr->block_queue) {
+  /* Create download manager - sole source of truth for block downloads */
+  download_callbacks_t dm_callbacks = {
+      .send_getdata = dm_send_getdata,
+      .disconnect_peer = dm_disconnect_peer,
+      .ctx = mgr};
+  mgr->download_mgr = download_mgr_create(&dm_callbacks, download_window);
+  if (!mgr->download_mgr) {
     free(mgr);
     return NULL;
   }
@@ -806,7 +525,7 @@ void sync_destroy(sync_manager_t *mgr) {
   if (!mgr) {
     return;
   }
-  block_queue_destroy(mgr->block_queue);
+  download_mgr_destroy(mgr->download_mgr);
   free(mgr->pending_headers);
   free(mgr);
 }
@@ -847,6 +566,11 @@ void sync_add_peer(sync_manager_t *mgr, peer_t *peer, int32_t height) {
   echo_bool_t can_serve_full = (peer->services & SERVICE_NODE_NETWORK) != 0;
   ps->sync_candidate = has_blocks && can_serve_full;
 
+  /* Add to download manager for performance tracking (if sync candidate) */
+  if (ps->sync_candidate) {
+    download_mgr_add_peer(mgr->download_mgr, peer);
+  }
+
   log_info(LOG_COMP_SYNC, "Added peer %s to sync_mgr: height=%d, our_height=%u, "
            "services=0x%llx, sync_candidate=%s%s, state=%s",
            peer->address, height, our_height, (unsigned long long)peer->services,
@@ -865,8 +589,8 @@ void sync_remove_peer(sync_manager_t *mgr, peer_t *peer) {
       log_info(LOG_COMP_SYNC, "Removing peer %s from sync_mgr (state=%s)",
                peer->address, peer_state_string(peer->state));
 
-      /* Unassign any blocks from this peer */
-      block_queue_unassign_peer(mgr->block_queue, peer);
+      /* Remove from download manager (handles unassigning in-flight blocks) */
+      download_mgr_remove_peer(mgr->download_mgr, peer);
 
       /* Handle headers sync peer tracking */
       if (mgr->has_headers_sync_peer) {
@@ -942,22 +666,14 @@ void sync_stop(sync_manager_t *mgr) {
 
   mgr->mode = SYNC_MODE_IDLE;
 
-  /* Clear all in-flight state */
+  /* Clear header in-flight state (block download state is in download_mgr) */
   for (size_t i = 0; i < mgr->peer_count; i++) {
     mgr->peers[i].headers_in_flight = false;
-    mgr->peers[i].blocks_in_flight_count = 0;
   }
 
-  /* Clear block queue */
-  while (block_queue_size(mgr->block_queue) > 0) {
-    hash256_t hash;
-    uint32_t height;
-    if (block_queue_next(mgr->block_queue, &hash, &height) == ECHO_OK) {
-      block_queue_complete(mgr->block_queue, &hash);
-    } else {
-      break;
-    }
-  }
+  /* Note: download_mgr keeps its state. In-flight work will timeout and be
+   * reassigned when sync resumes. This is intentional - we don't want to
+   * lose work tracking if sync is temporarily stopped. */
 }
 
 echo_result_t sync_handle_headers(sync_manager_t *mgr, peer_t *peer,
@@ -1158,45 +874,20 @@ echo_result_t sync_handle_block(sync_manager_t *mgr, peer_t *peer,
     return ECHO_ERR_INVALID;
   }
 
-  /*
-   * IBD profiling: Capture download time before clearing from in-flight.
-   * We look for the earliest request time across all peers (for parallel reqs).
-   */
-  uint64_t download_start_time = 0;
   uint64_t now = plat_time_ms();
-
-  /*
-   * Remove this block from ALL peers' in-flight lists, not just the sender.
-   * This is critical for parallel requests: we may have requested the same
-   * block from multiple peers, and whichever responds first wins. We must
-   * clear the request from all peers to avoid false timeout detection.
-   */
-  for (size_t p = 0; p < mgr->peer_count; p++) {
-    peer_sync_state_t *check_ps = &mgr->peers[p];
-    for (size_t i = 0; i < check_ps->blocks_in_flight_count; i++) {
-      if (memcmp(&check_ps->blocks_in_flight[i], &block_hash,
-                 sizeof(hash256_t)) == 0) {
-        /* Capture earliest request time for download timing */
-        if (download_start_time == 0 ||
-            check_ps->block_request_time[i] < download_start_time) {
-          download_start_time = check_ps->block_request_time[i];
-        }
-        /* Remove from this peer's in-flight list */
-        for (size_t j = i; j < check_ps->blocks_in_flight_count - 1; j++) {
-          check_ps->blocks_in_flight[j] = check_ps->blocks_in_flight[j + 1];
-          check_ps->block_request_time[j] = check_ps->block_request_time[j + 1];
-        }
-        check_ps->blocks_in_flight_count--;
-        break; /* Each peer has at most one entry for this block */
-      }
-    }
-  }
 
   /* Track delivery times for this peer */
   if (ps->first_block_time == 0) {
     ps->first_block_time = now;
   }
   ps->last_delivery_time = now;
+
+  /* Notify download manager of block receipt for performance tracking.
+   * Calculate approximate block size: header + tx count varint + txs.
+   * This doesn't need to be exact - it's for relative peer comparison.
+   */
+  size_t block_bytes = 80 + block->tx_count * 250; /* Rough estimate: 250 bytes/tx avg */
+  download_mgr_block_received(mgr->download_mgr, peer, &block_hash, block_bytes);
 
   /* Store block if callback provided (before validation - we need the data) */
   if (mgr->callbacks.store_block) {
@@ -1226,8 +917,8 @@ echo_result_t sync_handle_block(sync_manager_t *mgr, peer_t *peer,
         (block_height == validated_height + 1); /* Next block after tip */
 
     if (!can_connect) {
-      /* Block doesn't connect to current tip - re-queue for later */
-      block_queue_unassign(mgr->block_queue, &block_hash);
+      /* Block doesn't connect to current tip - wait for parent.
+       * download_mgr will timeout and reassign if needed. */
       return ECHO_ERR_WOULD_BLOCK; /* Not an error, just waiting for parent */
     }
 
@@ -1236,11 +927,7 @@ echo_result_t sync_handle_block(sync_manager_t *mgr, peer_t *peer,
         block, block_index, mgr->callbacks.ctx);
 
     if (result != ECHO_OK) {
-      /*
-       * Block validation failed for a reason other than ordering.
-       * Re-queue to try again later.
-       */
-      block_queue_unassign(mgr->block_queue, &block_hash);
+      /* Block validation failed. download_mgr will handle reassignment. */
       return ECHO_ERR_INVALID;
     }
     mgr->blocks_validated_total++;
@@ -1273,7 +960,7 @@ echo_result_t sync_handle_block(sync_manager_t *mgr, peer_t *peer,
         hash256_t next_hash;
         bool found_block = false;
 
-        /* First try the height lookup callback (finds stored blocks) */
+        /* Try to find stored block at this height */
         if (mgr->callbacks.get_block_hash_at_height &&
             mgr->callbacks.get_block_hash_at_height(next_height, &next_hash,
                                                     mgr->callbacks.ctx) == ECHO_OK) {
@@ -1282,19 +969,6 @@ echo_result_t sync_handle_block(sync_manager_t *mgr, peer_t *peer,
             found_block = true;
             log_debug(LOG_COMP_SYNC,
                       "Found block at height %u via callback, data_file=%u",
-                      next_height, next_index->data_file);
-          }
-        }
-
-        /* Fall back to queue lookup if callback didn't find it */
-        if (!found_block &&
-            block_queue_find_by_height(mgr->block_queue, next_height,
-                                       &next_hash) == ECHO_OK) {
-          next_index = block_index_map_lookup(idx_map, &next_hash);
-          if (next_index != NULL) {
-            found_block = true;
-            log_debug(LOG_COMP_SYNC,
-                      "Found block at height %u in queue, data_file=%u",
                       next_height, next_index->data_file);
           }
         }
@@ -1341,8 +1015,9 @@ echo_result_t sync_handle_block(sync_manager_t *mgr, peer_t *peer,
           break;
         }
 
-        /* Success! Remove from queue and continue */
-        block_queue_complete(mgr->block_queue, &next_index->hash);
+        /* Success! Remove from download manager and continue */
+        download_mgr_block_complete(mgr->download_mgr, &next_index->hash,
+                                    next_height);
         mgr->blocks_validated_total++;
         mgr->last_progress_time = plat_time_ms();
 
@@ -1355,32 +1030,21 @@ echo_result_t sync_handle_block(sync_manager_t *mgr, peer_t *peer,
     }
   }
 
-  /* Only mark complete in queue AFTER successful validation */
-  block_queue_complete(mgr->block_queue, &block_hash);
+  /* Mark complete in download manager */
+  if (block_index) {
+    download_mgr_block_complete(mgr->download_mgr, &block_hash,
+                                block_index->height);
+  }
 
   mgr->blocks_received_total++;
   ps->blocks_received++;
   ps->last_delivery_time = plat_time_ms(); /* Track for session reputation */
   mgr->last_progress_time = ps->last_delivery_time;
 
-  /* Track block size for metrics */
-  size_t block_size = block_serialize_size(block);
-  (void)block_size; /* Used for logging below */
-
-  /* IBD profiling: Log download timing for slow blocks or every 1000 blocks */
-  if (download_start_time > 0) {
-    uint64_t download_ms = now - download_start_time;
-    if (download_ms > 500 || mgr->blocks_received_total % 1000 == 0) {
-      log_info(LOG_COMP_SYNC,
-               "Block downloaded in %lums (%zu txs, peer=%s)",
-               (unsigned long)download_ms, block->tx_count,
-               peer->address);
-    }
-  }
-
   /* Check if sync is complete */
   if (mgr->mode == SYNC_MODE_BLOCKS &&
-      block_queue_size(mgr->block_queue) == 0) {
+      download_mgr_pending_count(mgr->download_mgr) == 0 &&
+      download_mgr_inflight_count(mgr->download_mgr) == 0) {
     uint32_t tip_height = chainstate_get_height(mgr->chainstate);
     if (!mgr->best_header || tip_height >= mgr->best_header->height) {
       mgr->mode = SYNC_MODE_DONE;
@@ -1405,71 +1069,10 @@ void sync_process_timeouts(sync_manager_t *mgr) {
   }
 
   /*
-   * CORE-STYLE NEXT-BLOCK STALL DETECTION
-   *
-   * The most critical block is the NEXT NEEDED block (validated_tip + 1).
-   * If this block is stalled or not requested, validation cannot progress
-   * regardless of how many other blocks we download.
-   *
-   * Core uses aggressive 2-second timeout specifically for this block and
-   * ensures it's always being requested from SOME peer.
-   *
-   * Handle three cases:
-   * 1. Block in-flight and stalled -> unassign and re-request
-   * 2. Block pending (not requested) -> force-request immediately
-   * 3. Block not in queue -> log warning (should not happen during IBD)
+   * Block download performance checking is now handled by download_mgr.
+   * It tracks per-peer throughput and detects stalls internally.
+   * We call download_mgr_check_performance() in sync_tick.
    */
-  if (mgr->mode == SYNC_MODE_BLOCKS && mgr->chainstate) {
-    uint32_t next_needed_height = chainstate_get_height(mgr->chainstate) + 1;
-    hash256_t next_needed_hash;
-    bool found_in_flight = false;
-
-    /* Find the hash of the next needed block */
-    if (block_queue_find_by_height(mgr->block_queue, next_needed_height,
-                                   &next_needed_hash) == ECHO_OK) {
-      /* Check if this block is in-flight with any peer */
-      for (size_t i = 0; i < mgr->peer_count && !found_in_flight; i++) {
-        peer_sync_state_t *ps = &mgr->peers[i];
-        for (size_t j = 0; j < ps->blocks_in_flight_count; j++) {
-          if (memcmp(&ps->blocks_in_flight[j], &next_needed_hash,
-                     sizeof(hash256_t)) == 0) {
-            found_in_flight = true;
-            /* Found it - check if stalled (use base 2s timeout, not adaptive) */
-            uint64_t elapsed = now - ps->block_request_time[j];
-            if (elapsed > SYNC_BLOCK_STALLING_TIMEOUT_MS) {
-              log_info(LOG_COMP_SYNC,
-                       "Next needed block %u stalled for %llums - re-requesting",
-                       next_needed_height, (unsigned long long)elapsed);
-
-              /* Unassign from this peer so it gets re-requested */
-              block_queue_unassign(mgr->block_queue, &next_needed_hash);
-
-              /* Remove from peer's in-flight list */
-              for (size_t k = j; k < ps->blocks_in_flight_count - 1; k++) {
-                ps->blocks_in_flight[k] = ps->blocks_in_flight[k + 1];
-                ps->block_request_time[k] = ps->block_request_time[k + 1];
-              }
-              ps->blocks_in_flight_count--;
-              /* Block is now unassigned - regular request logic will pick it up */
-            }
-            break;
-          }
-        }
-      }
-
-      /*
-       * CASE 2: Block is PENDING (in queue but not in-flight).
-       * Regular request_blocks() will assign it on next tick.
-       */
-      if (!found_in_flight &&
-          block_queue_is_pending_at_height(mgr->block_queue, next_needed_height)) {
-        log_debug(LOG_COMP_SYNC,
-                  "Next needed block %u pending but not in-flight",
-                  next_needed_height);
-        /* Normal request logic will handle this */
-      }
-    }
-  }
 
   /* Process header timeouts */
   for (size_t i = 0; i < mgr->peer_count; i++) {
@@ -1487,65 +1090,7 @@ void sync_process_timeouts(sync_manager_t *mgr) {
       }
     }
 
-    /* Process block timeouts - count stalls per peer per tick, not per block.
-     *
-     * Core-style adaptive timeout:
-     * - Starts at SYNC_BLOCK_STALLING_TIMEOUT_MS (5s)
-     * - Doubles on each stall (up to SYNC_BLOCK_STALLING_TIMEOUT_MAX_MS)
-     * - Decays by 0.85 on each block success
-     * This allows tolerance for network variance while recovering quickly
-     * when conditions improve.
-     */
-    size_t stalled_this_tick = 0;
-    for (size_t j = 0; j < ps->blocks_in_flight_count;) {
-      if (now - ps->block_request_time[j] > mgr->stalling_timeout_ms) {
-        /* Timeout - unassign block and re-queue */
-        hash256_t stalled_hash = ps->blocks_in_flight[j];
-        block_queue_unassign(mgr->block_queue, &stalled_hash);
-        stalled_this_tick++;
-
-        /* Remove from peer's in-flight list */
-        for (size_t k = j; k < ps->blocks_in_flight_count - 1; k++) {
-          ps->blocks_in_flight[k] = ps->blocks_in_flight[k + 1];
-          ps->block_request_time[k] = ps->block_request_time[k + 1];
-        }
-        ps->blocks_in_flight_count--;
-      } else {
-        j++;
-      }
-    }
-
-    /* Only count ONE stall event per peer per tick, not one per block */
-    if (stalled_this_tick > 0) {
-      ps->timeout_count++;
-
-      log_debug(LOG_COMP_SYNC,
-               "Peer stall: %zu blocks timed out (stall events: %u)",
-               stalled_this_tick, ps->timeout_count);
-
-      /* After 3 stall events, disconnect slow peer.
-       * Core-style: only double the global timeout when we DISCONNECT,
-       * not on every stall event. This prevents timeout death spiral.
-       */
-      if (ps->timeout_count >= 3 && ps->peer) {
-        log_info(LOG_COMP_SYNC,
-                 "Disconnecting slow peer after %u stall events",
-                 ps->timeout_count);
-
-        /* Core-style: double timeout only when disconnecting a peer */
-        uint64_t doubled = mgr->stalling_timeout_ms * 2;
-        if (doubled > SYNC_BLOCK_STALLING_TIMEOUT_MAX_MS) {
-          doubled = SYNC_BLOCK_STALLING_TIMEOUT_MAX_MS;
-        }
-        mgr->stalling_timeout_ms = doubled;
-        log_info(LOG_COMP_SYNC, "Global timeout now %llums",
-                 (unsigned long long)mgr->stalling_timeout_ms);
-
-        peer_disconnect(ps->peer, PEER_DISCONNECT_MISBEHAVING,
-                        "Too many block stalls during IBD");
-        continue;
-      }
-    }
+    /* Block stall detection is now handled by download_mgr_check_performance() */
 
     /* Block delivery rate check: disconnect peers that accept requests
      * but don't deliver blocks. Ping RTT is irrelevant - only actual
@@ -1649,8 +1194,8 @@ static void queue_blocks_from_headers(sync_manager_t *mgr) {
         }
         continue;
       }
-      /* Check if we already have this block in queue or storage */
-      bool in_queue = block_queue_contains(mgr->block_queue, &hash);
+      /* Check if we already have this block in download manager or storage */
+      bool in_queue = download_mgr_has_block(mgr->download_mgr, &hash);
       if (!in_queue) {
         block_t stored;
         block_init(&stored);
@@ -1738,7 +1283,7 @@ static void queue_blocks_from_headers(sync_manager_t *mgr) {
     /* Collect blocks to queue (walking backward, we'll reverse later) */
     while (idx && idx->height >= start_height &&
            to_queue_count < effective_window) {
-      if (!block_queue_contains(mgr->block_queue, &idx->hash)) {
+      if (!download_mgr_has_block(mgr->download_mgr, &idx->hash)) {
         block_t stored;
         block_init(&stored);
         if (!mgr->callbacks.get_block ||
@@ -1767,110 +1312,9 @@ static void queue_blocks_from_headers(sync_manager_t *mgr) {
   if (to_queue_count > 0) {
     log_info(LOG_COMP_SYNC, "Queueing %zu blocks (heights %u-%u)",
              to_queue_count, heights[0], heights[to_queue_count - 1]);
-  }
 
-  /* Add to queue in height order (lowest first) */
-  for (size_t i = 0; i < to_queue_count; i++) {
-    block_queue_add(mgr->block_queue, &to_queue[i], heights[i]);
-  }
-}
-
-/**
- * Request blocks from peers.
- */
-static void request_blocks(sync_manager_t *mgr) {
-  /* Track blocks to request per peer for batched getdata */
-  hash256_t blocks_for_peer[SYNC_MAX_BLOCKS_PER_PEER];
-  size_t blocks_count = 0;
-  peer_sync_state_t *current_peer = NULL;
-
-  uint32_t validated_height = chainstate_get_height(mgr->chainstate);
-
-  /* Log entry state */
-  size_t pending = block_queue_pending_count(mgr->block_queue);
-  size_t inflight = block_queue_inflight_count(mgr->block_queue);
-  if (pending > 0 && inflight < SYNC_MAX_PARALLEL_BLOCKS) {
-    log_info(LOG_COMP_SYNC,
-             "request_blocks entry: peer_count=%zu, pending=%zu, inflight=%zu",
-             mgr->peer_count, pending, inflight);
-  }
-
-  /*
-   * Request blocks from peers with capacity.
-   * Core approach: simple parallel download, no racing, no priority pools.
-   */
-  uint32_t effective_window = mgr->download_window;
-  uint32_t max_request_height = validated_height + effective_window;
-
-  /* Request blocks from queue */
-  size_t iteration = 0;
-  while (block_queue_pending_count(mgr->block_queue) > 0 &&
-         block_queue_inflight_count(mgr->block_queue) <
-             SYNC_MAX_PARALLEL_BLOCKS) {
-    iteration++;
-    size_t cur_pending = block_queue_pending_count(mgr->block_queue);
-    size_t cur_inflight = block_queue_inflight_count(mgr->block_queue);
-    log_debug(LOG_COMP_SYNC,
-              "request_blocks iter=%zu: pending=%zu, inflight=%zu, blocks_count=%zu",
-              iteration, cur_pending, cur_inflight, blocks_count);
-
-    /* Find peer with capacity */
-    peer_sync_state_t *ps = find_best_block_peer(mgr);
-    if (!ps) {
-      log_info(LOG_COMP_SYNC,
-               "request_blocks: no peer with capacity at iter=%zu", iteration);
-      break;
-    }
-
-    /* If we're switching peers, send accumulated requests to previous peer */
-    if (current_peer != NULL && current_peer != ps && blocks_count > 0) {
-      if (mgr->callbacks.send_getdata_blocks) {
-        mgr->callbacks.send_getdata_blocks(current_peer->peer, blocks_for_peer,
-                                           blocks_count, mgr->callbacks.ctx);
-      }
-      blocks_count = 0;
-    }
-    current_peer = ps;
-
-    /* Get next block to download */
-    hash256_t hash;
-    uint32_t height;
-    if (block_queue_next(mgr->block_queue, &hash, &height) != ECHO_OK) {
-      break;
-    }
-
-    /* Don't request blocks too far ahead of validated tip */
-    if (height > max_request_height) {
-      log_debug(LOG_COMP_SYNC,
-                "request_blocks: block at height %u exceeds window (tip=%u)",
-                height, validated_height);
-      break;
-    }
-
-    /* Assign to peer */
-    block_queue_assign(mgr->block_queue, &hash, ps->peer);
-
-    /* Add to peer's in-flight list */
-    if (ps->blocks_in_flight_count < SYNC_MAX_BLOCKS_PER_PEER) {
-      ps->blocks_in_flight[ps->blocks_in_flight_count] = hash;
-      ps->block_request_time[ps->blocks_in_flight_count] = plat_time_ms();
-      ps->blocks_in_flight_count++;
-      ps->blocks_requested++;
-    }
-
-    /* Collect for batched getdata */
-    if (blocks_count < SYNC_MAX_BLOCKS_PER_PEER) {
-      blocks_for_peer[blocks_count++] = hash;
-    }
-  }
-
-  /* Send any remaining accumulated requests */
-  if (current_peer != NULL && blocks_count > 0) {
-    if (mgr->callbacks.send_getdata_blocks) {
-      log_info(LOG_COMP_SYNC, "Sending getdata for %zu blocks", blocks_count);
-      mgr->callbacks.send_getdata_blocks(current_peer->peer, blocks_for_peer,
-                                         blocks_count, mgr->callbacks.ctx);
-    }
+    /* Add to download manager (handles deduplication internally) */
+    download_mgr_add_work(mgr->download_mgr, to_queue, heights, to_queue_count);
   }
 }
 
@@ -2075,16 +1519,6 @@ void sync_tick(sync_manager_t *mgr) {
           }
         }
 
-        /* Fall back to queue lookup */
-        if (!found_block &&
-            block_queue_find_by_height(mgr->block_queue, next_height,
-                                       &next_hash) == ECHO_OK) {
-          next_index = block_index_map_lookup(idx_map, &next_hash);
-          if (next_index != NULL) {
-            found_block = true;
-          }
-        }
-
         if (!found_block) {
           break; /* Block not found */
         }
@@ -2123,7 +1557,7 @@ void sync_tick(sync_manager_t *mgr) {
         }
 
         /* Success! */
-        block_queue_complete(mgr->block_queue, &next_hash);
+        download_mgr_block_complete(mgr->download_mgr, &next_hash, next_height);
         mgr->blocks_validated_total++;
         mgr->last_progress_time = now;
         validated_height = next_height;
@@ -2138,12 +1572,11 @@ void sync_tick(sync_manager_t *mgr) {
       }
     }
 
-    /* Parallel Block Racing: Maximum redundancy.
-     * Critical blocks race across all peers simultaneously.
-     * E[min of 32 exponentials] = mean/32 ≈ 31ms per block.
-     * request_racing_critical_blocks() is called inside request_blocks().
-     */
-    request_blocks(mgr);
+    /* Distribute pending work to peers with capacity */
+    download_mgr_distribute_work(mgr->download_mgr);
+
+    /* Check for stalls and reassign work from slow/stalled peers */
+    download_mgr_check_performance(mgr->download_mgr);
     break;
   }
 
@@ -2175,8 +1608,9 @@ void sync_get_progress(const sync_manager_t *mgr, sync_progress_t *progress) {
   progress->blocks_downloaded = mgr->blocks_received_total;
   progress->blocks_validated = mgr->blocks_validated_total;
   progress->blocks_pending =
-      (uint32_t)block_queue_pending_count(mgr->block_queue);
-  progress->blocks_in_flight = block_queue_inflight_count(mgr->block_queue);
+      (uint32_t)download_mgr_pending_count(mgr->download_mgr);
+  progress->blocks_in_flight =
+      (uint32_t)download_mgr_inflight_count(mgr->download_mgr);
 
   /* Network state */
   progress->sync_peers = count_sync_peers(mgr);
