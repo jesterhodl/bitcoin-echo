@@ -48,7 +48,7 @@
  * Minimum peers required before declaring a race winner.
  * Ensures we have enough candidates to make a good selection.
  */
-#define HEADERS_RACE_MIN_PEERS 8
+#define HEADERS_RACE_MIN_PEERS 32
 
 /**
  * Maximum time (ms) to wait for minimum peers before selecting winner.
@@ -57,12 +57,11 @@
 #define HEADERS_RACE_TIMEOUT_MS 10000
 
 /**
- * Post-race monitoring: probe other peers periodically to detect slow winners.
+ * Post-race pool management: top 8 peers form a pool, always use best performer.
  */
-#define MONITOR_PROBE_INTERVAL 5      /* Probe runners-up every N winner responses */
-#define MONITOR_WINDOW_SIZE 5         /* Rolling window for recent performance */
-#define MONITOR_SWITCH_THRESHOLD 1.5  /* Switch if runner-up is 1.5x faster */
-#define MONITOR_TOP_RUNNERS 3         /* Track top N runner-up candidates */
+#define HEADER_POOL_SIZE 8            /* Top 8 peers form the header pool */
+#define POOL_WINDOW_SIZE 3            /* Rolling window for recent performance */
+#define POOL_PROBE_INTERVAL 1         /* Probe non-active pool members every N responses */
 
 /**
  * Rolling window size for blocks_per_second calculation.
@@ -150,10 +149,11 @@ struct sync_manager {
   uint64_t headers_race_start_time; /* When the race started */
   uint64_t headers_race_min_peers_time; /* When we first hit MIN_PEERS threshold */
 
-  /* Post-race monitoring: track runners-up and probe periodically */
-  size_t runner_up_indices[MONITOR_TOP_RUNNERS]; /* Indices of top runners-up */
-  size_t runner_up_count;                        /* Number of tracked runners-up */
-  uint32_t winner_responses_since_probe;         /* Counter for probe interval */
+  /* Post-race pool: top 8 peers, always use best performer */
+  size_t header_pool_indices[HEADER_POOL_SIZE]; /* Indices of top 8 peers */
+  size_t header_pool_count;                     /* Number of peers in pool */
+  size_t active_pool_peer_idx;                  /* Currently active peer index (in peers[]) */
+  uint32_t active_peer_responses;               /* Responses since last pool evaluation */
 
   /* Deferred header persistence: queue headers during SYNC_MODE_HEADERS,
    * flush all at once when transitioning to SYNC_MODE_BLOCKS. */
@@ -809,7 +809,6 @@ echo_result_t sync_handle_headers(sync_manager_t *mgr, peer_t *peer,
       if (ps->headers_race_responses >= HEADERS_RACE_ROUNDS) {
         /* Count how many peers have completed the race */
         size_t completed_count = 0;
-        size_t best_idx = 0;
         uint64_t best_avg = UINT64_MAX;
 
         for (size_t i = 0; i < mgr->peer_count; i++) {
@@ -820,126 +819,120 @@ echo_result_t sync_handle_headers(sync_manager_t *mgr, peer_t *peer,
                            candidate->headers_race_responses;
             if (avg < best_avg) {
               best_avg = avg;
-              best_idx = i;
             }
           }
         }
 
-        /* Select winner once MIN_PEERS complete the race.
-         * No timeout needed - we continuously monitor runners-up and can switch anytime. */
+        /* Select pool once MIN_PEERS complete the race.
+         * Top 8 peers form a pool - we always use the best performer. */
         if (completed_count >= HEADERS_RACE_MIN_PEERS) {
           mgr->headers_race_complete = true;
-          mgr->fastest_header_peer_idx = best_idx;
-          mgr->winner_responses_since_probe = 0;
+          mgr->header_pool_count = 0;
+          mgr->active_peer_responses = 0;
 
-          /* Capture top runners-up for ongoing monitoring */
-          mgr->runner_up_count = 0;
-          for (size_t r = 0; r < MONITOR_TOP_RUNNERS && r < completed_count - 1; r++) {
-            uint64_t runner_best_avg = UINT64_MAX;
-            size_t runner_best_idx = 0;
+          /* Build sorted list of top HEADER_POOL_SIZE peers by avg response time */
+          for (size_t p = 0; p < HEADER_POOL_SIZE && p < completed_count; p++) {
+            uint64_t pool_best_avg = UINT64_MAX;
+            size_t pool_best_idx = 0;
 
             for (size_t i = 0; i < mgr->peer_count; i++) {
-              if (i == best_idx) continue; /* Skip winner */
-
-              /* Skip if already in runners-up list */
-              bool already_runner = false;
-              for (size_t k = 0; k < mgr->runner_up_count; k++) {
-                if (mgr->runner_up_indices[k] == i) {
-                  already_runner = true;
+              /* Skip if already in pool */
+              bool already_in_pool = false;
+              for (size_t k = 0; k < mgr->header_pool_count; k++) {
+                if (mgr->header_pool_indices[k] == i) {
+                  already_in_pool = true;
                   break;
                 }
               }
-              if (already_runner) continue;
+              if (already_in_pool) continue;
 
               peer_sync_state_t *c = &mgr->peers[i];
               if (c->headers_race_responses >= HEADERS_RACE_ROUNDS) {
                 uint64_t avg = c->headers_race_total_ms / c->headers_race_responses;
-                if (avg < runner_best_avg) {
-                  runner_best_avg = avg;
-                  runner_best_idx = i;
+                if (avg < pool_best_avg) {
+                  pool_best_avg = avg;
+                  pool_best_idx = i;
                 }
               }
             }
 
-            if (runner_best_avg < UINT64_MAX) {
-              mgr->runner_up_indices[mgr->runner_up_count++] = runner_best_idx;
+            if (pool_best_avg < UINT64_MAX) {
+              mgr->header_pool_indices[mgr->header_pool_count++] = pool_best_idx;
             }
           }
 
+          /* First peer in pool is the initial active peer (best from race) */
+          if (mgr->header_pool_count > 0) {
+            mgr->active_pool_peer_idx = mgr->header_pool_indices[0];
+            mgr->fastest_header_peer_idx = mgr->active_pool_peer_idx; /* For compatibility */
+          }
+
           log_info(LOG_COMP_SYNC,
-                   "Headers race winner: peer %s (avg=%lums over %u rounds, %zu candidates, %zu runners-up)",
-                   mgr->peers[best_idx].peer->address, (unsigned long)best_avg,
-                   HEADERS_RACE_ROUNDS, completed_count, mgr->runner_up_count);
+                   "Headers race complete: pool of %zu peers from %zu candidates (best avg=%lums)",
+                   mgr->header_pool_count, completed_count, (unsigned long)best_avg);
         }
       }
     }
 
-    /* Post-race monitoring: track winner performance and check runners-up */
+    /* Post-race: track performance for all pool members */
     if (mgr->headers_race_complete) {
-      /* Find this peer's index */
       size_t peer_idx = (size_t)(ps - mgr->peers);
 
-      if (peer_idx == mgr->fastest_header_peer_idx) {
-        /* This is the winner responding - update rolling window */
-        ps->recent_responses++;
-        ps->recent_total_ms += response_ms;
-        ps->last_response_ms = response_ms;
+      /* Update rolling window for this peer */
+      ps->recent_responses++;
+      ps->recent_total_ms += response_ms;
+      ps->last_response_ms = response_ms;
 
-        /* Keep rolling window at MONITOR_WINDOW_SIZE */
-        if (ps->recent_responses > MONITOR_WINDOW_SIZE) {
-          /* Approximate: decay the old average contribution */
-          uint64_t old_avg = ps->recent_total_ms / ps->recent_responses;
-          ps->recent_total_ms -= old_avg;
-          ps->recent_responses = MONITOR_WINDOW_SIZE;
-        }
+      /* Keep rolling window at POOL_WINDOW_SIZE */
+      if (ps->recent_responses > POOL_WINDOW_SIZE) {
+        uint64_t old_avg = ps->recent_total_ms / ps->recent_responses;
+        ps->recent_total_ms -= old_avg;
+        ps->recent_responses = POOL_WINDOW_SIZE;
+      }
 
-        mgr->winner_responses_since_probe++;
-      } else {
-        /* This is a runner-up responding (from a probe) - check if faster */
-        ps->recent_responses++;
-        ps->recent_total_ms += response_ms;
-        ps->last_response_ms = response_ms;
+      /* If this is the active peer, increment response counter */
+      if (peer_idx == mgr->active_pool_peer_idx) {
+        mgr->active_peer_responses++;
+      }
 
-        if (ps->recent_responses > MONITOR_WINDOW_SIZE) {
-          uint64_t old_avg = ps->recent_total_ms / ps->recent_responses;
-          ps->recent_total_ms -= old_avg;
-          ps->recent_responses = MONITOR_WINDOW_SIZE;
-        }
+      /* Check if we should switch to a better performer in the pool */
+      if (mgr->active_peer_responses >= POOL_PROBE_INTERVAL) {
+        mgr->active_peer_responses = 0;
 
-        /* Compare with winner's recent performance */
-        peer_sync_state_t *winner = &mgr->peers[mgr->fastest_header_peer_idx];
-        if (winner->recent_responses > 0 && ps->recent_responses > 0) {
-          uint64_t winner_avg = winner->recent_total_ms / winner->recent_responses;
-          uint64_t runner_avg = ps->recent_total_ms / ps->recent_responses;
+        /* Find best performer in pool based on recent performance */
+        uint64_t best_recent_avg = UINT64_MAX;
+        size_t best_pool_idx = mgr->active_pool_peer_idx;
 
-          /* Switch if runner-up is MONITOR_SWITCH_THRESHOLD times faster */
-          if (runner_avg > 0 && winner_avg > runner_avg * MONITOR_SWITCH_THRESHOLD) {
-            log_info(LOG_COMP_SYNC,
-                     "Switching header peer: %s (avg=%lums) -> %s (avg=%lums) - %.1fx faster",
-                     winner->peer->address, (unsigned long)winner_avg,
-                     ps->peer->address, (unsigned long)runner_avg,
-                     (double)winner_avg / runner_avg);
+        for (size_t p = 0; p < mgr->header_pool_count; p++) {
+          size_t idx = mgr->header_pool_indices[p];
+          if (idx >= mgr->peer_count) continue;
 
-            /* Demote old winner to runner-up slot */
-            if (mgr->runner_up_count < MONITOR_TOP_RUNNERS) {
-              mgr->runner_up_indices[mgr->runner_up_count++] = mgr->fastest_header_peer_idx;
-            }
+          peer_sync_state_t *pool_peer = &mgr->peers[idx];
+          if (!pool_peer->sync_candidate || !peer_is_ready(pool_peer->peer)) continue;
 
-            /* Promote this peer to winner */
-            mgr->fastest_header_peer_idx = peer_idx;
-            mgr->winner_responses_since_probe = 0;
-
-            /* Remove from runners-up list */
-            for (size_t r = 0; r < mgr->runner_up_count; r++) {
-              if (mgr->runner_up_indices[r] == peer_idx) {
-                for (size_t j = r; j < mgr->runner_up_count - 1; j++) {
-                  mgr->runner_up_indices[j] = mgr->runner_up_indices[j + 1];
-                }
-                mgr->runner_up_count--;
-                break;
-              }
+          if (pool_peer->recent_responses > 0) {
+            uint64_t avg = pool_peer->recent_total_ms / pool_peer->recent_responses;
+            if (avg < best_recent_avg) {
+              best_recent_avg = avg;
+              best_pool_idx = idx;
             }
           }
+        }
+
+        /* Switch if a different peer is now best */
+        if (best_pool_idx != mgr->active_pool_peer_idx && best_recent_avg < UINT64_MAX) {
+          peer_sync_state_t *old_active = &mgr->peers[mgr->active_pool_peer_idx];
+          peer_sync_state_t *new_active = &mgr->peers[best_pool_idx];
+          uint64_t old_avg = old_active->recent_responses > 0
+              ? old_active->recent_total_ms / old_active->recent_responses : UINT64_MAX;
+
+          log_info(LOG_COMP_SYNC,
+                   "Pool switch: %s (avg=%lums) -> %s (avg=%lums)",
+                   old_active->peer->address, (unsigned long)old_avg,
+                   new_active->peer->address, (unsigned long)best_recent_avg);
+
+          mgr->active_pool_peer_idx = best_pool_idx;
+          mgr->fastest_header_peer_idx = best_pool_idx; /* For compatibility */
         }
       }
     }
@@ -1507,11 +1500,9 @@ void sync_tick(sync_manager_t *mgr) {
         }
       }
 
-      /* Probe runners-up periodically to detect if winner became slow */
-      if (mgr->winner_responses_since_probe >= MONITOR_PROBE_INTERVAL &&
-          mgr->runner_up_count > 0) {
-        mgr->winner_responses_since_probe = 0;
-
+      /* Probe non-active pool members to keep performance stats fresh */
+      if (mgr->active_peer_responses >= POOL_PROBE_INTERVAL &&
+          mgr->header_pool_count > 1) {
         /* Build locator once for all probes */
         hash256_t locator[SYNC_MAX_LOCATOR_HASHES];
         size_t locator_len = 0;
@@ -1524,20 +1515,21 @@ void sync_tick(sync_manager_t *mgr) {
           sync_build_locator(mgr->chainstate, locator, &locator_len);
         }
 
-        /* Send probe to each runner-up that's available */
-        for (size_t r = 0; r < mgr->runner_up_count; r++) {
-          size_t idx = mgr->runner_up_indices[r];
+        /* Send probe to each non-active pool member that's available */
+        for (size_t p = 0; p < mgr->header_pool_count; p++) {
+          size_t idx = mgr->header_pool_indices[p];
+          if (idx == mgr->active_pool_peer_idx) continue; /* Skip active peer */
           if (idx >= mgr->peer_count) continue;
 
-          peer_sync_state_t *runner = &mgr->peers[idx];
-          if (!runner->sync_candidate || !peer_is_ready(runner->peer)) continue;
-          if (runner->headers_in_flight) continue;
+          peer_sync_state_t *pool_peer = &mgr->peers[idx];
+          if (!pool_peer->sync_candidate || !peer_is_ready(pool_peer->peer)) continue;
+          if (pool_peer->headers_in_flight) continue;
 
-          runner->headers_in_flight = true;
-          runner->headers_sent_time = now;
+          pool_peer->headers_in_flight = true;
+          pool_peer->headers_sent_time = now;
 
           if (mgr->callbacks.send_getheaders) {
-            mgr->callbacks.send_getheaders(runner->peer, locator, locator_len,
+            mgr->callbacks.send_getheaders(pool_peer->peer, locator, locator_len,
                                            NULL, mgr->callbacks.ctx);
           }
         }
