@@ -137,6 +137,11 @@ typedef struct {
   /* Header race metrics (best-of-N selection) */
   uint32_t headers_race_responses;    /* Number of full header batches during race */
   uint64_t headers_race_total_ms;     /* Total response time during race */
+
+  /* Post-race monitoring: track recent performance to detect slow winners */
+  uint32_t recent_responses;    /* Recent response count (rolling window) */
+  uint64_t recent_total_ms;     /* Recent total response time (rolling window) */
+  uint64_t last_response_ms;    /* Last individual response time */
 } peer_sync_state_t;
 
 /**
@@ -605,6 +610,6 @@ typedef struct {
  *   mgr     - The sync manager
  *   metrics - Output metrics structure
  */
-void sync_get_metrics(const sync_manager_t *mgr, sync_metrics_t *metrics);
+void sync_get_metrics(sync_manager_t *mgr, sync_metrics_t *metrics);
 
 #endif /* ECHO_SYNC_H */

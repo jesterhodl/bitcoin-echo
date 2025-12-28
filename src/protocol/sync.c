@@ -57,6 +57,20 @@
 #define HEADERS_RACE_TIMEOUT_MS 10000
 
 /**
+ * Post-race monitoring: probe other peers periodically to detect slow winners.
+ */
+#define MONITOR_PROBE_INTERVAL 5      /* Probe runners-up every N winner responses */
+#define MONITOR_WINDOW_SIZE 5         /* Rolling window for recent performance */
+#define MONITOR_SWITCH_THRESHOLD 1.5  /* Switch if runner-up is 1.5x faster */
+#define MONITOR_TOP_RUNNERS 3         /* Track top N runner-up candidates */
+
+/**
+ * Rolling window size for blocks_per_second calculation.
+ * Rate = ROLLING_WINDOW_BLOCKS / time_to_validate_those_blocks
+ */
+#define ROLLING_WINDOW_BLOCKS 500
+
+/**
  * Pending header entry for deferred persistence.
  *
  * During SYNC_MODE_HEADERS, we keep headers in memory and defer database
@@ -93,6 +107,7 @@ struct sync_manager {
   /* Sync timing */
   uint64_t start_time;
   uint64_t block_sync_start_time; /* When block validation started (0 = not yet) */
+  uint32_t block_sync_start_height; /* Height when block sync started */
   uint64_t last_progress_time;
   uint64_t last_header_refresh_time; /* For periodic header refresh in blocks mode */
 
@@ -100,6 +115,11 @@ struct sync_manager {
   uint32_t headers_received_total;
   uint32_t blocks_received_total;
   uint32_t blocks_validated_total;
+
+  /* Rolling window for speed calculation */
+  uint32_t rolling_window_start_height;  /* Height at start of window */
+  uint64_t rolling_window_start_time;    /* Time at start of window */
+  uint32_t last_validated_height;        /* Last known validated height */
 
   /* Best known header chain */
   block_index_t *best_header;
@@ -129,6 +149,11 @@ struct sync_manager {
   size_t fastest_header_peer_idx;   /* Index of winning peer in peers[] array */
   uint64_t headers_race_start_time; /* When the race started */
   uint64_t headers_race_min_peers_time; /* When we first hit MIN_PEERS threshold */
+
+  /* Post-race monitoring: track runners-up and probe periodically */
+  size_t runner_up_indices[MONITOR_TOP_RUNNERS]; /* Indices of top runners-up */
+  size_t runner_up_count;                        /* Number of tracked runners-up */
+  uint32_t winner_responses_since_probe;         /* Counter for probe interval */
 
   /* Deferred header persistence: queue headers during SYNC_MODE_HEADERS,
    * flush all at once when transitioning to SYNC_MODE_BLOCKS. */
@@ -233,19 +258,54 @@ static bool sync_chase_handler(chase_event_t event, chase_value_t value,
  */
 
 /**
- * Calculate blocks per second since block sync started.
- * Simple: validated_blocks / elapsed_seconds
+ * Calculate blocks per second using a rolling window.
+ * Returns rate based on last ROLLING_WINDOW_BLOCKS (500) blocks.
+ * Updates the rolling window as validated height increases.
  */
-static float calc_blocks_per_second(const struct sync_manager *mgr) {
-  if (mgr->block_sync_start_time == 0 || mgr->blocks_validated_total == 0) {
+static float calc_blocks_per_second(struct sync_manager *mgr) {
+  if (mgr->block_sync_start_time == 0) {
     return 0.0f;
   }
+
   uint64_t now = plat_time_ms();
-  uint64_t elapsed_ms = now - mgr->block_sync_start_time;
+  uint32_t current_height = chainstate_get_height(mgr->chainstate);
+
+  /* Initialize rolling window on first call */
+  if (mgr->rolling_window_start_time == 0) {
+    mgr->rolling_window_start_height = current_height;
+    mgr->rolling_window_start_time = now;
+    mgr->last_validated_height = current_height;
+    return 0.0f;
+  }
+
+  /* Slide window forward when we've validated ROLLING_WINDOW_BLOCKS */
+  uint32_t blocks_in_window = current_height - mgr->rolling_window_start_height;
+  if (blocks_in_window >= ROLLING_WINDOW_BLOCKS) {
+    /* Move window start to current - ROLLING_WINDOW_BLOCKS */
+    uint32_t new_start = current_height - ROLLING_WINDOW_BLOCKS;
+    /* Estimate time at new_start using linear interpolation */
+    uint32_t old_range = current_height - mgr->rolling_window_start_height;
+    uint32_t shift = new_start - mgr->rolling_window_start_height;
+    uint64_t elapsed = now - mgr->rolling_window_start_time;
+    uint64_t time_shift = (elapsed * shift) / old_range;
+    mgr->rolling_window_start_height = new_start;
+    mgr->rolling_window_start_time += time_shift;
+  }
+
+  mgr->last_validated_height = current_height;
+
+  /* Calculate rate from current window */
+  blocks_in_window = current_height - mgr->rolling_window_start_height;
+  if (blocks_in_window == 0) {
+    return 0.0f;
+  }
+
+  uint64_t elapsed_ms = now - mgr->rolling_window_start_time;
   if (elapsed_ms == 0) {
     return 0.0f;
   }
-  return (float)mgr->blocks_validated_total / ((float)elapsed_ms / 1000.0f);
+
+  return (float)blocks_in_window / ((float)elapsed_ms / 1000.0f);
 }
 
 /* ============================================================================
@@ -694,6 +754,7 @@ echo_result_t sync_start(sync_manager_t *mgr) {
              best_header_height, validated_height);
     mgr->mode = SYNC_MODE_BLOCKS;
     mgr->block_sync_start_time = now;
+    mgr->block_sync_start_height = validated_height;
   } else {
     log_info(LOG_COMP_SYNC, "Starting headers-first sync");
     mgr->mode = SYNC_MODE_HEADERS;
@@ -764,24 +825,120 @@ echo_result_t sync_handle_headers(sync_manager_t *mgr, peer_t *peer,
           }
         }
 
-        /* Hybrid selection: wait for MIN_PEERS, then start timeout */
+        /* Select winner once MIN_PEERS complete the race.
+         * No timeout needed - we continuously monitor runners-up and can switch anytime. */
         if (completed_count >= HEADERS_RACE_MIN_PEERS) {
-          /* First time hitting threshold - start the countdown */
-          if (mgr->headers_race_min_peers_time == 0) {
-            mgr->headers_race_min_peers_time = now;
-            log_info(LOG_COMP_SYNC,
-                     "Headers race: %zu peers ready, starting %ums selection timer",
-                     completed_count, HEADERS_RACE_TIMEOUT_MS);
+          mgr->headers_race_complete = true;
+          mgr->fastest_header_peer_idx = best_idx;
+          mgr->winner_responses_since_probe = 0;
+
+          /* Capture top runners-up for ongoing monitoring */
+          mgr->runner_up_count = 0;
+          for (size_t r = 0; r < MONITOR_TOP_RUNNERS && r < completed_count - 1; r++) {
+            uint64_t runner_best_avg = UINT64_MAX;
+            size_t runner_best_idx = 0;
+
+            for (size_t i = 0; i < mgr->peer_count; i++) {
+              if (i == best_idx) continue; /* Skip winner */
+
+              /* Skip if already in runners-up list */
+              bool already_runner = false;
+              for (size_t k = 0; k < mgr->runner_up_count; k++) {
+                if (mgr->runner_up_indices[k] == i) {
+                  already_runner = true;
+                  break;
+                }
+              }
+              if (already_runner) continue;
+
+              peer_sync_state_t *c = &mgr->peers[i];
+              if (c->headers_race_responses >= HEADERS_RACE_ROUNDS) {
+                uint64_t avg = c->headers_race_total_ms / c->headers_race_responses;
+                if (avg < runner_best_avg) {
+                  runner_best_avg = avg;
+                  runner_best_idx = i;
+                }
+              }
+            }
+
+            if (runner_best_avg < UINT64_MAX) {
+              mgr->runner_up_indices[mgr->runner_up_count++] = runner_best_idx;
+            }
           }
 
-          /* Check if timeout has expired */
-          if (now - mgr->headers_race_min_peers_time >= HEADERS_RACE_TIMEOUT_MS) {
-            mgr->headers_race_complete = true;
-            mgr->fastest_header_peer_idx = best_idx;
+          log_info(LOG_COMP_SYNC,
+                   "Headers race winner: peer %s (avg=%lums over %u rounds, %zu candidates, %zu runners-up)",
+                   mgr->peers[best_idx].peer->address, (unsigned long)best_avg,
+                   HEADERS_RACE_ROUNDS, completed_count, mgr->runner_up_count);
+        }
+      }
+    }
+
+    /* Post-race monitoring: track winner performance and check runners-up */
+    if (mgr->headers_race_complete) {
+      /* Find this peer's index */
+      size_t peer_idx = (size_t)(ps - mgr->peers);
+
+      if (peer_idx == mgr->fastest_header_peer_idx) {
+        /* This is the winner responding - update rolling window */
+        ps->recent_responses++;
+        ps->recent_total_ms += response_ms;
+        ps->last_response_ms = response_ms;
+
+        /* Keep rolling window at MONITOR_WINDOW_SIZE */
+        if (ps->recent_responses > MONITOR_WINDOW_SIZE) {
+          /* Approximate: decay the old average contribution */
+          uint64_t old_avg = ps->recent_total_ms / ps->recent_responses;
+          ps->recent_total_ms -= old_avg;
+          ps->recent_responses = MONITOR_WINDOW_SIZE;
+        }
+
+        mgr->winner_responses_since_probe++;
+      } else {
+        /* This is a runner-up responding (from a probe) - check if faster */
+        ps->recent_responses++;
+        ps->recent_total_ms += response_ms;
+        ps->last_response_ms = response_ms;
+
+        if (ps->recent_responses > MONITOR_WINDOW_SIZE) {
+          uint64_t old_avg = ps->recent_total_ms / ps->recent_responses;
+          ps->recent_total_ms -= old_avg;
+          ps->recent_responses = MONITOR_WINDOW_SIZE;
+        }
+
+        /* Compare with winner's recent performance */
+        peer_sync_state_t *winner = &mgr->peers[mgr->fastest_header_peer_idx];
+        if (winner->recent_responses > 0 && ps->recent_responses > 0) {
+          uint64_t winner_avg = winner->recent_total_ms / winner->recent_responses;
+          uint64_t runner_avg = ps->recent_total_ms / ps->recent_responses;
+
+          /* Switch if runner-up is MONITOR_SWITCH_THRESHOLD times faster */
+          if (runner_avg > 0 && winner_avg > runner_avg * MONITOR_SWITCH_THRESHOLD) {
             log_info(LOG_COMP_SYNC,
-                     "Headers race winner: peer %s (avg=%lums over %u rounds, %zu candidates)",
-                     mgr->peers[best_idx].peer->address, (unsigned long)best_avg,
-                     HEADERS_RACE_ROUNDS, completed_count);
+                     "Switching header peer: %s (avg=%lums) -> %s (avg=%lums) - %.1fx faster",
+                     winner->peer->address, (unsigned long)winner_avg,
+                     ps->peer->address, (unsigned long)runner_avg,
+                     (double)winner_avg / runner_avg);
+
+            /* Demote old winner to runner-up slot */
+            if (mgr->runner_up_count < MONITOR_TOP_RUNNERS) {
+              mgr->runner_up_indices[mgr->runner_up_count++] = mgr->fastest_header_peer_idx;
+            }
+
+            /* Promote this peer to winner */
+            mgr->fastest_header_peer_idx = peer_idx;
+            mgr->winner_responses_since_probe = 0;
+
+            /* Remove from runners-up list */
+            for (size_t r = 0; r < mgr->runner_up_count; r++) {
+              if (mgr->runner_up_indices[r] == peer_idx) {
+                for (size_t j = r; j < mgr->runner_up_count - 1; j++) {
+                  mgr->runner_up_indices[j] = mgr->runner_up_indices[j + 1];
+                }
+                mgr->runner_up_count--;
+                break;
+              }
+            }
           }
         }
       }
@@ -808,6 +965,7 @@ echo_result_t sync_handle_headers(sync_manager_t *mgr, peer_t *peer,
         mgr->mode = SYNC_MODE_BLOCKS;
         if (mgr->block_sync_start_time == 0) {
           mgr->block_sync_start_time = plat_time_ms();
+          mgr->block_sync_start_height = tip_height;
         }
       }
     }
@@ -943,6 +1101,7 @@ echo_result_t sync_handle_headers(sync_manager_t *mgr, peer_t *peer,
         mgr->mode = SYNC_MODE_BLOCKS;
         if (mgr->block_sync_start_time == 0) {
           mgr->block_sync_start_time = plat_time_ms();
+          mgr->block_sync_start_height = tip_height;
         }
       }
     }
@@ -1347,6 +1506,42 @@ void sync_tick(sync_manager_t *mgr) {
                                          mgr->callbacks.ctx);
         }
       }
+
+      /* Probe runners-up periodically to detect if winner became slow */
+      if (mgr->winner_responses_since_probe >= MONITOR_PROBE_INTERVAL &&
+          mgr->runner_up_count > 0) {
+        mgr->winner_responses_since_probe = 0;
+
+        /* Build locator once for all probes */
+        hash256_t locator[SYNC_MAX_LOCATOR_HASHES];
+        size_t locator_len = 0;
+        block_index_t *locator_tip = mgr->best_header;
+        if (locator_tip != NULL) {
+          block_index_map_t *map =
+              chainstate_get_block_index_map(mgr->chainstate);
+          sync_build_locator_from(map, locator_tip, locator, &locator_len);
+        } else {
+          sync_build_locator(mgr->chainstate, locator, &locator_len);
+        }
+
+        /* Send probe to each runner-up that's available */
+        for (size_t r = 0; r < mgr->runner_up_count; r++) {
+          size_t idx = mgr->runner_up_indices[r];
+          if (idx >= mgr->peer_count) continue;
+
+          peer_sync_state_t *runner = &mgr->peers[idx];
+          if (!runner->sync_candidate || !peer_is_ready(runner->peer)) continue;
+          if (runner->headers_in_flight) continue;
+
+          runner->headers_in_flight = true;
+          runner->headers_sent_time = now;
+
+          if (mgr->callbacks.send_getheaders) {
+            mgr->callbacks.send_getheaders(runner->peer, locator, locator_len,
+                                           NULL, mgr->callbacks.ctx);
+          }
+        }
+      }
     }
     break;
   }
@@ -1517,7 +1712,6 @@ void sync_get_progress(const sync_manager_t *mgr, sync_progress_t *progress) {
 
   /* Block progress */
   progress->blocks_downloaded = mgr->blocks_received_total;
-  progress->blocks_validated = mgr->blocks_validated_total;
   progress->blocks_pending =
       (uint32_t)download_mgr_pending_count(mgr->download_mgr);
   progress->blocks_in_flight =
@@ -1531,6 +1725,13 @@ void sync_get_progress(const sync_manager_t *mgr, sync_progress_t *progress) {
   if (chainstate_get_tip(mgr->chainstate, &tip) == ECHO_OK) {
     progress->tip_height = tip.height;
     progress->tip_work = tip.chainwork;
+  }
+
+  /* Calculate blocks validated this session (tip - start height) */
+  if (progress->tip_height > mgr->block_sync_start_height) {
+    progress->blocks_validated = progress->tip_height - mgr->block_sync_start_height;
+  } else {
+    progress->blocks_validated = 0;
   }
 
   if (mgr->best_header) {
@@ -1601,7 +1802,7 @@ uint64_t sync_estimate_remaining_time(const sync_progress_t *progress) {
   return (uint64_t)((float)remaining / blocks_per_ms);
 }
 
-void sync_get_metrics(const sync_manager_t *mgr, sync_metrics_t *metrics) {
+void sync_get_metrics(sync_manager_t *mgr, sync_metrics_t *metrics) {
   if (!metrics) {
     return;
   }
