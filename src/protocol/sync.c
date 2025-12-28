@@ -215,11 +215,23 @@ static bool sync_chase_handler(chase_event_t event, chase_value_t value,
   }
 
   switch (event) {
-  case CHASE_STARVED:
-    /* A downstream chaser needs more blocks - distribute pending work */
-    log_debug(LOG_COMP_SYNC, "CHASE_STARVED: distributing pending work");
-    download_mgr_distribute_work(mgr->download_mgr);
+  case CHASE_STARVED: {
+    /* A downstream chaser needs more blocks.
+     * libbitcoin-style: First try to distribute pending work.
+     * If no pending work, steal from the slowest peer. */
+    size_t distributed = download_mgr_distribute_work(mgr->download_mgr);
+    if (distributed == 0) {
+      /* No pending work - steal from slowest peer */
+      size_t stolen = download_mgr_steal_from_slowest(mgr->download_mgr);
+      if (stolen > 0) {
+        log_debug(LOG_COMP_SYNC, "CHASE_STARVED: stole %zu blocks, redistributing", stolen);
+        download_mgr_distribute_work(mgr->download_mgr);
+      }
+    } else {
+      log_debug(LOG_COMP_SYNC, "CHASE_STARVED: distributed %zu pending blocks", distributed);
+    }
     break;
+  }
 
   case CHASE_SPLIT: {
     /* Split work from a slow peer (peer pointer in value.object) */
@@ -1223,6 +1235,11 @@ echo_result_t sync_handle_block(sync_manager_t *mgr, peer_t *peer,
     if (mgr->dispatcher != NULL) {
       chase_notify_height(mgr->dispatcher, CHASE_CHECKED, block_index->height);
     }
+
+    /* Immediate follow-up: distribute more work to keep peers busy.
+     * This is the same optimization as header sync - don't wait for sync_tick.
+     * When a peer delivers a block, they now have capacity for more work. */
+    download_mgr_distribute_work(mgr->download_mgr);
   }
 
   mgr->blocks_received_total++;
@@ -1352,18 +1369,21 @@ static void queue_blocks_from_headers(sync_manager_t *mgr) {
    * Use direct height lookup via callback if available (much faster for
    * large height gaps). Falls back to walking prev pointers if not.
    *
-   * Array sized for max possible window (archival), but iteration limited
-   * to configured window.
+   * Array sized to download_mgr capacity (16384), not full window (50000).
+   * We batch in chunks to avoid massive stack usage.
    */
-  hash256_t to_queue[SYNC_BLOCK_DOWNLOAD_WINDOW_ARCHIVAL];
-  uint32_t heights[SYNC_BLOCK_DOWNLOAD_WINDOW_ARCHIVAL];
+  #define QUEUE_BATCH_SIZE 16384
+  hash256_t to_queue[QUEUE_BATCH_SIZE];
+  uint32_t heights[QUEUE_BATCH_SIZE];
   size_t to_queue_count = 0;
+  size_t batch_limit = QUEUE_BATCH_SIZE < effective_window
+                       ? QUEUE_BATCH_SIZE : effective_window;
 
   if (mgr->callbacks.get_block_hash_at_height) {
     /* Fast path: query database by height directly */
     uint32_t lookup_failures = 0;
     for (uint32_t h = start_height;
-         h <= end_height && to_queue_count < effective_window; h++) {
+         h <= end_height && to_queue_count < batch_limit; h++) {
       hash256_t hash;
       echo_result_t cb_result = mgr->callbacks.get_block_hash_at_height(
           h, &hash, mgr->callbacks.ctx);
@@ -1424,7 +1444,7 @@ static void queue_blocks_from_headers(sync_manager_t *mgr) {
 
     /* Collect blocks to queue (walking backward, we'll reverse later) */
     while (idx && idx->height >= start_height &&
-           to_queue_count < effective_window) {
+           to_queue_count < batch_limit) {
       if (!download_mgr_has_block(mgr->download_mgr, &idx->hash)) {
         block_t stored;
         block_init(&stored);
@@ -1683,8 +1703,17 @@ void sync_tick(sync_manager_t *mgr) {
       }
     }
 
-    /* Queue blocks from headers */
-    queue_blocks_from_headers(mgr);
+    /* Queue blocks from headers - but only if queue has capacity.
+     * libbitcoin-style flow control: don't queue more work until current
+     * work is being consumed. This prevents excessive memory usage and
+     * reduces per-tick overhead from repeated storage lookups. */
+    size_t pending = download_mgr_pending_count(mgr->download_mgr);
+    size_t inflight = download_mgr_inflight_count(mgr->download_mgr);
+    size_t total_queued = pending + inflight;
+    if (total_queued < 8192) {
+      /* Below 50% capacity - queue more work */
+      queue_blocks_from_headers(mgr);
+    }
 
     /*
      * Periodically notify chasers about stored blocks that need validation.
@@ -1701,6 +1730,30 @@ void sync_tick(sync_manager_t *mgr) {
 
     /* Distribute pending work to peers with capacity */
     download_mgr_distribute_work(mgr->download_mgr);
+
+    /* libbitcoin-style work stealing: If starved (no pending work but peers
+     * have work), steal from the slowest peer. This naturally rebalances
+     * work toward faster peers over time. */
+    size_t stolen = download_mgr_steal_from_slowest(mgr->download_mgr);
+    if (stolen > 0) {
+      /* Redistribute the stolen work immediately */
+      download_mgr_distribute_work(mgr->download_mgr);
+    }
+
+    /* Blocking work stealing: If a peer is holding the next block needed for
+     * validation for too long (3 seconds), take ALL their work. This prevents
+     * a single slow peer from blocking the entire validation pipeline.
+     *
+     * Unlike steal_from_slowest (which optimizes throughput), this targets
+     * the specific peer blocking sequential validation progress. */
+    uint32_t validated_height = chainstate_get_height(mgr->chainstate);
+    size_t blocking_stolen =
+        download_mgr_steal_blocking_work(mgr->download_mgr, validated_height,
+                                         3000); /* 3 second timeout */
+    if (blocking_stolen > 0) {
+      /* Redistribute immediately so another peer can fetch the block */
+      download_mgr_distribute_work(mgr->download_mgr);
+    }
 
     /* Check for stalls and reassign work from slow/stalled peers */
     download_mgr_check_performance(mgr->download_mgr);

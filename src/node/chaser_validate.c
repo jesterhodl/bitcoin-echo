@@ -17,9 +17,17 @@
 #include "log.h"
 #include "node.h"
 
-/* Default configuration */
-#define DEFAULT_WORKER_COUNT 4
-#define DEFAULT_MAX_BACKLOG 50
+/* Default configuration
+ *
+ * libbitcoin-node uses maximum_concurrency (typically hundreds) for both
+ * the download window and validation backlog. This ensures the validator
+ * always has work available.
+ *
+ * Worker count should match CPU cores for maximum parallel validation.
+ * Backlog should be large enough to keep all workers busy.
+ */
+#define DEFAULT_WORKER_COUNT 0  /* 0 = auto-detect CPU count */
+#define DEFAULT_MAX_BACKLOG 500 /* libbitcoin uses maximum_concurrency */
 
 /* Forward declarations */
 static int validate_start(chaser_t *self);
@@ -151,13 +159,26 @@ chaser_validate_t *chaser_validate_create(node_t *node,
 
     /* Set configuration */
     chaser->chainstate = chainstate;
-    chaser->worker_count =
-        worker_count > 0 ? worker_count : DEFAULT_WORKER_COUNT;
+
+    /* Auto-detect CPU count if worker_count is 0 */
+    if (worker_count == 0) {
+        long cpu_count = sysconf(_SC_NPROCESSORS_ONLN);
+        if (cpu_count <= 0) {
+            cpu_count = 4; /* Fallback */
+        }
+        chaser->worker_count = (size_t)cpu_count;
+    } else {
+        chaser->worker_count = worker_count;
+    }
+
     chaser->maximum_backlog =
         max_backlog > 0 ? max_backlog : DEFAULT_MAX_BACKLOG;
     atomic_init(&chaser->backlog, 0);
     chaser->top_checkpoint = 0; /* TODO: Get from config */
     chaser->defer_validation = false;
+
+    log_info(LOG_COMP_SYNC, "chaser_validate: worker_count=%zu, max_backlog=%zu",
+             chaser->worker_count, chaser->maximum_backlog);
 
     /* Create worker threads */
     chaser->workers = calloc(chaser->worker_count, sizeof(pthread_t));
@@ -222,6 +243,17 @@ bool chaser_validate_is_bypass(chaser_validate_t *chaser, uint32_t height) {
     }
 
     return false;
+}
+
+void chaser_validate_set_checkpoint(chaser_validate_t *chaser, uint32_t height) {
+    if (!chaser) {
+        return;
+    }
+
+    chaser->top_checkpoint = height;
+    log_info(LOG_COMP_SYNC,
+             "chaser_validate: checkpoint set to %u (blocks <= this bypass validation)",
+             height);
 }
 
 int chaser_validate_submit(chaser_validate_t *chaser, uint32_t height,

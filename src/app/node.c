@@ -909,6 +909,16 @@ static echo_result_t node_init_chase(node_t *node) {
     return ECHO_ERR_OUT_OF_MEMORY;
   }
 
+  /* Set checkpoint for validation bypass.
+   * Blocks at or below the current validated height have already been
+   * validated (from checkpoint restore or previous runs), so skip
+   * full validation during IBD. This is a critical libbitcoin-node
+   * optimization for fast sync. */
+  uint32_t checkpoint_height = consensus_get_height(node->consensus);
+  if (checkpoint_height > 0 && checkpoint_height != UINT32_MAX) {
+    chaser_validate_set_checkpoint(node->chaser_validate, checkpoint_height);
+  }
+
   /* Start chasers (subscribes them to events) */
   if (chaser_start(&node->chaser_validate->base) != 0) {
     log_error(LOG_COMP_MAIN, "Failed to start validation chaser");

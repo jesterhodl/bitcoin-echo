@@ -135,4 +135,16 @@ bool chaser_validate_is_bypass(chaser_validate_t *chaser, uint32_t height);
 int chaser_validate_submit(chaser_validate_t *chaser, uint32_t height,
                            const uint8_t block_hash[32], bool bypass);
 
+/**
+ * Set the checkpoint height for validation bypass
+ *
+ * Blocks at or below this height skip full validation during IBD.
+ * libbitcoin-node uses this to bypass validation for blocks that have
+ * been network-validated (under known checkpoint).
+ *
+ * @param chaser     Chaser to configure
+ * @param height     Height of the checkpoint (blocks <= this are bypassed)
+ */
+void chaser_validate_set_checkpoint(chaser_validate_t *chaser, uint32_t height);
+
 #endif /* ECHO_CHASER_VALIDATE_H */

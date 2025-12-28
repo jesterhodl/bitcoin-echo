@@ -286,6 +286,62 @@ void download_mgr_check_performance(download_mgr_t *mgr);
  */
 size_t download_mgr_split_work(download_mgr_t *mgr, peer_t *slow_peer);
 
+/**
+ * Handle starved condition by stealing work from the slowest peer.
+ *
+ * libbitcoin-style work stealing: When no pending work exists but peers are
+ * still downloading, find the slowest peer and take half their work. This
+ * naturally rebalances work toward faster peers over time.
+ *
+ * Called when:
+ * - pending_count == 0 (no work available to assign)
+ * - inflight_count > 0 (some peers still have work)
+ * - At least one peer has capacity for more work
+ *
+ * Parameters:
+ *   mgr - Download manager
+ *
+ * Returns:
+ *   Number of blocks stolen and made pending (0 if no action taken)
+ */
+size_t download_mgr_steal_from_slowest(download_mgr_t *mgr);
+
+/**
+ * Steal work from the peer blocking validation.
+ *
+ * Unlike steal_from_slowest (which steals from lowest throughput), this
+ * function identifies which peer holds the block at validated_height+1
+ * and unassigns ALL their work if they've been holding it too long.
+ *
+ * This is critical for IBD performance: validation must be sequential,
+ * so a single slow peer holding the next-needed block blocks ALL progress.
+ *
+ * Parameters:
+ *   mgr              - Download manager
+ *   validated_height - Current validated block height
+ *   max_wait_ms      - Maximum time to wait for blocking block (e.g., 3000ms)
+ *
+ * Returns:
+ *   Number of blocks unassigned (0 if no action taken)
+ */
+size_t download_mgr_steal_blocking_work(download_mgr_t *mgr,
+                                        uint32_t validated_height,
+                                        uint64_t max_wait_ms);
+
+/**
+ * Check if starved condition exists.
+ *
+ * Starved means: no pending work, but work is in-flight with some peers,
+ * and at least one peer has capacity for more work (isn't at max in-flight).
+ *
+ * Parameters:
+ *   mgr - Download manager
+ *
+ * Returns:
+ *   true if starved condition exists, false otherwise
+ */
+bool download_mgr_is_starved(const download_mgr_t *mgr);
+
 /* ============================================================================
  * Query Functions
  * ============================================================================

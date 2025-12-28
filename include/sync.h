@@ -73,14 +73,15 @@ typedef struct chase_dispatcher chase_dispatcher_t;
 /* Block download window - how far ahead of validated tip to download.
  * Larger window = more parallelism but more memory/storage usage.
  *
- * For ARCHIVAL nodes: Use large window (16384) for maximum parallelism.
- * For PRUNED nodes: Use small window (1024) to bound storage overage.
- *   At ~1.5 MB/block post-SegWit, 1024 blocks = ~1.5 GB buffer.
+ * Both modes use the same large window (50000) during IBD for maximum
+ * parallelism. Pruning limits what we STORE, not what we DOWNLOAD.
+ * libbitcoin-node uses 50000 as the maximum_concurrency default.
  *
- * Bitcoin Core: 1024, Libbitcoin: 50000.
+ * Note: The actual work queue and batch distribution is handled by
+ * download_mgr which limits per-peer in-flight to 16 blocks.
  */
-#define SYNC_BLOCK_DOWNLOAD_WINDOW_ARCHIVAL 16384
-#define SYNC_BLOCK_DOWNLOAD_WINDOW_PRUNED 1024
+#define SYNC_BLOCK_DOWNLOAD_WINDOW_ARCHIVAL 50000
+#define SYNC_BLOCK_DOWNLOAD_WINDOW_PRUNED 50000
 
 /* Default for backward compatibility */
 #define SYNC_BLOCK_DOWNLOAD_WINDOW SYNC_BLOCK_DOWNLOAD_WINDOW_ARCHIVAL

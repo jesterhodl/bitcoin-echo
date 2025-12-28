@@ -375,38 +375,66 @@ size_t download_mgr_distribute_work(download_mgr_t *mgr) {
     return 0;
   }
 
-  size_t assigned = 0;
+  size_t total_assigned = 0;
 
-  while (mgr->pending_count > 0) {
-    /* Find a peer with capacity */
-    peer_perf_t *perf = find_peer_with_capacity(mgr);
-    if (perf == NULL) {
-      break; /* No peers available */
+  /* libbitcoin-style: batch blocks per peer.
+   * Instead of sending 1 getdata per block, collect up to MAX_IN_FLIGHT
+   * blocks for each peer and send ONE getdata with all of them.
+   * This dramatically reduces message overhead. */
+
+  /* Process each peer that has capacity */
+  for (size_t pi = 0; pi < mgr->peer_count && mgr->pending_count > 0; pi++) {
+    peer_perf_t *perf = &mgr->peers[pi];
+    if (perf->peer == NULL || perf->stalled) {
+      continue;
     }
 
-    /* Find next pending block */
-    work_item_t *item = find_next_pending(mgr);
-    if (item == NULL) {
-      break; /* No pending work */
+    uint32_t capacity = DOWNLOAD_MAX_IN_FLIGHT_PER_PEER - perf->blocks_in_flight;
+    if (capacity == 0) {
+      continue; /* Peer at max */
     }
 
-    /* Assign to peer */
-    item->state = WORK_STATE_ASSIGNED;
-    item->assigned_peer = perf->peer;
-    item->assigned_time = plat_time_ms();
-    perf->blocks_in_flight++;
-    mgr->pending_count--;
-    mgr->inflight_count++;
-    assigned++;
+    /* Collect batch of blocks for this peer */
+    hash256_t batch_hashes[DOWNLOAD_MAX_IN_FLIGHT_PER_PEER];
+    size_t batch_count = 0;
+    uint64_t now = plat_time_ms();
 
-    /* Send getdata request (batch of 1 for now, could batch multiple) */
-    if (mgr->callbacks.send_getdata != NULL) {
-      mgr->callbacks.send_getdata(perf->peer, &item->hash, 1,
-                                  mgr->callbacks.ctx);
+    for (uint32_t h = mgr->lowest_pending_height;
+         h <= mgr->highest_queued_height && batch_count < capacity;
+         h++) {
+      size_t idx = h % mgr->work_capacity;
+      work_item_t *item = &mgr->work_items[idx];
+
+      if (item->state != WORK_STATE_PENDING || item->height != h) {
+        continue;
+      }
+
+      /* Assign to peer */
+      item->state = WORK_STATE_ASSIGNED;
+      item->assigned_peer = perf->peer;
+      item->assigned_time = now;
+
+      /* Add to batch */
+      memcpy(&batch_hashes[batch_count], &item->hash, sizeof(hash256_t));
+      batch_count++;
+    }
+
+    if (batch_count > 0) {
+      /* Update counts */
+      perf->blocks_in_flight += batch_count;
+      mgr->pending_count -= batch_count;
+      mgr->inflight_count += batch_count;
+      total_assigned += batch_count;
+
+      /* Send ONE getdata for entire batch */
+      if (mgr->callbacks.send_getdata != NULL) {
+        mgr->callbacks.send_getdata(perf->peer, batch_hashes, batch_count,
+                                    mgr->callbacks.ctx);
+      }
     }
   }
 
-  return assigned;
+  return total_assigned;
 }
 
 bool download_mgr_block_received(download_mgr_t *mgr, peer_t *peer,
@@ -531,7 +559,13 @@ void download_mgr_check_performance(download_mgr_t *mgr) {
         /* libbitcoin-style: DON'T disconnect on stall.
          * Just take back their work and let them recover.
          * The stalled flag prevents new work assignment until they deliver.
-         * This avoids mass-disconnect when network hiccups. */
+         * This avoids mass-disconnect when network hiccups.
+         *
+         * Also libbitcoin-style: Only handle ONE stalled peer per cycle.
+         * This prevents mass-reassignment cascade when many peers stall
+         * at once (e.g., checkpoint restore where everyone has old
+         * last_delivery_time values). */
+        return;
       }
     }
 
@@ -562,14 +596,22 @@ void download_mgr_check_performance(download_mgr_t *mgr) {
       continue;
     }
 
-    /* Only check peers that have been measured */
-    if (perf->bytes_per_second > 0.0f && perf->bytes_per_second < threshold) {
-      LOG_INFO("download_mgr: slow peer (%.0f B/s < %.0f threshold), "
+    /* Only check peers that have been measured AND have enough work to split.
+     * Don't churn peers with few blocks - not worth the overhead.
+     * Minimum 6 blocks: split gives 3 to each side, meaningful redistribution.
+     *
+     * libbitcoin-style: Only split from ONE slow peer per check cycle.
+     * This prevents a death spiral where all peers get split simultaneously. */
+    if (perf->bytes_per_second > 0.0f && perf->bytes_per_second < threshold &&
+        perf->blocks_in_flight >= 6) {
+      LOG_INFO("download_mgr: slow peer (%.0f B/s < %.0f threshold, %u in_flight), "
                     "splitting work",
-                    (double)perf->bytes_per_second, (double)threshold);
+                    (double)perf->bytes_per_second, (double)threshold,
+                    perf->blocks_in_flight);
 
       /* Split work from this peer (take half) */
       download_mgr_split_work(mgr, perf->peer);
+      return; /* libbitcoin-style: one split per cycle */
     }
   }
 }
@@ -580,14 +622,15 @@ size_t download_mgr_split_work(download_mgr_t *mgr, peer_t *slow_peer) {
   }
 
   peer_perf_t *perf = find_peer_perf(mgr, slow_peer);
-  if (perf == NULL || perf->blocks_in_flight == 0) {
+  if (perf == NULL || perf->blocks_in_flight < 4) {
+    /* Don't split from peers with few blocks - not worth the churn */
     return 0;
   }
 
-  /* Take half of the slow peer's work */
+  /* Take half of the slow peer's work (minimum 2) */
   size_t to_unassign = perf->blocks_in_flight / 2;
-  if (to_unassign == 0) {
-    to_unassign = 1; /* At least one block */
+  if (to_unassign < 2) {
+    to_unassign = 2;
   }
 
   size_t unassigned = 0;
@@ -613,6 +656,150 @@ size_t download_mgr_split_work(download_mgr_t *mgr, peer_t *slow_peer) {
   }
 
   LOG_DEBUG("download_mgr: split %zu blocks from slow peer", unassigned);
+  return unassigned;
+}
+
+bool download_mgr_is_starved(const download_mgr_t *mgr) {
+  if (mgr == NULL) {
+    return false;
+  }
+
+  /* Starved = no pending work, but work is in-flight, and a peer wants work */
+  if (mgr->pending_count > 0) {
+    return false; /* Work available to assign */
+  }
+
+  if (mgr->inflight_count == 0) {
+    return false; /* No work anywhere - not starved, just done */
+  }
+
+  /* Check if any peer has capacity (wants more work) */
+  for (size_t i = 0; i < mgr->peer_count; i++) {
+    const peer_perf_t *perf = &mgr->peers[i];
+    if (perf->peer != NULL && !perf->stalled &&
+        perf->blocks_in_flight < DOWNLOAD_MAX_IN_FLIGHT_PER_PEER) {
+      return true; /* Found a peer that could take more work */
+    }
+  }
+
+  return false; /* All peers are at capacity */
+}
+
+size_t download_mgr_steal_from_slowest(download_mgr_t *mgr) {
+  if (mgr == NULL) {
+    return 0;
+  }
+
+  /* Only steal when starved condition exists */
+  if (!download_mgr_is_starved(mgr)) {
+    return 0;
+  }
+
+  /* Find the slowest peer that has work.
+   * libbitcoin finds peer with lowest bytes_per_second.
+   * Peers with 0 rate (unmeasured) are considered slowest. */
+  peer_perf_t *slowest = NULL;
+  float slowest_rate = INFINITY;
+
+  for (size_t i = 0; i < mgr->peer_count; i++) {
+    peer_perf_t *perf = &mgr->peers[i];
+    if (perf->peer == NULL || perf->stalled) {
+      continue;
+    }
+
+    /* Must have enough work to steal (at least 4 blocks, so split gives 2 each).
+     * Don't churn peers with tiny work assignments. */
+    if (perf->blocks_in_flight < 4) {
+      continue;
+    }
+
+    /* Compare rates. Unmeasured peers (0 rate) are considered slowest. */
+    float rate = perf->bytes_per_second;
+    if (rate < slowest_rate) {
+      slowest_rate = rate;
+      slowest = perf;
+    }
+  }
+
+  if (slowest == NULL) {
+    return 0; /* No peer with work found */
+  }
+
+  LOG_INFO("download_mgr: starved condition - stealing from slowest peer "
+           "(rate=%.0f B/s, in_flight=%u)",
+           (double)slowest_rate, slowest->blocks_in_flight);
+
+  return download_mgr_split_work(mgr, slowest->peer);
+}
+
+size_t download_mgr_steal_blocking_work(download_mgr_t *mgr,
+                                        uint32_t validated_height,
+                                        uint64_t max_wait_ms) {
+  if (mgr == NULL) {
+    return 0;
+  }
+
+  /* The next block needed for validation is validated_height + 1 */
+  uint32_t blocking_height = validated_height + 1;
+
+  /* Check if this height is even in our work queue */
+  if (blocking_height < mgr->lowest_pending_height ||
+      blocking_height > mgr->highest_queued_height) {
+    return 0; /* Block not in queue yet */
+  }
+
+  /* Find the work item for the blocking height */
+  size_t idx = blocking_height % mgr->work_capacity;
+  work_item_t *item = &mgr->work_items[idx];
+
+  /* Only care if it's assigned (PENDING or RECEIVED don't block) */
+  if (item->state != WORK_STATE_ASSIGNED || item->assigned_peer == NULL) {
+    return 0; /* Not assigned, or already pending/received */
+  }
+
+  /* Check how long the peer has held this block */
+  uint64_t now = plat_time_ms();
+  uint64_t held_time = now - item->assigned_time;
+
+  if (held_time < max_wait_ms) {
+    return 0; /* Haven't waited long enough */
+  }
+
+  /* This peer is blocking validation. Unassign ALL their work. */
+  peer_t *blocking_peer = item->assigned_peer;
+  peer_perf_t *perf = find_peer_perf(mgr, blocking_peer);
+
+  if (perf == NULL) {
+    return 0;
+  }
+
+  LOG_INFO("download_mgr: peer blocking validation at height %u "
+           "(held for %llu ms, rate=%.0f B/s), unassigning all %u blocks",
+           blocking_height, (unsigned long long)held_time,
+           (double)perf->bytes_per_second, perf->blocks_in_flight);
+
+  /* Unassign ALL work from this peer */
+  size_t unassigned = 0;
+  for (uint32_t h = mgr->lowest_pending_height; h <= mgr->highest_queued_height;
+       h++) {
+    size_t work_idx = h % mgr->work_capacity;
+    work_item_t *work = &mgr->work_items[work_idx];
+    if (work->assigned_peer == blocking_peer &&
+        work->state == WORK_STATE_ASSIGNED) {
+      work->state = WORK_STATE_PENDING;
+      work->assigned_peer = NULL;
+      work->retry_count++;
+      mgr->pending_count++;
+      if (mgr->inflight_count > 0) {
+        mgr->inflight_count--;
+      }
+      unassigned++;
+    }
+  }
+
+  perf->blocks_in_flight = 0;
+  perf->stalled = true; /* Mark as stalled so they don't get more work */
+
   return unassigned;
 }
 
