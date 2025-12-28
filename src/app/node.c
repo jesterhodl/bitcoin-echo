@@ -1987,11 +1987,11 @@ static void node_cleanup(node_t *node) {
     node->utxo_db_open = false;
   }
 
-  /*
-   * Block storage doesn't need explicit close - it's stateless
-   * (just holds paths and current file positions).
-   */
-  node->block_storage_init = false;
+  /* Close block storage (flushes any buffered writes) */
+  if (node->block_storage_init) {
+    block_storage_close(&node->block_storage);
+    node->block_storage_init = false;
+  }
 
   /* Free listening socket if allocated */
   if (node->listen_socket != NULL) {

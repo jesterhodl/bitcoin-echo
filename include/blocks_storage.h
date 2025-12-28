@@ -35,12 +35,23 @@ typedef struct {
 /*
  * Block file manager.
  * Manages writing and reading blocks to/from disk.
+ *
+ * IBD optimization: keeps current write file open to avoid
+ * per-block fopen/fclose syscall overhead.
  */
 typedef struct {
   char data_dir[256];           /* Data directory path */
   uint32_t current_file_index;  /* Current file being written */
   uint32_t current_file_offset; /* Current offset in current file */
+  void *current_file;           /* Current write file handle (FILE*) */
+  uint32_t blocks_since_flush;  /* Blocks written since last flush */
 } block_file_manager_t;
+
+/*
+ * Number of blocks between flushes.
+ * Balances durability vs. performance during IBD.
+ */
+#define BLOCK_STORAGE_FLUSH_INTERVAL 100
 
 /*
  * Maximum size of a single block file (128 MB).
@@ -219,5 +230,39 @@ uint32_t block_storage_get_current_file(const block_file_manager_t *mgr);
  */
 echo_result_t block_storage_get_lowest_file(const block_file_manager_t *mgr,
                                             uint32_t *file_index);
+
+/*
+ * ============================================================================
+ * BATCHING OPERATIONS (IBD optimization)
+ * ============================================================================
+ */
+
+/*
+ * Flush buffered writes to disk.
+ *
+ * Parameters:
+ *   mgr - Block file manager
+ *
+ * Returns:
+ *   ECHO_OK on success, error code on failure
+ *
+ * Notes:
+ *   - Called automatically every BLOCK_STORAGE_FLUSH_INTERVAL blocks
+ *   - Can be called manually for durability at checkpoints
+ */
+echo_result_t block_storage_flush(block_file_manager_t *mgr);
+
+/*
+ * Close the block storage manager.
+ *
+ * Parameters:
+ *   mgr - Block file manager
+ *
+ * Notes:
+ *   - Flushes any pending writes
+ *   - Closes the current write file
+ *   - Must be called during shutdown for clean state
+ */
+void block_storage_close(block_file_manager_t *mgr);
 
 #endif /* ECHO_BLOCKS_STORAGE_H */

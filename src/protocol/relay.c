@@ -91,12 +91,24 @@ static ban_entry_t *find_ban(relay_manager_t *mgr, const char *address) {
 
 /**
  * Check if peer has announced this inventory item.
+ * Iterates through ring buffer from head to tail.
+ * Skips expired items (older than INVENTORY_EXPIRY_MS).
  */
 static echo_bool_t peer_has_inventory(const peer_inventory_t *inv,
                                       const hash256_t *hash, uint32_t type) {
+  uint64_t now = plat_time_ms();
+
   for (size_t i = 0; i < inv->count; i++) {
-    if (inv->items[i].type == type &&
-        memcmp(&inv->items[i].hash, hash, sizeof(hash256_t)) == 0) {
+    size_t idx = (inv->head + i) % MAX_PEER_INVENTORY;
+    const inventory_item_t *item = &inv->items[idx];
+
+    /* Skip expired items */
+    if (now - item->time >= INVENTORY_EXPIRY_MS) {
+      continue;
+    }
+
+    if (item->type == type &&
+        memcmp(&item->hash, hash, sizeof(hash256_t)) == 0) {
       return ECHO_TRUE;
     }
   }
@@ -105,6 +117,7 @@ static echo_bool_t peer_has_inventory(const peer_inventory_t *inv,
 
 /**
  * Add inventory item to peer's announced items.
+ * Uses ring buffer for O(1) insertion when buffer is full.
  */
 static void peer_add_inventory(peer_inventory_t *inv, const hash256_t *hash,
                                uint32_t type) {
@@ -113,19 +126,21 @@ static void peer_add_inventory(peer_inventory_t *inv, const hash256_t *hash,
     return;
   }
 
-  /* If at capacity, remove oldest item */
-  if (inv->count >= MAX_PEER_INVENTORY) {
-    /* Shift all items down */
-    memmove(&inv->items[0], &inv->items[1],
-            (MAX_PEER_INVENTORY - 1) * sizeof(inventory_item_t));
-    inv->count = MAX_PEER_INVENTORY - 1;
-  }
+  /* Add new item at tail position */
+  inv->items[inv->tail].hash = *hash;
+  inv->items[inv->tail].type = type;
+  inv->items[inv->tail].time = plat_time_ms();
 
-  /* Add new item */
-  inv->items[inv->count].hash = *hash;
-  inv->items[inv->count].type = type;
-  inv->items[inv->count].time = plat_time_ms();
-  inv->count++;
+  /* Advance tail (wraparound) */
+  inv->tail = (inv->tail + 1) % MAX_PEER_INVENTORY;
+
+  if (inv->count < MAX_PEER_INVENTORY) {
+    /* Buffer not full yet */
+    inv->count++;
+  } else {
+    /* Buffer full - oldest item is overwritten, advance head */
+    inv->head = (inv->head + 1) % MAX_PEER_INVENTORY;
+  }
 }
 
 /**
@@ -667,24 +682,11 @@ void relay_cleanup(relay_manager_t *mgr) {
     }
   }
 
-  /* Clean up stale inventory items */
-  for (size_t i = 0; i < MAX_PEERS; i++) {
-    if (mgr->peers[i].active) {
-      peer_inventory_t *inv = &mgr->peers[i].inventory;
-
-      /* Remove items older than INVENTORY_EXPIRY_MS */
-      size_t write_idx = 0;
-      for (size_t read_idx = 0; read_idx < inv->count; read_idx++) {
-        if (now - inv->items[read_idx].time < INVENTORY_EXPIRY_MS) {
-          if (write_idx != read_idx) {
-            inv->items[write_idx] = inv->items[read_idx];
-          }
-          write_idx++;
-        }
-      }
-      inv->count = write_idx;
-    }
-  }
+  /*
+   * Inventory cleanup not needed with ring buffer.
+   * Old items are naturally overwritten when new ones are added.
+   * The peer_has_inventory check filters expired items at lookup time.
+   */
 }
 
 const char *relay_ban_reason_string(ban_reason_t reason) {

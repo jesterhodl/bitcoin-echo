@@ -115,6 +115,10 @@ echo_result_t block_storage_init(block_file_manager_t *mgr,
     return ECHO_ERR_PLATFORM_IO;
   }
 
+  /* Initialize batching state */
+  mgr->current_file = NULL;
+  mgr->blocks_since_flush = 0;
+
   /* Scan existing files to find current position */
   return scan_block_files(mgr);
 }
@@ -130,6 +134,9 @@ void block_storage_get_path(const block_file_manager_t *mgr,
 
 /*
  * Write a block to disk.
+ *
+ * IBD optimization: keeps file handle open across writes to avoid
+ * per-block fopen/fclose syscall overhead.
  */
 echo_result_t block_storage_write(block_file_manager_t *mgr,
                                   const uint8_t *block_data,
@@ -141,22 +148,37 @@ echo_result_t block_storage_write(block_file_manager_t *mgr,
 
   /* Check if we need to start a new file */
   uint32_t record_size = BLOCK_FILE_RECORD_HEADER_SIZE + block_size;
+  bool need_new_file =
+      (mgr->current_file_offset + record_size > BLOCK_FILE_MAX_SIZE);
 
-  if (mgr->current_file_offset + record_size > BLOCK_FILE_MAX_SIZE) {
+  if (need_new_file) {
+    /* Flush and close current file before switching */
+    if (mgr->current_file != NULL) {
+      FILE *f = (FILE *)mgr->current_file;
+      fflush(f);
+      fclose(f);
+      mgr->current_file = NULL;
+      mgr->blocks_since_flush = 0;
+    }
+
     /* Start new file */
     mgr->current_file_index++;
     mgr->current_file_offset = 0;
   }
 
-  /* Get path to current file */
-  char path[512];
-  block_storage_get_path(mgr, mgr->current_file_index, path);
+  /* Open file if not already open */
+  if (mgr->current_file == NULL) {
+    char path[512];
+    block_storage_get_path(mgr, mgr->current_file_index, path);
 
-  /* Open file for appending */
-  FILE *f = fopen(path, "ab");
-  if (!f) {
-    return ECHO_ERR_PLATFORM_IO;
+    FILE *f = fopen(path, "ab");
+    if (!f) {
+      return ECHO_ERR_PLATFORM_IO;
+    }
+    mgr->current_file = f;
   }
+
+  FILE *f = (FILE *)mgr->current_file;
 
   /* Write magic bytes (little-endian) */
   uint32_t magic = ECHO_NETWORK_MAGIC;
@@ -164,7 +186,6 @@ echo_result_t block_storage_write(block_file_manager_t *mgr,
                             (magic >> 16) & 0xFF, (magic >> 24) & 0xFF};
 
   if (fwrite(magic_bytes, 1, 4, f) != 4) {
-    fclose(f);
     return ECHO_ERR_PLATFORM_IO;
   }
 
@@ -174,23 +195,13 @@ echo_result_t block_storage_write(block_file_manager_t *mgr,
                            (block_size >> 24) & 0xFF};
 
   if (fwrite(size_bytes, 1, 4, f) != 4) {
-    fclose(f);
     return ECHO_ERR_PLATFORM_IO;
   }
 
   /* Write block data */
   if (fwrite(block_data, 1, block_size, f) != block_size) {
-    fclose(f);
     return ECHO_ERR_PLATFORM_IO;
   }
-
-  /* Flush to disk */
-  if (fflush(f) != 0) {
-    fclose(f);
-    return ECHO_ERR_PLATFORM_IO;
-  }
-
-  fclose(f);
 
   /* Return position */
   pos_out->file_index = mgr->current_file_index;
@@ -198,6 +209,13 @@ echo_result_t block_storage_write(block_file_manager_t *mgr,
 
   /* Update current position */
   mgr->current_file_offset += record_size;
+  mgr->blocks_since_flush++;
+
+  /* Periodic flush for durability (every 100 blocks) */
+  if (mgr->blocks_since_flush >= BLOCK_STORAGE_FLUSH_INTERVAL) {
+    fflush(f);
+    mgr->blocks_since_flush = 0;
+  }
 
   return ECHO_OK;
 }
@@ -341,11 +359,20 @@ echo_result_t block_storage_file_exists(const block_file_manager_t *mgr,
 
 /*
  * Get the size of a block file.
+ *
+ * For the current write file, returns tracked offset (includes buffered data).
+ * For other files, queries the filesystem.
  */
 echo_result_t block_storage_get_file_size(const block_file_manager_t *mgr,
                                           uint32_t file_index, uint64_t *size) {
   if (mgr == NULL || size == NULL) {
     return ECHO_ERR_NULL_PARAM;
+  }
+
+  /* For current write file, use tracked offset (includes buffered data) */
+  if (file_index == mgr->current_file_index && mgr->current_file != NULL) {
+    *size = mgr->current_file_offset;
+    return ECHO_OK;
   }
 
   char path[512];
@@ -448,4 +475,46 @@ echo_result_t block_storage_get_lowest_file(const block_file_manager_t *mgr,
   }
 
   return ECHO_ERR_NOT_FOUND;
+}
+
+/*
+ * ============================================================================
+ * BATCHING OPERATIONS (IBD optimization)
+ * ============================================================================
+ */
+
+/*
+ * Flush buffered writes to disk.
+ */
+echo_result_t block_storage_flush(block_file_manager_t *mgr) {
+  if (mgr == NULL) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  if (mgr->current_file != NULL) {
+    FILE *f = (FILE *)mgr->current_file;
+    if (fflush(f) != 0) {
+      return ECHO_ERR_PLATFORM_IO;
+    }
+    mgr->blocks_since_flush = 0;
+  }
+
+  return ECHO_OK;
+}
+
+/*
+ * Close the block storage manager.
+ */
+void block_storage_close(block_file_manager_t *mgr) {
+  if (mgr == NULL) {
+    return;
+  }
+
+  if (mgr->current_file != NULL) {
+    FILE *f = (FILE *)mgr->current_file;
+    fflush(f);
+    fclose(f);
+    mgr->current_file = NULL;
+    mgr->blocks_since_flush = 0;
+  }
 }

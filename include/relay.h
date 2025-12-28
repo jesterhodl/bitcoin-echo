@@ -70,11 +70,16 @@ typedef struct {
 
 /**
  * Per-peer inventory state
+ *
+ * Uses a ring buffer to track announced inventory items.
+ * When full, new items overwrite the oldest (O(1) insertion).
  */
 typedef struct {
-  /* Inventory items this peer has announced */
+  /* Inventory items this peer has announced (ring buffer) */
   inventory_item_t items[MAX_PEER_INVENTORY];
-  size_t count;
+  size_t head;  /* Index of oldest item */
+  size_t tail;  /* Index of next write position */
+  size_t count; /* Number of items in buffer */
 
   /* Rate limiting */
   uint64_t last_inv_time;     /* Last time we received inv */
