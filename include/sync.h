@@ -119,6 +119,7 @@ typedef struct {
   uint64_t headers_sent_time; /* When getheaders was sent */
   hash256_t last_header_hash; /* Last header hash we sent getheaders for */
   uint32_t headers_received;  /* Number of headers received from this peer */
+  struct block_index *peer_best_header; /* Per-peer header tip for parallel sync */
 
   /* Block download state - tracking only, download_mgr manages assignments */
   uint32_t blocks_received; /* Number of blocks received from this peer */

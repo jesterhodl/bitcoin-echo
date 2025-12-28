@@ -104,10 +104,6 @@ struct sync_manager {
   /* Network latency baseline (kept for API compatibility, currently always 0) */
   uint64_t network_median_latency_ms;
 
-  /* Headers-first sync: single peer for header download (avoids 8x redundant requests) */
-  size_t headers_sync_peer_idx;        /* Index into peers[] array */
-  bool has_headers_sync_peer;          /* Whether we have a designated peer */
-
   /* Deferred header persistence: queue headers during SYNC_MODE_HEADERS,
    * flush all at once when transitioning to SYNC_MODE_BLOCKS. */
   pending_header_t *pending_headers;      /* Dynamic array of pending headers */
@@ -468,52 +464,6 @@ find_best_header_peer(sync_manager_t *mgr) {
 }
 
 /**
- * Select or validate the designated headers sync peer.
- *
- * During SYNC_MODE_HEADERS, we use a single peer for header download to avoid
- * redundant requests (previously we asked all peers for the same headers,
- * wasting 7/8 of bandwidth with 8 peers).
- *
- * Returns the peer_sync_state for the headers sync peer, or NULL if none available.
- * If the current designated peer is no longer suitable, selects a new one.
- */
-static peer_sync_state_t *get_headers_sync_peer(sync_manager_t *mgr) {
-  /* Check if current designated peer is still valid */
-  if (mgr->has_headers_sync_peer && mgr->headers_sync_peer_idx < mgr->peer_count) {
-    peer_sync_state_t *ps = &mgr->peers[mgr->headers_sync_peer_idx];
-    if (ps->sync_candidate && peer_is_ready(ps->peer)) {
-      return ps;
-    }
-    /* Current peer no longer suitable, need to pick a new one */
-    log_info(LOG_COMP_SYNC, "Headers sync peer no longer suitable, selecting new peer");
-    mgr->has_headers_sync_peer = false;
-  }
-
-  /* Select new headers sync peer: prefer highest start_height (has most chain) */
-  peer_sync_state_t *best = NULL;
-  int32_t best_height = -1;
-
-  for (size_t i = 0; i < mgr->peer_count; i++) {
-    peer_sync_state_t *ps = &mgr->peers[i];
-    if (ps->sync_candidate && peer_is_ready(ps->peer)) {
-      if (ps->start_height > best_height) {
-        best = ps;
-        best_height = ps->start_height;
-        mgr->headers_sync_peer_idx = i;
-      }
-    }
-  }
-
-  if (best) {
-    mgr->has_headers_sync_peer = true;
-    log_info(LOG_COMP_SYNC, "Selected headers sync peer: %s (height=%d)",
-             best->peer->address, best_height);
-  }
-
-  return best;
-}
-
-/**
  * Count sync-eligible peers.
  */
 static size_t count_sync_peers(const sync_manager_t *mgr) {
@@ -670,18 +620,6 @@ void sync_remove_peer(sync_manager_t *mgr, peer_t *peer) {
 
       /* Remove from download manager (handles unassigning in-flight blocks) */
       download_mgr_remove_peer(mgr->download_mgr, peer);
-
-      /* Handle headers sync peer tracking */
-      if (mgr->has_headers_sync_peer) {
-        if (mgr->headers_sync_peer_idx == i) {
-          /* This was our headers sync peer - need to pick a new one */
-          log_info(LOG_COMP_SYNC, "Headers sync peer disconnected, will select new peer");
-          mgr->has_headers_sync_peer = false;
-        } else if (mgr->headers_sync_peer_idx > i) {
-          /* Our headers sync peer is after the removed one - adjust index */
-          mgr->headers_sync_peer_idx--;
-        }
-      }
 
       /* Remove by shifting remaining peers */
       for (size_t j = i; j < mgr->peer_count - 1; j++) {
@@ -892,6 +830,11 @@ echo_result_t sync_handle_headers(sync_manager_t *mgr, peer_t *peer,
   ps->last_header_hash = headers[count - 1].prev_hash;
   block_header_hash(&headers[count - 1], &ps->last_header_hash);
 
+  /* Update per-peer header tip for parallel sync.
+   * This allows each peer to advance independently instead of all
+   * peers requesting from the same global best_header. */
+  ps->peer_best_header = prev_index;
+
   mgr->last_progress_time = plat_time_ms();
 
   /* If we got max headers, request more */
@@ -1034,12 +977,6 @@ void sync_process_timeouts(sync_manager_t *mgr) {
         (now - ps->headers_sent_time > SYNC_HEADERS_TIMEOUT_MS)) {
       ps->headers_in_flight = false;
       ps->timeout_count++;
-
-      /* If this was our designated headers sync peer, clear it so we pick a new one */
-      if (mgr->has_headers_sync_peer && mgr->headers_sync_peer_idx == i) {
-        log_info(LOG_COMP_SYNC, "Headers sync peer timed out, will select new peer");
-        mgr->has_headers_sync_peer = false;
-      }
     }
 
     /* Block stall detection is now handled by download_mgr_check_performance() */
@@ -1238,18 +1175,27 @@ void sync_tick(sync_manager_t *mgr) {
 
   switch (mgr->mode) {
   case SYNC_MODE_HEADERS: {
-    /* Single-peer header sync: use one designated peer to avoid redundant requests.
-     * Previously we asked ALL peers for the same headers, wasting 7/8 bandwidth. */
-    peer_sync_state_t *ps = get_headers_sync_peer(mgr);
-    if (!ps) {
-      /* No suitable peer available yet */
-      break;
-    }
+    /*
+     * Parallel header sync: request headers from ALL sync-candidate peers.
+     *
+     * libbitcoin-node style: Each peer runs an independent getheaders loop.
+     * This maximizes throughput by using all available peer bandwidth.
+     * Duplicate headers are harmless - sync_handle_headers() uses block_index_map
+     * lookup to detect and skip already-known headers efficiently.
+     */
+    uint64_t now = plat_time_ms();
 
-    /* Only send if no request in flight and retry interval passed (for timeouts) */
-    if (!ps->headers_in_flight) {
-      uint64_t now = plat_time_ms();
-      if (now - ps->headers_sent_time >= SYNC_HEADER_RETRY_INTERVAL_MS) {
+    for (size_t i = 0; i < mgr->peer_count; i++) {
+      peer_sync_state_t *ps = &mgr->peers[i];
+
+      /* Skip non-sync-candidate or disconnected peers */
+      if (!ps->sync_candidate || !peer_is_ready(ps->peer)) {
+        continue;
+      }
+
+      /* Only send if no request in flight and retry interval passed */
+      if (!ps->headers_in_flight &&
+          now - ps->headers_sent_time >= SYNC_HEADER_RETRY_INTERVAL_MS) {
         ps->headers_in_flight = true;
         ps->headers_sent_time = now;
 
@@ -1258,13 +1204,27 @@ void sync_tick(sync_manager_t *mgr) {
           hash256_t locator[SYNC_MAX_LOCATOR_HASHES];
           size_t locator_len = 0;
 
-          /* For headers-first sync, use best_header if we have received any
-           * headers. Otherwise fall back to chainstate tip (genesis). */
-          if (mgr->best_header != NULL) {
+          /*
+           * Per-peer header tracking: Each peer requests from its OWN tip.
+           *
+           * This is the key to parallel header sync efficiency. Without this,
+           * all peers request from the same global best_header and return the
+           * same headers, wasting 90%+ bandwidth on duplicates.
+           *
+           * Priority:
+           * 1. peer_best_header - where THIS peer left off
+           * 2. global best_header - for new peers joining mid-sync
+           * 3. chainstate tip (genesis) - initial state
+           */
+          block_index_t *locator_tip = ps->peer_best_header;
+          if (!locator_tip) {
+            locator_tip = mgr->best_header;
+          }
+
+          if (locator_tip != NULL) {
             block_index_map_t *map =
                 chainstate_get_block_index_map(mgr->chainstate);
-            sync_build_locator_from(map, mgr->best_header, locator,
-                                    &locator_len);
+            sync_build_locator_from(map, locator_tip, locator, &locator_len);
           } else {
             sync_build_locator(mgr->chainstate, locator, &locator_len);
           }
