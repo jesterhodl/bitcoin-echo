@@ -74,6 +74,9 @@ bool node_is_ibd_mode(const void *node) {
 void node_announce_block_to_peers(void *node, const void *block_hash) {
     (void)node; (void)block_hash; /* No-op in tests */
 }
+uint32_t node_get_validated_height(const void *node) {
+    (void)node; return 0; /* Return 0 so validation always proceeds */
+}
 
 /* Fake node for tests - just needs to be non-NULL */
 static int g_fake_node = 0;
