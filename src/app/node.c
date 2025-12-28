@@ -3209,6 +3209,9 @@ echo_result_t node_apply_block(node_t *node, const block_t *block) {
 
         log_info(LOG_COMP_DB, "Checkpoint at height %u (UTXO + validated tip)",
                  height);
+
+        /* Trigger pruning check after each checkpoint during IBD */
+        node_maybe_prune(node);
       } else {
         log_error(LOG_COMP_DB, "Failed to flush UTXO set at checkpoint: %d",
                   result);
