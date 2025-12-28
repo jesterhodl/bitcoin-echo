@@ -190,13 +190,17 @@ static void dm_send_getdata(peer_t *peer, const hash256_t *hashes, size_t count,
 
 /**
  * Callback wrapper: disconnect a slow/misbehaving peer.
- * For now, just log - actual disconnect is handled by peer management.
+ * Routes the disconnect request to node.c via the sync callbacks.
  */
 static void dm_disconnect_peer(peer_t *peer, const char *reason, void *ctx) {
-  (void)ctx;
+  sync_manager_t *mgr = (sync_manager_t *)ctx;
   log_warn(LOG_COMP_SYNC, "Download manager requests disconnect of %s: %s",
            peer->address, reason);
-  /* TODO: Actually disconnect the peer via peer_disconnect() */
+
+  /* Actually disconnect the peer via node callback */
+  if (mgr->callbacks.disconnect_peer != NULL) {
+    mgr->callbacks.disconnect_peer(peer, reason, mgr->callbacks.ctx);
+  }
 }
 
 /* ============================================================================

@@ -273,6 +273,9 @@ void download_mgr_add_peer(download_mgr_t *mgr, peer_t *peer) {
   memset(perf, 0, sizeof(peer_perf_t));
   perf->peer = peer;
   perf->window_start_time = plat_time_ms();
+  /* Initialize last_delivery_time to now so new peers aren't immediately
+   * flagged as stalled when blocks are first assigned to them */
+  perf->last_delivery_time = plat_time_ms();
 
   LOG_DEBUG("download_mgr: added peer, total=%zu", mgr->peer_count);
 }
@@ -525,11 +528,10 @@ void download_mgr_check_performance(download_mgr_t *mgr) {
         }
         perf->blocks_in_flight = 0;
 
-        /* Optionally disconnect stalled peer */
-        if (mgr->callbacks.disconnect_peer != NULL) {
-          mgr->callbacks.disconnect_peer(perf->peer, "stalled",
-                                         mgr->callbacks.ctx);
-        }
+        /* libbitcoin-style: DON'T disconnect on stall.
+         * Just take back their work and let them recover.
+         * The stalled flag prevents new work assignment until they deliver.
+         * This avoids mass-disconnect when network hiccups. */
       }
     }
 

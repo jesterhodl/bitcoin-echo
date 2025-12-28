@@ -38,9 +38,10 @@
 #define DOWNLOAD_PERF_WINDOW_MS 10000
 
 /* Stall timeout: if peer has work but delivers 0 bytes for this duration,
- * reassign all their work (10 seconds).
+ * reassign their work to other peers (30 seconds).
+ * libbitcoin-style: we take back work but DON'T disconnect - let peer recover.
  */
-#define DOWNLOAD_STALL_TIMEOUT_MS 10000
+#define DOWNLOAD_STALL_TIMEOUT_MS 30000
 
 /* Minimum peers required for standard deviation calculation.
  * Below this count, we don't drop "slow" peers.

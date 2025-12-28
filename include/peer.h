@@ -49,7 +49,8 @@ typedef enum {
   PEER_DISCONNECT_PEER_CLOSED,    /* Peer closed connection */
   PEER_DISCONNECT_NETWORK_ERROR,  /* Network I/O error */
   PEER_DISCONNECT_HANDSHAKE_FAIL, /* Handshake failed */
-  PEER_DISCONNECT_MISBEHAVING     /* Peer misbehavior (DoS protection) */
+  PEER_DISCONNECT_MISBEHAVING,    /* Peer misbehavior (DoS protection) */
+  PEER_DISCONNECT_STALLED         /* Peer stalled during sync (not serving blocks) */
 } peer_disconnect_reason_t;
 
 /**

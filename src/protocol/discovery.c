@@ -237,6 +237,11 @@ size_t discovery_query_dns_seeds(peer_addr_manager_t *manager) {
       addr.services = SERVICE_NODE_NETWORK | SERVICE_NODE_WITNESS;
       addr.timestamp = (uint32_t)(plat_time_ms() / 1000);
 
+      /* Check for duplicate before adding (same IP may appear in multiple seeds) */
+      if (find_address(manager, &addr) != NULL) {
+        continue;
+      }
+
       /* Add to manager */
       peer_addr_entry_t entry;
       memset(&entry, 0, sizeof(entry));

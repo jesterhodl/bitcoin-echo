@@ -169,6 +169,8 @@ static void sync_cb_send_getdata_blocks(peer_t *peer, const hash256_t *hashes,
 static echo_result_t sync_cb_get_block_hash_at_height(uint32_t height,
                                                        hash256_t *hash,
                                                        void *ctx);
+static void sync_cb_disconnect_peer(peer_t *peer, const char *reason,
+                                    void *ctx);
 
 /*
  * ============================================================================
@@ -200,6 +202,47 @@ static void node_accum_free(node_t *node) {
   node->accum_spent = NULL;
   node->accum_spent_count = 0;
   node->accum_spent_capacity = 0;
+}
+
+/**
+ * Accumulate spent outpoints for delta flush at next checkpoint.
+ * Grows the array if needed.
+ */
+static echo_result_t node_accum_spent(node_t *node, const outpoint_t *outpoints,
+                                       size_t count) {
+  if (count == 0) {
+    return ECHO_OK;
+  }
+
+  /* Grow array if needed */
+  size_t needed = node->accum_spent_count + count;
+  if (needed > node->accum_spent_capacity) {
+    size_t new_cap = node->accum_spent_capacity * 2;
+    while (new_cap < needed) {
+      new_cap *= 2;
+    }
+    outpoint_t *new_arr = realloc(node->accum_spent, new_cap * sizeof(outpoint_t));
+    if (new_arr == NULL) {
+      return ECHO_ERR_NOMEM;
+    }
+    node->accum_spent = new_arr;
+    node->accum_spent_capacity = new_cap;
+  }
+
+  /* Copy outpoints */
+  memcpy(&node->accum_spent[node->accum_spent_count], outpoints,
+         count * sizeof(outpoint_t));
+  node->accum_spent_count += count;
+
+  return ECHO_OK;
+}
+
+/**
+ * Clear accumulated spent outpoints (after checkpoint flush).
+ * Keeps the array allocated for reuse.
+ */
+static void node_accum_clear(node_t *node) {
+  node->accum_spent_count = 0;
 }
 
 /*
@@ -1739,6 +1782,22 @@ static void sync_cb_commit_header_batch(void *ctx) {
 }
 
 /**
+ * Disconnect a stalled/misbehaving peer.
+ * Uses PEER_DISCONNECT_STALLED to ensure proper cooldown.
+ */
+static void sync_cb_disconnect_peer(peer_t *peer, const char *reason,
+                                    void *ctx) {
+  node_t *node = (node_t *)ctx;
+  if (node == NULL || peer == NULL) {
+    return;
+  }
+
+  log_info(LOG_COMP_NET, "Disconnecting stalled peer %s: %s", peer->address,
+           reason);
+  node_disconnect_peer(node, peer, PEER_DISCONNECT_STALLED);
+}
+
+/**
  * Initialize sync manager with callbacks.
  */
 static echo_result_t node_init_sync(node_t *node) {
@@ -1768,6 +1827,7 @@ static echo_result_t node_init_sync(node_t *node) {
       .begin_header_batch = sync_cb_begin_header_batch,
       .commit_header_batch = sync_cb_commit_header_batch,
       .flush_headers = NULL,
+      .disconnect_peer = sync_cb_disconnect_peer,
       .ctx = node};
 
   /* Create sync manager with appropriate download window for mode */
@@ -2882,17 +2942,23 @@ echo_result_t node_maintenance(node_t *node) {
             ECHO_OK) {
           /*
            * Determine success based on disconnect reason:
+           * - STALLED, MISBEHAVING, PROTOCOL_ERROR = always failure (ignore duration)
            * - USER disconnect or long-lived connection = success
-           * - MISBEHAVING, PROTOCOL_ERROR, immediate disconnect = failure
+           * - Short-lived connections with other reasons = failure
            */
           echo_bool_t was_success = ECHO_FALSE;
           uint64_t connection_duration_ms =
               plat_time_ms() - peer->connect_time;
 
-          /* Consider successful if connection lasted > 5 minutes */
-          if (connection_duration_ms > 300000) {
-            was_success = ECHO_TRUE;
+          /* Explicit failures - never mark as success regardless of duration */
+          if (peer->disconnect_reason == PEER_DISCONNECT_STALLED ||
+              peer->disconnect_reason == PEER_DISCONNECT_MISBEHAVING ||
+              peer->disconnect_reason == PEER_DISCONNECT_PROTOCOL_ERROR) {
+            was_success = ECHO_FALSE;
           } else if (peer->disconnect_reason == PEER_DISCONNECT_USER) {
+            was_success = ECHO_TRUE;
+          } else if (connection_duration_ms > 300000) {
+            /* Long-lived connection with normal disconnect = success */
             was_success = ECHO_TRUE;
           }
 
@@ -3195,26 +3261,38 @@ echo_result_t node_apply_block(node_t *node, const block_t *block) {
         log_error(LOG_COMP_DB, "Failed to apply block to UTXO database: %d",
                   result);
       }
-    } else if (height % UTXO_PERSIST_INTERVAL == 0) {
-      /* IBD checkpoint: flush entire UTXO set to database */
-      result = node_flush_utxo_set_to_db(node, height);
+    } else {
+      /* IBD mode: accumulate spent outpoints for delta flush at checkpoint */
+      echo_result_t accum_result = node_accum_spent(node, spent_outpoints, spent_count);
+      if (accum_result != ECHO_OK) {
+        log_error(LOG_COMP_DB, "Failed to accumulate spent outpoints: %d",
+                  accum_result);
+      }
 
-      if (result == ECHO_OK) {
-        node->last_utxo_persist_height = height;
+      if (height % UTXO_PERSIST_INTERVAL == 0) {
+        /* IBD checkpoint: delta flush - delete spent, insert new */
+        result = node_flush_utxo_set_to_db(node, height);
 
-        /* Also persist validated tip */
-        if (node->block_index_db_open) {
-          block_index_db_set_validated_tip(&node->block_index_db, height, NULL);
+        if (result == ECHO_OK) {
+          node->last_utxo_persist_height = height;
+
+          /* Clear accumulator after successful flush */
+          node_accum_clear(node);
+
+          /* Also persist validated tip */
+          if (node->block_index_db_open) {
+            block_index_db_set_validated_tip(&node->block_index_db, height, NULL);
+          }
+
+          log_info(LOG_COMP_DB, "Checkpoint at height %u (UTXO + validated tip)",
+                   height);
+
+          /* Trigger pruning check after each checkpoint during IBD */
+          node_maybe_prune(node);
+        } else {
+          log_error(LOG_COMP_DB, "Failed to flush UTXO set at checkpoint: %d",
+                    result);
         }
-
-        log_info(LOG_COMP_DB, "Checkpoint at height %u (UTXO + validated tip)",
-                 height);
-
-        /* Trigger pruning check after each checkpoint during IBD */
-        node_maybe_prune(node);
-      } else {
-        log_error(LOG_COMP_DB, "Failed to flush UTXO set at checkpoint: %d",
-                  result);
       }
     }
 
@@ -3238,16 +3316,25 @@ echo_result_t node_apply_block(node_t *node, const block_t *block) {
 /* Context for UTXO flush callback */
 typedef struct {
   utxo_db_t *udb;
+  uint32_t min_height; /* Only insert UTXOs created above this height */
   size_t inserted;
   size_t skipped;
   echo_result_t result;
 } utxo_flush_ctx_t;
 
-/* Callback to insert each UTXO into the database */
+/* Callback to insert each UTXO into the database (delta-based) */
 static bool utxo_flush_callback(const utxo_entry_t *entry, void *user_data) {
   utxo_flush_ctx_t *ctx = (utxo_flush_ctx_t *)user_data;
   if (ctx == NULL || entry == NULL) {
     return false;
+  }
+
+  /* Delta-based flush: only insert UTXOs created since last checkpoint.
+   * UTXOs from earlier blocks were already persisted in previous checkpoints.
+   * This reduces checkpoint I/O from ~10M to ~50-100k operations. */
+  if (entry->height <= ctx->min_height) {
+    ctx->skipped++;
+    return true; /* Skip but continue iteration */
   }
 
   /* Try to insert (INSERT OR IGNORE handles duplicates) */
@@ -3265,10 +3352,12 @@ static bool utxo_flush_callback(const utxo_entry_t *entry, void *user_data) {
 }
 
 /**
- * Flush entire in-memory UTXO set to database.
+ * Delta-based UTXO flush to database.
  *
- * This iterates over all UTXOs in memory and inserts them into the database.
- * Used at checkpoints to persist the complete UTXO state.
+ * 1. DELETE spent UTXOs accumulated since last checkpoint
+ * 2. INSERT new UTXOs created since last checkpoint (height > last_persist)
+ *
+ * This reduces checkpoint I/O from ~10M full inserts to ~50-150k delta operations.
  */
 static echo_result_t node_flush_utxo_set_to_db(node_t *node, uint32_t height) {
   if (node == NULL || node->consensus == NULL) {
@@ -3290,15 +3379,16 @@ static echo_result_t node_flush_utxo_set_to_db(node_t *node, uint32_t height) {
   }
 
   size_t utxo_count = utxo_set_size(utxo_set);
-  log_info(LOG_COMP_DB, "Flushing %zu in-memory UTXOs to database (height=%u)",
-           utxo_count, height);
 
-  if (utxo_count == 0) {
-    /* Nothing to flush */
-    return ECHO_OK;
-  }
+  /* Delta-based flush: delete spent, insert new */
+  uint32_t min_height = node->last_utxo_persist_height;
+  size_t accum_count = node->accum_spent_count;
+  log_info(LOG_COMP_DB,
+           "Delta UTXO flush: %zu total UTXOs, deleting %zu spent, inserting "
+           "from height %u to %u",
+           utxo_count, accum_count, min_height + 1, height);
 
-  /* Begin transaction for bulk insert */
+  /* Begin transaction for atomic delta flush */
   echo_result_t result = db_begin(&node->utxo_db.db);
   if (result != ECHO_OK) {
     log_error(LOG_COMP_DB, "Failed to begin UTXO flush transaction: %d",
@@ -3306,15 +3396,33 @@ static echo_result_t node_flush_utxo_set_to_db(node_t *node, uint32_t height) {
     return result;
   }
 
-  /* Iterate and insert all UTXOs */
+  /* Step 1: DELETE accumulated spent outpoints */
+  size_t deleted = 0;
+  for (size_t i = 0; i < accum_count; i++) {
+    echo_result_t del_result = utxo_db_delete(&node->utxo_db,
+                                               &node->accum_spent[i]);
+    if (del_result == ECHO_OK) {
+      deleted++;
+    } else if (del_result != ECHO_ERR_NOT_FOUND) {
+      /* NOT_FOUND is OK (UTXO created and spent in same interval) */
+      log_error(LOG_COMP_DB, "Failed to delete spent UTXO: %d", del_result);
+      (void)db_rollback(&node->utxo_db.db);
+      return del_result;
+    }
+  }
+
+  /* Step 2: INSERT new UTXOs (height > min_height) */
   utxo_flush_ctx_t ctx = {
       .udb = &node->utxo_db,
+      .min_height = min_height,
       .inserted = 0,
       .skipped = 0,
       .result = ECHO_OK,
   };
 
-  utxo_set_foreach(utxo_set, utxo_flush_callback, &ctx);
+  if (utxo_count > 0) {
+    utxo_set_foreach(utxo_set, utxo_flush_callback, &ctx);
+  }
 
   if (ctx.result != ECHO_OK) {
     log_error(LOG_COMP_DB, "UTXO flush failed: %d", ctx.result);
@@ -3333,10 +3441,10 @@ static echo_result_t node_flush_utxo_set_to_db(node_t *node, uint32_t height) {
   /* IBD profiling - log flush timing */
   uint64_t flush_elapsed = plat_monotonic_ms() - flush_start;
   log_info(LOG_COMP_DB,
-           "UTXO flush complete in %lums: %zu inserted, %zu skipped "
-           "(rate=%.1f/ms)",
-           (unsigned long)flush_elapsed, ctx.inserted, ctx.skipped,
-           flush_elapsed > 0 ? (double)ctx.inserted / flush_elapsed : 0.0);
+           "Delta UTXO flush complete in %lums: %zu deleted, %zu inserted, "
+           "%zu skipped (rate=%.1f ops/ms)",
+           (unsigned long)flush_elapsed, deleted, ctx.inserted, ctx.skipped,
+           flush_elapsed > 0 ? (double)(deleted + ctx.inserted) / flush_elapsed : 0.0);
 
   return ECHO_OK;
 }

@@ -316,6 +316,19 @@ typedef struct {
    */
   echo_result_t (*flush_headers)(void *ctx);
 
+  /**
+   * Disconnect a misbehaving or stalled peer.
+   *
+   * Called when the sync/download manager determines a peer should be
+   * disconnected (e.g., stalled, slow, or misbehaving).
+   *
+   * Parameters:
+   *   peer   - Peer to disconnect
+   *   reason - Human-readable reason for disconnection
+   *   ctx    - User context
+   */
+  void (*disconnect_peer)(peer_t *peer, const char *reason, void *ctx);
+
   /* Context pointer passed to all callbacks */
   void *ctx;
 } sync_callbacks_t;
