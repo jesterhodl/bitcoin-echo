@@ -45,6 +45,18 @@
 #define HEADERS_RACE_ROUNDS 3
 
 /**
+ * Minimum peers required before declaring a race winner.
+ * Ensures we have enough candidates to make a good selection.
+ */
+#define HEADERS_RACE_MIN_PEERS 8
+
+/**
+ * Maximum time (ms) to wait for minimum peers before selecting winner.
+ * After this timeout, select best from whoever has completed the race.
+ */
+#define HEADERS_RACE_TIMEOUT_MS 10000
+
+/**
  * Pending header entry for deferred persistence.
  *
  * During SYNC_MODE_HEADERS, we keep headers in memory and defer database
@@ -116,6 +128,7 @@ struct sync_manager {
   bool headers_race_complete;       /* True once we've identified the fastest peer */
   size_t fastest_header_peer_idx;   /* Index of winning peer in peers[] array */
   uint64_t headers_race_start_time; /* When the race started */
+  uint64_t headers_race_min_peers_time; /* When we first hit MIN_PEERS threshold */
 
   /* Deferred header persistence: queue headers during SYNC_MODE_HEADERS,
    * flush all at once when transitioning to SYNC_MODE_BLOCKS. */
@@ -733,31 +746,43 @@ echo_result_t sync_handle_headers(sync_manager_t *mgr, peer_t *peer,
 
       /* Check if this peer has completed all race rounds */
       if (ps->headers_race_responses >= HEADERS_RACE_ROUNDS) {
-        /* Check if ANY peer has completed the race - select best so far */
+        /* Count how many peers have completed the race */
+        size_t completed_count = 0;
         size_t best_idx = 0;
         uint64_t best_avg = UINT64_MAX;
-        bool have_candidate = false;
 
         for (size_t i = 0; i < mgr->peer_count; i++) {
           peer_sync_state_t *candidate = &mgr->peers[i];
           if (candidate->headers_race_responses >= HEADERS_RACE_ROUNDS) {
+            completed_count++;
             uint64_t avg = candidate->headers_race_total_ms /
                            candidate->headers_race_responses;
             if (avg < best_avg) {
               best_avg = avg;
               best_idx = i;
-              have_candidate = true;
             }
           }
         }
 
-        if (have_candidate) {
-          mgr->headers_race_complete = true;
-          mgr->fastest_header_peer_idx = best_idx;
-          log_info(LOG_COMP_SYNC,
-                   "Headers race winner: peer %s (avg=%lums over %u rounds)",
-                   mgr->peers[best_idx].peer->address, (unsigned long)best_avg,
-                   HEADERS_RACE_ROUNDS);
+        /* Hybrid selection: wait for MIN_PEERS, then start timeout */
+        if (completed_count >= HEADERS_RACE_MIN_PEERS) {
+          /* First time hitting threshold - start the countdown */
+          if (mgr->headers_race_min_peers_time == 0) {
+            mgr->headers_race_min_peers_time = now;
+            log_info(LOG_COMP_SYNC,
+                     "Headers race: %zu peers ready, starting %ums selection timer",
+                     completed_count, HEADERS_RACE_TIMEOUT_MS);
+          }
+
+          /* Check if timeout has expired */
+          if (now - mgr->headers_race_min_peers_time >= HEADERS_RACE_TIMEOUT_MS) {
+            mgr->headers_race_complete = true;
+            mgr->fastest_header_peer_idx = best_idx;
+            log_info(LOG_COMP_SYNC,
+                     "Headers race winner: peer %s (avg=%lums over %u rounds, %zu candidates)",
+                     mgr->peers[best_idx].peer->address, (unsigned long)best_avg,
+                     HEADERS_RACE_ROUNDS, completed_count);
+          }
         }
       }
     }
