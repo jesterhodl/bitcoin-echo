@@ -2317,31 +2317,28 @@ static void node_handle_peer_message(node_t *node, peer_t *peer,
       log_debug(LOG_COMP_NET, "Sent GETADDR to peer %s", peer->address);
 
       /*
-       * During IBD, disconnect pruned peers immediately to free connection
-       * slots for full archival nodes that can serve historical blocks.
+       * libbitcoin-style: Keep pruned peers connected but don't use them for
+       * block downloads during IBD. Pruned peers are still useful for:
+       *   - Headers sync (they have headers)
+       *   - Transaction relay (after IBD)
+       *   - Address discovery (getaddr)
        *
        * Per BIP-159:
        *   - Pruned nodes: MUST NOT set NODE_NETWORK, only NODE_NETWORK_LIMITED
        *   - Full archival nodes: Set NODE_NETWORK, MAY also set NODE_NETWORK_LIMITED
        *
-       * So checking NODE_NETWORK is sufficient - if set, peer can serve all blocks.
-       * Full nodes often signal BOTH bits, so we must NOT reject based on LIMITED.
+       * Only add NODE_NETWORK peers to sync manager for block downloads.
        */
       bool is_full_node = (peer->services & SERVICE_NODE_NETWORK) != 0;
-      bool is_ibd = node->ibd_mode;
 
-      if (is_ibd && !is_full_node) {
-        log_info(LOG_COMP_NET,
-                 "Disconnecting pruned peer %s (services=0x%llx) - need full "
-                 "nodes for IBD",
-                 peer->address, (unsigned long long)peer->services);
-        peer_disconnect(peer, PEER_DISCONNECT_USER, "Pruned peer during IBD");
-        break;
-      }
-
-      /* Add full nodes to sync manager */
-      if (node->sync_mgr != NULL) {
+      /* Add only full nodes to sync manager for block downloads */
+      if (node->sync_mgr != NULL && is_full_node) {
         sync_add_peer(node->sync_mgr, peer, peer->start_height);
+      } else if (!is_full_node) {
+        log_debug(LOG_COMP_NET,
+                  "Keeping pruned peer %s connected (services=0x%llx) - "
+                  "useful for headers/relay, just not for IBD blocks",
+                  peer->address, (unsigned long long)peer->services);
       }
     }
     break;
@@ -2957,15 +2954,20 @@ echo_result_t node_maintenance(node_t *node) {
   /*
    * Try multiple connections per cycle when below target.
    * During IBD, bandwidth is critical - fill peer slots aggressively.
-   * - Below 50%: try up to 8 connections per cycle
-   * - Below 75%: try up to 4 connections per cycle
-   * - Below target: try up to 2 connections per cycle
+   * Many peers are pruned nodes that get disconnected after handshake,
+   * so we need to attempt many more connections than we need.
+   * - Below 25%: try up to 20 connections per cycle (aggressive recovery)
+   * - Below 50%: try up to 12 connections per cycle
+   * - Below 75%: try up to 6 connections per cycle
+   * - Below target: try up to 3 connections per cycle
    */
-  size_t max_attempts = 2; /* Always try at least 2 when below target */
-  if (outbound_count < target_peers / 2) {
-    max_attempts = 8;
+  size_t max_attempts = 3; /* Always try at least 3 when below target */
+  if (outbound_count < target_peers / 4) {
+    max_attempts = 20; /* Aggressive: only ~30-40% of network is full nodes */
+  } else if (outbound_count < target_peers / 2) {
+    max_attempts = 12;
   } else if (outbound_count < (target_peers * 3) / 4) {
-    max_attempts = 4;
+    max_attempts = 6;
   }
 
   size_t attempts = 0;

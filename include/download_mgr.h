@@ -26,18 +26,30 @@
  * ============================================================================
  */
 
-/* Blocks per batch.
- * libbitcoin-style: Large batches maximize throughput.
- * Downloads happen out-of-order; validation happens in-order separately.
- * No "head-of-line blocking" concern - validation naturally catches up.
+/* Dynamic batch sizing based on height.
+ *
+ * Early blocks are tiny (coinbase only) and critical for validation progress.
+ * If a slow peer gets the first batch, validation stalls completely.
+ * Use smaller batches early to minimize head-of-line blocking.
+ *
+ * Height ranges and batch sizes (powers of 2):
+ *   0-10000:       16 blocks (tiny blocks, critical path)
+ *   10000-50000:   32 blocks
+ *   50000-100000:  64 blocks
+ *   100000-200000: 128 blocks
+ *   200000+:       256 blocks (full size for throughput)
  */
-#define DOWNLOAD_BATCH_SIZE 500
+#define DOWNLOAD_BATCH_SIZE_16 16
+#define DOWNLOAD_BATCH_SIZE_32 32
+#define DOWNLOAD_BATCH_SIZE_64 64
+#define DOWNLOAD_BATCH_SIZE_128 128
+#define DOWNLOAD_BATCH_SIZE_256 256
 
-/* Maximum batches in the queue.
- * 100 batches * 500 blocks = 50,000 blocks max in queue.
- * Matches libbitcoin-node's maximum_concurrency default.
- */
-#define DOWNLOAD_MAX_BATCHES 100
+/* Maximum batch size (for array allocation) */
+#define DOWNLOAD_BATCH_SIZE_MAX 256
+
+/* Maximum batches in the queue. */
+#define DOWNLOAD_MAX_BATCHES 200
 
 /* Maximum peers to track. */
 #define DOWNLOAD_MAX_PEERS 256
@@ -60,11 +72,11 @@
  * "starved" and triggers work splitting from the slowest peer.
  */
 typedef struct work_batch {
-  hash256_t hashes[DOWNLOAD_BATCH_SIZE];   /* Block hashes in this batch */
-  uint32_t heights[DOWNLOAD_BATCH_SIZE];   /* Corresponding heights */
-  size_t count;                            /* Number of blocks in batch (1-64) */
-  size_t remaining;                        /* Blocks not yet received */
-  uint64_t assigned_time;                  /* When assigned to peer (0 if queued) */
+  hash256_t hashes[DOWNLOAD_BATCH_SIZE_MAX]; /* Block hashes in this batch */
+  uint32_t heights[DOWNLOAD_BATCH_SIZE_MAX]; /* Corresponding heights */
+  size_t count;                              /* Number of blocks in batch (variable) */
+  size_t remaining;                          /* Blocks not yet received */
+  uint64_t assigned_time;                    /* When assigned to peer (0 if queued) */
 } work_batch_t;
 
 /* ============================================================================

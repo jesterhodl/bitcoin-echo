@@ -77,6 +77,26 @@ static batch_node_t *batch_node_create(void) {
 static void batch_node_destroy(batch_node_t *node) { free(node); }
 
 /**
+ * Get batch size for a given block height.
+ *
+ * Early blocks are tiny and critical for validation progress.
+ * Use smaller batches to minimize head-of-line blocking.
+ */
+static size_t get_batch_size_for_height(uint32_t height) {
+  if (height < 10000) {
+    return DOWNLOAD_BATCH_SIZE_16;
+  } else if (height < 50000) {
+    return DOWNLOAD_BATCH_SIZE_32;
+  } else if (height < 100000) {
+    return DOWNLOAD_BATCH_SIZE_64;
+  } else if (height < 200000) {
+    return DOWNLOAD_BATCH_SIZE_128;
+  } else {
+    return DOWNLOAD_BATCH_SIZE_256;
+  }
+}
+
+/**
  * Add batch to end of queue.
  */
 static void queue_push_back(download_mgr_t *mgr, batch_node_t *node) {
@@ -343,9 +363,12 @@ size_t download_mgr_add_work(download_mgr_t *mgr, const hash256_t *hashes,
       break;
     }
 
-    /* Fill the batch with up to DOWNLOAD_BATCH_SIZE blocks */
+    /* Determine batch size based on starting height */
+    size_t target_batch_size = get_batch_size_for_height(heights[i]);
+
+    /* Fill the batch with up to target_batch_size blocks */
     size_t batch_count = 0;
-    while (batch_count < DOWNLOAD_BATCH_SIZE && i < count) {
+    while (batch_count < target_batch_size && i < count) {
       memcpy(&node->batch.hashes[batch_count], &hashes[i], sizeof(hash256_t));
       node->batch.heights[batch_count] = heights[i];
       batch_count++;
@@ -371,8 +394,7 @@ size_t download_mgr_add_work(download_mgr_t *mgr, const hash256_t *hashes,
   }
 
   if (added > 0) {
-    LOG_DEBUG("download_mgr: added %zu blocks in %zu batches, queue=%zu", added,
-              (added + DOWNLOAD_BATCH_SIZE - 1) / DOWNLOAD_BATCH_SIZE,
+    LOG_DEBUG("download_mgr: added %zu blocks, queue now has %zu batches", added,
               mgr->queue_count);
   }
 

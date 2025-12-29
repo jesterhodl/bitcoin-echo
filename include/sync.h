@@ -80,8 +80,8 @@ typedef struct chase_dispatcher chase_dispatcher_t;
  * Note: The actual work queue and batch distribution is handled by
  * download_mgr which limits per-peer in-flight to 16 blocks.
  */
-#define SYNC_BLOCK_DOWNLOAD_WINDOW_ARCHIVAL 50000
-#define SYNC_BLOCK_DOWNLOAD_WINDOW_PRUNED 50000
+#define SYNC_BLOCK_DOWNLOAD_WINDOW_ARCHIVAL 100000
+#define SYNC_BLOCK_DOWNLOAD_WINDOW_PRUNED 100000
 
 /* Default for backward compatibility */
 #define SYNC_BLOCK_DOWNLOAD_WINDOW SYNC_BLOCK_DOWNLOAD_WINDOW_ARCHIVAL
