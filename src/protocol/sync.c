@@ -189,9 +189,11 @@ static void dm_disconnect_peer(peer_t *peer, const char *reason, void *ctx) {
 /**
  * Handle chase events for download coordination.
  *
+ * PULL model: Events trigger peers to request work, not coordinator to push.
+ *
  * Responds to:
- * - CHASE_STARVED: A chaser needs more work, distribute pending blocks
- * - CHASE_SPLIT: Split work from a slow peer
+ * - CHASE_STARVED: A chaser needs more work (triggers peer_starved flow)
+ * - CHASE_SPLIT: Split work from a slow peer (triggers peer_split)
  */
 static bool sync_chase_handler(chase_event_t event, chase_value_t value,
                                void *context) {
@@ -203,33 +205,37 @@ static bool sync_chase_handler(chase_event_t event, chase_value_t value,
   switch (event) {
   case CHASE_STARVED: {
     /* A downstream chaser needs more blocks.
-     * libbitcoin-style: First try to distribute pending work.
-     * If no pending work, steal from the slowest peer. */
-    size_t distributed = download_mgr_distribute_work(mgr->download_mgr);
-    if (distributed == 0) {
-      /* No pending work - steal from slowest peer */
-      size_t stolen = download_mgr_steal_from_slowest(mgr->download_mgr);
-      if (stolen > 0) {
-        log_debug(LOG_COMP_SYNC, "CHASE_STARVED: stole %zu blocks, redistributing", stolen);
-        download_mgr_distribute_work(mgr->download_mgr);
+     * PULL model: Find any idle peer and have them request work.
+     * If no work available, peer_starved() triggers split from slowest. */
+    for (size_t i = 0; i < mgr->peer_count; i++) {
+      peer_sync_state_t *ps = &mgr->peers[i];
+      if (ps->sync_candidate && peer_is_ready(ps->peer)) {
+        if (download_mgr_peer_is_idle(mgr->download_mgr, ps->peer)) {
+          bool got_work = download_mgr_peer_request_work(mgr->download_mgr, ps->peer);
+          if (!got_work) {
+            /* Queue empty - trigger starved/split flow */
+            download_mgr_peer_starved(mgr->download_mgr, ps->peer);
+            /* After split, try requesting work again */
+            download_mgr_peer_request_work(mgr->download_mgr, ps->peer);
+          }
+          log_debug(LOG_COMP_SYNC, "CHASE_STARVED: peer %s requested work (got=%s)",
+                    ps->peer->address, got_work ? "yes" : "no");
+          break; /* One peer at a time */
+        }
       }
-    } else {
-      log_debug(LOG_COMP_SYNC, "CHASE_STARVED: distributed %zu pending blocks", distributed);
     }
     break;
   }
 
   case CHASE_SPLIT: {
-    /* Split work from a slow peer (peer pointer in value.object) */
+    /* Split work from a slow peer (peer pointer in value.object).
+     * PULL model: peer_split() returns ALL work and disconnects peer. */
     peer_t *slow_peer = (peer_t *)value.object;
     if (slow_peer) {
       log_debug(LOG_COMP_SYNC, "CHASE_SPLIT: splitting work from peer %s",
                 slow_peer->address);
-      size_t split = download_mgr_split_work(mgr->download_mgr, slow_peer);
-      if (split > 0) {
-        /* Redistribute the split work to other peers */
-        download_mgr_distribute_work(mgr->download_mgr);
-      }
+      download_mgr_peer_split(mgr->download_mgr, slow_peer);
+      /* Work is now back in queue - idle peers will pull it */
     }
     break;
   }
@@ -579,7 +585,7 @@ sync_manager_t *sync_create(chainstate_t *chainstate,
       .send_getdata = dm_send_getdata,
       .disconnect_peer = dm_disconnect_peer,
       .ctx = mgr};
-  mgr->download_mgr = download_mgr_create(&dm_callbacks, download_window);
+  mgr->download_mgr = download_mgr_create(&dm_callbacks);
   if (!mgr->download_mgr) {
     free(mgr);
     return NULL;
@@ -686,6 +692,16 @@ void sync_add_peer(sync_manager_t *mgr, peer_t *peer, int32_t height) {
   /* Add to download manager for performance tracking (if sync candidate) */
   if (ps->sync_candidate) {
     download_mgr_add_peer(mgr->download_mgr, peer);
+
+    /* PULL model: Immediately give work to new peer if in BLOCKS mode.
+     * Don't make them wait for sync_tick - put them to work now! */
+    if (mgr->mode == SYNC_MODE_BLOCKS && peer_is_ready(peer)) {
+      bool got_work = download_mgr_peer_request_work(mgr->download_mgr, peer);
+      if (got_work) {
+        log_debug(LOG_COMP_SYNC, "Immediately assigned work to new peer %s",
+                  peer->address);
+      }
+    }
   }
 
   log_info(LOG_COMP_SYNC, "Added peer %s to sync_mgr: height=%d, our_height=%u, "
@@ -1162,10 +1178,18 @@ echo_result_t sync_handle_block(sync_manager_t *mgr, peer_t *peer,
       chase_notify_height(mgr->dispatcher, CHASE_CHECKED, block_index->height);
     }
 
-    /* Immediate follow-up: distribute more work to keep peers busy.
-     * This is the same optimization as header sync - don't wait for sync_tick.
-     * When a peer delivers a block, they now have capacity for more work. */
-    download_mgr_distribute_work(mgr->download_mgr);
+    /* PULL model: Check if peer is now idle (batch complete) and have them
+     * request more work immediately. This keeps peers busy without waiting
+     * for sync_tick. */
+    if (download_mgr_peer_is_idle(mgr->download_mgr, peer)) {
+      bool got_work = download_mgr_peer_request_work(mgr->download_mgr, peer);
+      if (!got_work) {
+        /* Queue empty - peer is starved, trigger split from slowest */
+        download_mgr_peer_starved(mgr->download_mgr, peer);
+        /* After split, try again */
+        download_mgr_peer_request_work(mgr->download_mgr, peer);
+      }
+    }
   }
 
   mgr->blocks_received_total++;
@@ -1651,43 +1675,28 @@ void sync_tick(sync_manager_t *mgr) {
       }
     }
 
-    /* Distribute pending work to peers with capacity */
-    download_mgr_distribute_work(mgr->download_mgr);
-
-    /* libbitcoin-style work stealing: If starved (no pending work but peers
-     * have work), steal from the slowest peer. This naturally rebalances
-     * work toward faster peers over time. */
-    size_t stolen = download_mgr_steal_from_slowest(mgr->download_mgr);
-    if (stolen > 0) {
-      /* Redistribute the stolen work immediately */
-      download_mgr_distribute_work(mgr->download_mgr);
-    }
-
-    /* libbitcoin-style blocking block handling:
-     *
-     * When validation is blocked waiting for the next sequential block, we
-     * DON'T flood multiple peers with duplicate requests (which was DDoS-like
-     * behavior sending 50+ requests for the same block every few seconds).
-     *
-     * Instead, we:
-     * 1. Unassign the blocking block from its current peer (make it pending)
-     * 2. Put that peer on cooldown so they don't immediately get it back
-     * 3. Let distribute_work() assign it to a different peer
-     *
-     * This is the libbitcoin model: each block is only ever assigned to ONE
-     * peer at a time. No duplicate requests. Clean, efficient, network-friendly.
+    /* PULL model: Have idle peers request work.
+     * This replaces the old distribute_work() PUSH approach.
+     * Peers pull work when their batch is complete (idle).
      */
-    uint32_t validated_height = chainstate_get_height(mgr->chainstate);
-    size_t blocking_stolen = download_mgr_steal_blocking_work(
-        mgr->download_mgr, validated_height,
-        DOWNLOAD_BLOCKING_TIMEOUT_MS);  /* 2 seconds before reassignment */
-    if (blocking_stolen > 0) {
-      /* Redistribute the unassigned work to another peer immediately */
-      download_mgr_distribute_work(mgr->download_mgr);
+    for (size_t i = 0; i < mgr->peer_count; i++) {
+      peer_sync_state_t *ps = &mgr->peers[i];
+      if (!ps->sync_candidate || !peer_is_ready(ps->peer)) {
+        continue;
+      }
+
+      if (download_mgr_peer_is_idle(mgr->download_mgr, ps->peer)) {
+        bool got_work = download_mgr_peer_request_work(mgr->download_mgr, ps->peer);
+        if (!got_work && download_mgr_inflight_count(mgr->download_mgr) > 0) {
+          /* Queue empty but work in flight - peer is starved.
+           * Trigger split from slowest peer to rebalance work. */
+          download_mgr_peer_starved(mgr->download_mgr, ps->peer);
+          /* After split, try again */
+          download_mgr_peer_request_work(mgr->download_mgr, ps->peer);
+        }
+      }
     }
 
-    /* Check for stalls and reassign work from slow/stalled peers */
-    download_mgr_check_performance(mgr->download_mgr);
     break;
   }
 
@@ -1813,7 +1822,9 @@ void sync_get_metrics(sync_manager_t *mgr, sync_metrics_t *metrics) {
   }
 
   /* Initialize with defaults */
-  metrics->blocks_per_second = 0.0f;
+  metrics->download_rate = 0.0f;
+  metrics->validation_rate = 0.0f;
+  metrics->pending_validation = 0;
   metrics->eta_seconds = 0;
   metrics->network_median_latency = 0;
   metrics->active_sync_peers = 0;
@@ -1830,13 +1841,40 @@ void sync_get_metrics(sync_manager_t *mgr, sync_metrics_t *metrics) {
   /* Mode string */
   metrics->mode_string = sync_mode_string(progress.mode);
 
-  /* Calculate blocks per second from overall sync progress */
-  metrics->blocks_per_second = calc_blocks_per_second(mgr);
+  /* VALIDATION RATE: Blocks added to chain per second (strict order)
+   * This is the rate we can advance the chainstate tip. */
+  metrics->validation_rate = calc_blocks_per_second(mgr);
 
-  /* ETA in seconds */
-  if (metrics->blocks_per_second > 0 && progress.best_header_height > progress.tip_height) {
+  /* DOWNLOAD RATE: Blocks received from network per second (any order)
+   * This shows how fast we're getting data, regardless of ordering. */
+  if (mgr->block_sync_start_time > 0) {
+    uint64_t now = plat_time_ms();
+    uint64_t elapsed_ms = now - mgr->block_sync_start_time;
+    if (elapsed_ms > 0) {
+      metrics->download_rate =
+          (float)mgr->blocks_received_total * 1000.0f / (float)elapsed_ms;
+    }
+  }
+
+  /* PENDING VALIDATION: Downloaded blocks waiting for their turn.
+   * This is the gap between download and validation.
+   * High value = head-of-line blocking (we have blocks but can't use them).
+   * This is blocks_received_total minus blocks_validated. */
+  uint32_t validated_height = chainstate_get_height(mgr->chainstate);
+  uint32_t validated_this_session = 0;
+  if (validated_height > mgr->block_sync_start_height) {
+    validated_this_session = validated_height - mgr->block_sync_start_height;
+  }
+  if (mgr->blocks_received_total > validated_this_session) {
+    metrics->pending_validation =
+        mgr->blocks_received_total - validated_this_session;
+  }
+
+  /* ETA in seconds (based on download rate - validation catches up naturally) */
+  if (metrics->download_rate > 0 &&
+      progress.best_header_height > progress.tip_height) {
     uint32_t remaining = progress.best_header_height - progress.tip_height;
-    metrics->eta_seconds = (uint64_t)(remaining / metrics->blocks_per_second);
+    metrics->eta_seconds = (uint64_t)(remaining / metrics->download_rate);
   }
 
   /* Network median latency from peer quality system */

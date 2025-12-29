@@ -2671,9 +2671,20 @@ static echo_result_t rpc_getsyncstatus(node_t *node, const json_value_t *params,
   json_builder_append(builder, ",\"sync_percentage\":");
   json_builder_number(builder, progress.sync_percentage);
 
-  /* Performance metrics from node (source of truth) */
-  json_builder_append(builder, ",\"blocks_per_second\":");
-  json_builder_number(builder, metrics.blocks_per_second);
+  /* Performance metrics from node (source of truth)
+   * KEY INSIGHT: download_rate and validation_rate are DIFFERENT:
+   * - download_rate: blocks arriving from network (any order)
+   * - validation_rate: blocks added to chain (strict order)
+   * When validation_rate << download_rate, we have head-of-line blocking.
+   */
+  json_builder_append(builder, ",\"download_rate\":");
+  json_builder_number(builder, metrics.download_rate);
+
+  json_builder_append(builder, ",\"validation_rate\":");
+  json_builder_number(builder, metrics.validation_rate);
+
+  json_builder_append(builder, ",\"pending_validation\":");
+  json_builder_uint(builder, metrics.pending_validation);
 
   json_builder_append(builder, ",\"eta_seconds\":");
   json_builder_uint(builder, metrics.eta_seconds);

@@ -1,14 +1,13 @@
 /**
- * Bitcoin Echo — Download Manager Unit Tests
+ * Bitcoin Echo — Download Manager Unit Tests (PULL Model)
  *
- * Tests performance-based block download functionality:
+ * Tests PULL-based block download functionality:
  * - Manager initialization and destruction
  * - Peer management (add/remove)
- * - Work queue operations
- * - Work distribution to peers
+ * - Work queue operations (batch-based)
+ * - Peer work requests (PULL model)
  * - Block receipt handling
- * - Stall detection
- * - Work splitting from slow peers
+ * - Starved/split handling
  * - Metrics and queries
  */
 
@@ -72,7 +71,7 @@ static void test_create_destroy(void) {
                                     .disconnect_peer = mock_disconnect_peer,
                                     .ctx = &ctx};
 
-  download_mgr_t *mgr = download_mgr_create(&callbacks, 1024);
+  download_mgr_t *mgr = download_mgr_create(&callbacks);
   if (mgr == NULL) {
     test_fail("failed to create manager");
     return;
@@ -98,7 +97,7 @@ static void test_create_destroy(void) {
 static void test_create_null_callbacks(void) {
   test_case("create with NULL callbacks");
 
-  download_mgr_t *mgr = download_mgr_create(NULL, 1024);
+  download_mgr_t *mgr = download_mgr_create(NULL);
   if (mgr != NULL) {
     test_fail("should fail with NULL callbacks");
     download_mgr_destroy(mgr);
@@ -121,7 +120,7 @@ static void test_add_peer(void) {
                                     .disconnect_peer = mock_disconnect_peer,
                                     .ctx = &ctx};
 
-  download_mgr_t *mgr = download_mgr_create(&callbacks, 1024);
+  download_mgr_t *mgr = download_mgr_create(&callbacks);
   mock_peer_t peer1 = {.id = 1};
 
   download_mgr_add_peer(mgr, (peer_t *)&peer1);
@@ -147,7 +146,7 @@ static void test_add_multiple_peers(void) {
                                     .disconnect_peer = mock_disconnect_peer,
                                     .ctx = &ctx};
 
-  download_mgr_t *mgr = download_mgr_create(&callbacks, 1024);
+  download_mgr_t *mgr = download_mgr_create(&callbacks);
   mock_peer_t peers[5];
 
   for (int i = 0; i < 5; i++) {
@@ -176,7 +175,7 @@ static void test_remove_peer(void) {
                                     .disconnect_peer = mock_disconnect_peer,
                                     .ctx = &ctx};
 
-  download_mgr_t *mgr = download_mgr_create(&callbacks, 1024);
+  download_mgr_t *mgr = download_mgr_create(&callbacks);
   mock_peer_t peer1 = {.id = 1};
   mock_peer_t peer2 = {.id = 2};
 
@@ -205,7 +204,7 @@ static void test_add_duplicate_peer(void) {
                                     .disconnect_peer = mock_disconnect_peer,
                                     .ctx = &ctx};
 
-  download_mgr_t *mgr = download_mgr_create(&callbacks, 1024);
+  download_mgr_t *mgr = download_mgr_create(&callbacks);
   mock_peer_t peer1 = {.id = 1};
 
   download_mgr_add_peer(mgr, (peer_t *)&peer1);
@@ -230,14 +229,14 @@ static void test_add_duplicate_peer(void) {
  */
 
 static void test_add_work(void) {
-  test_case("add work items");
+  test_case("add work items (creates batches)");
 
   test_ctx_t ctx = {0};
   download_callbacks_t callbacks = {.send_getdata = mock_send_getdata,
                                     .disconnect_peer = mock_disconnect_peer,
                                     .ctx = &ctx};
 
-  download_mgr_t *mgr = download_mgr_create(&callbacks, 1024);
+  download_mgr_t *mgr = download_mgr_create(&callbacks);
 
   hash256_t hashes[10];
   uint32_t heights[10];
@@ -260,6 +259,57 @@ static void test_add_work(void) {
     return;
   }
 
+  /* Should have created 1 batch (10 < 16 blocks per batch) */
+  if (download_mgr_queue_count(mgr) != 1) {
+    test_fail_uint("queue count", 1, download_mgr_queue_count(mgr));
+    download_mgr_destroy(mgr);
+    return;
+  }
+
+  download_mgr_destroy(mgr);
+  test_pass();
+}
+
+static void test_add_work_multiple_batches(void) {
+  test_case("add work creates multiple batches");
+
+  test_ctx_t ctx = {0};
+  download_callbacks_t callbacks = {.send_getdata = mock_send_getdata,
+                                    .disconnect_peer = mock_disconnect_peer,
+                                    .ctx = &ctx};
+
+  download_mgr_t *mgr = download_mgr_create(&callbacks);
+
+  /* Add enough blocks for 3 batches (batch_size * 2 + 1) */
+  size_t num_blocks = (size_t)DOWNLOAD_BATCH_SIZE * 2 + 1;
+  hash256_t *hashes = malloc(num_blocks * sizeof(hash256_t));
+  uint32_t *heights = malloc(num_blocks * sizeof(uint32_t));
+  for (size_t i = 0; i < num_blocks; i++) {
+    make_test_hash(&hashes[i], (uint32_t)(i + 100));
+    heights[i] = (uint32_t)(i + 100);
+  }
+
+  size_t added = download_mgr_add_work(mgr, hashes, heights, num_blocks);
+
+  if (added != num_blocks) {
+    test_fail_uint("blocks added", num_blocks, added);
+    free(hashes);
+    free(heights);
+    download_mgr_destroy(mgr);
+    return;
+  }
+
+  /* Should have created 3 batches */
+  if (download_mgr_queue_count(mgr) != 3) {
+    test_fail_uint("queue count", 3, download_mgr_queue_count(mgr));
+    free(hashes);
+    free(heights);
+    download_mgr_destroy(mgr);
+    return;
+  }
+
+  free(hashes);
+  free(heights);
   download_mgr_destroy(mgr);
   test_pass();
 }
@@ -272,7 +322,7 @@ static void test_has_block(void) {
                                     .disconnect_peer = mock_disconnect_peer,
                                     .ctx = &ctx};
 
-  download_mgr_t *mgr = download_mgr_create(&callbacks, 1024);
+  download_mgr_t *mgr = download_mgr_create(&callbacks);
 
   hash256_t hash1, hash2;
   uint32_t height1 = 100;
@@ -298,19 +348,19 @@ static void test_has_block(void) {
 }
 
 /* ============================================================================
- * Work Distribution Tests
+ * PULL Model Work Assignment Tests
  * ============================================================================
  */
 
-static void test_distribute_work(void) {
-  test_case("distribute work to peer");
+static void test_peer_request_work(void) {
+  test_case("peer requests work (PULL model)");
 
   test_ctx_t ctx = {0};
   download_callbacks_t callbacks = {.send_getdata = mock_send_getdata,
                                     .disconnect_peer = mock_disconnect_peer,
                                     .ctx = &ctx};
 
-  download_mgr_t *mgr = download_mgr_create(&callbacks, 1024);
+  download_mgr_t *mgr = download_mgr_create(&callbacks);
   mock_peer_t peer1 = {.id = 1};
 
   download_mgr_add_peer(mgr, (peer_t *)&peer1);
@@ -323,17 +373,25 @@ static void test_distribute_work(void) {
   }
   download_mgr_add_work(mgr, hashes, heights, 3);
 
-  size_t assigned = download_mgr_distribute_work(mgr);
+  /* Peer requests work - PULL model */
+  bool got_work = download_mgr_peer_request_work(mgr, (peer_t *)&peer1);
 
-  if (assigned != 3) {
-    test_fail_uint("blocks assigned", 3, assigned);
+  if (!got_work) {
+    test_fail("peer should get work");
     download_mgr_destroy(mgr);
     return;
   }
 
-  /* With batching optimization, all 3 blocks go in ONE getdata call */
+  /* Should have sent one getdata for the batch */
   if (ctx.getdata_calls != 1) {
-    test_fail_uint("getdata calls (batched)", 1, ctx.getdata_calls);
+    test_fail_uint("getdata calls", 1, ctx.getdata_calls);
+    download_mgr_destroy(mgr);
+    return;
+  }
+
+  /* All 3 blocks in the batch */
+  if (ctx.last_getdata_count != 3) {
+    test_fail_uint("getdata count", 3, ctx.last_getdata_count);
     download_mgr_destroy(mgr);
     return;
   }
@@ -348,39 +406,31 @@ static void test_distribute_work(void) {
   test_pass();
 }
 
-static void test_distribute_round_robin(void) {
-  test_case("distribute work round-robin");
+static void test_peer_request_no_work(void) {
+  test_case("peer request with empty queue");
 
   test_ctx_t ctx = {0};
   download_callbacks_t callbacks = {.send_getdata = mock_send_getdata,
                                     .disconnect_peer = mock_disconnect_peer,
                                     .ctx = &ctx};
 
-  download_mgr_t *mgr = download_mgr_create(&callbacks, 1024);
-  mock_peer_t peers[3];
-  for (int i = 0; i < 3; i++) {
-    peers[i].id = i;
-    download_mgr_add_peer(mgr, (peer_t *)&peers[i]);
+  download_mgr_t *mgr = download_mgr_create(&callbacks);
+  mock_peer_t peer1 = {.id = 1};
+
+  download_mgr_add_peer(mgr, (peer_t *)&peer1);
+
+  /* No work added - peer requests work */
+  bool got_work = download_mgr_peer_request_work(mgr, (peer_t *)&peer1);
+
+  if (got_work) {
+    test_fail("peer should not get work from empty queue");
+    download_mgr_destroy(mgr);
+    return;
   }
 
-  /* With batching, first peer fills to capacity (16) before next peer gets
-   * work. Add enough blocks to require all 3 peers: 48 blocks = 16 per peer */
-  hash256_t hashes[48];
-  uint32_t heights[48];
-  for (uint32_t i = 0; i < 48; i++) {
-    make_test_hash(&hashes[i], i + 100);
-    heights[i] = i + 100;
-  }
-  download_mgr_add_work(mgr, hashes, heights, 48);
-
-  download_mgr_distribute_work(mgr);
-
-  /* All three peers should have work (16 blocks each) */
-  download_metrics_t metrics;
-  download_mgr_get_metrics(mgr, &metrics);
-
-  if (metrics.active_peers != 3) {
-    test_fail_uint("active peers", 3, metrics.active_peers);
+  /* No getdata should be sent */
+  if (ctx.getdata_calls != 0) {
+    test_fail_uint("getdata calls", 0, ctx.getdata_calls);
     download_mgr_destroy(mgr);
     return;
   }
@@ -389,29 +439,106 @@ static void test_distribute_round_robin(void) {
   test_pass();
 }
 
-static void test_no_work_without_peers(void) {
-  test_case("no distribution without peers");
+static void test_peer_is_idle(void) {
+  test_case("peer idle check");
 
   test_ctx_t ctx = {0};
   download_callbacks_t callbacks = {.send_getdata = mock_send_getdata,
                                     .disconnect_peer = mock_disconnect_peer,
                                     .ctx = &ctx};
 
-  download_mgr_t *mgr = download_mgr_create(&callbacks, 1024);
+  download_mgr_t *mgr = download_mgr_create(&callbacks);
+  mock_peer_t peer1 = {.id = 1};
 
-  hash256_t hash;
-  uint32_t height = 100;
-  make_test_hash(&hash, height);
-  download_mgr_add_work(mgr, &hash, &height, 1);
+  download_mgr_add_peer(mgr, (peer_t *)&peer1);
 
-  size_t assigned = download_mgr_distribute_work(mgr);
-
-  if (assigned != 0) {
-    test_fail_uint("assigned without peers", 0, assigned);
+  /* Peer should be idle initially */
+  if (!download_mgr_peer_is_idle(mgr, (peer_t *)&peer1)) {
+    test_fail("peer should be idle initially");
     download_mgr_destroy(mgr);
     return;
   }
 
+  /* Add work and have peer request it */
+  hash256_t hash;
+  uint32_t height = 100;
+  make_test_hash(&hash, height);
+  download_mgr_add_work(mgr, &hash, &height, 1);
+  download_mgr_peer_request_work(mgr, (peer_t *)&peer1);
+
+  /* Peer should NOT be idle now */
+  if (download_mgr_peer_is_idle(mgr, (peer_t *)&peer1)) {
+    test_fail("peer should not be idle with work");
+    download_mgr_destroy(mgr);
+    return;
+  }
+
+  /* Receive the block - peer should be idle again */
+  download_mgr_block_received(mgr, (peer_t *)&peer1, &hash, 1000);
+
+  if (!download_mgr_peer_is_idle(mgr, (peer_t *)&peer1)) {
+    test_fail("peer should be idle after batch complete");
+    download_mgr_destroy(mgr);
+    return;
+  }
+
+  download_mgr_destroy(mgr);
+  test_pass();
+}
+
+static void test_multiple_peers_pull(void) {
+  test_case("multiple peers pull work");
+
+  test_ctx_t ctx = {0};
+  download_callbacks_t callbacks = {.send_getdata = mock_send_getdata,
+                                    .disconnect_peer = mock_disconnect_peer,
+                                    .ctx = &ctx};
+
+  download_mgr_t *mgr = download_mgr_create(&callbacks);
+  mock_peer_t peers[3];
+  for (int i = 0; i < 3; i++) {
+    peers[i].id = i;
+    download_mgr_add_peer(mgr, (peer_t *)&peers[i]);
+  }
+
+  /* Add exactly 3 batches worth of blocks */
+  size_t num_blocks = (size_t)DOWNLOAD_BATCH_SIZE * 3;
+  hash256_t *hashes = malloc(num_blocks * sizeof(hash256_t));
+  uint32_t *heights = malloc(num_blocks * sizeof(uint32_t));
+  for (size_t i = 0; i < num_blocks; i++) {
+    make_test_hash(&hashes[i], (uint32_t)(i + 100));
+    heights[i] = (uint32_t)(i + 100);
+  }
+  download_mgr_add_work(mgr, hashes, heights, num_blocks);
+
+  /* Each peer requests work */
+  for (int i = 0; i < 3; i++) {
+    download_mgr_peer_request_work(mgr, (peer_t *)&peers[i]);
+  }
+
+  /* All three peers should have work */
+  download_metrics_t metrics;
+  download_mgr_get_metrics(mgr, &metrics);
+
+  if (metrics.active_peers != 3) {
+    test_fail_uint("active peers", 3, metrics.active_peers);
+    free(hashes);
+    free(heights);
+    download_mgr_destroy(mgr);
+    return;
+  }
+
+  /* Queue should be empty (all batches assigned) */
+  if (download_mgr_queue_count(mgr) != 0) {
+    test_fail_uint("queue count", 0, download_mgr_queue_count(mgr));
+    free(hashes);
+    free(heights);
+    download_mgr_destroy(mgr);
+    return;
+  }
+
+  free(hashes);
+  free(heights);
   download_mgr_destroy(mgr);
   test_pass();
 }
@@ -429,7 +556,7 @@ static void test_block_received(void) {
                                     .disconnect_peer = mock_disconnect_peer,
                                     .ctx = &ctx};
 
-  download_mgr_t *mgr = download_mgr_create(&callbacks, 1024);
+  download_mgr_t *mgr = download_mgr_create(&callbacks);
   mock_peer_t peer1 = {.id = 1};
   download_mgr_add_peer(mgr, (peer_t *)&peer1);
 
@@ -437,7 +564,7 @@ static void test_block_received(void) {
   uint32_t height = 100;
   make_test_hash(&hash, height);
   download_mgr_add_work(mgr, &hash, &height, 1);
-  download_mgr_distribute_work(mgr);
+  download_mgr_peer_request_work(mgr, (peer_t *)&peer1);
 
   bool result = download_mgr_block_received(mgr, (peer_t *)&peer1, &hash, 1000);
 
@@ -447,6 +574,7 @@ static void test_block_received(void) {
     return;
   }
 
+  /* Batch complete - inflight should be 0 */
   if (download_mgr_inflight_count(mgr) != 0) {
     test_fail_uint("inflight after receive", 0, download_mgr_inflight_count(mgr));
     download_mgr_destroy(mgr);
@@ -465,7 +593,7 @@ static void test_unexpected_block(void) {
                                     .disconnect_peer = mock_disconnect_peer,
                                     .ctx = &ctx};
 
-  download_mgr_t *mgr = download_mgr_create(&callbacks, 1024);
+  download_mgr_t *mgr = download_mgr_create(&callbacks);
   mock_peer_t peer1 = {.id = 1};
   download_mgr_add_peer(mgr, (peer_t *)&peer1);
 
@@ -488,33 +616,97 @@ static void test_unexpected_block(void) {
 }
 
 /* ============================================================================
- * Block Completion Tests
+ * Starved/Split Tests
  * ============================================================================
  */
 
-static void test_block_complete(void) {
-  test_case("mark block complete");
+static void test_peer_starved(void) {
+  test_case("peer starved triggers split from slowest");
 
   test_ctx_t ctx = {0};
   download_callbacks_t callbacks = {.send_getdata = mock_send_getdata,
                                     .disconnect_peer = mock_disconnect_peer,
                                     .ctx = &ctx};
 
-  download_mgr_t *mgr = download_mgr_create(&callbacks, 1024);
+  download_mgr_t *mgr = download_mgr_create(&callbacks);
+  mock_peer_t peer1 = {.id = 1};
+  mock_peer_t peer2 = {.id = 2};
+  download_mgr_add_peer(mgr, (peer_t *)&peer1);
+  download_mgr_add_peer(mgr, (peer_t *)&peer2);
+
+  /* Give peer1 some work */
+  hash256_t hashes[16];
+  uint32_t heights[16];
+  for (uint32_t i = 0; i < 16; i++) {
+    make_test_hash(&hashes[i], i + 100);
+    heights[i] = i + 100;
+  }
+  download_mgr_add_work(mgr, hashes, heights, 16);
+  download_mgr_peer_request_work(mgr, (peer_t *)&peer1);
+
+  /* peer2 tries to request work but queue is empty */
+  bool got_work = download_mgr_peer_request_work(mgr, (peer_t *)&peer2);
+  if (got_work) {
+    test_fail("peer2 should not get work (queue empty)");
+    download_mgr_destroy(mgr);
+    return;
+  }
+
+  /* peer2 is starved - this should split from peer1 (slowest) */
+  download_mgr_peer_starved(mgr, (peer_t *)&peer2);
+
+  /* peer1 should have been disconnected (libbitcoin-style sacrifice) */
+  if (ctx.disconnect_calls != 1) {
+    test_fail_uint("disconnect calls", 1, ctx.disconnect_calls);
+    download_mgr_destroy(mgr);
+    return;
+  }
+
+  /* Work should be back in queue */
+  if (download_mgr_pending_count(mgr) != 16) {
+    test_fail_uint("pending after split", 16, download_mgr_pending_count(mgr));
+    download_mgr_destroy(mgr);
+    return;
+  }
+
+  download_mgr_destroy(mgr);
+  test_pass();
+}
+
+static void test_peer_split(void) {
+  test_case("split returns all work and disconnects");
+
+  test_ctx_t ctx = {0};
+  download_callbacks_t callbacks = {.send_getdata = mock_send_getdata,
+                                    .disconnect_peer = mock_disconnect_peer,
+                                    .ctx = &ctx};
+
+  download_mgr_t *mgr = download_mgr_create(&callbacks);
   mock_peer_t peer1 = {.id = 1};
   download_mgr_add_peer(mgr, (peer_t *)&peer1);
 
-  hash256_t hash;
-  uint32_t height = 100;
-  make_test_hash(&hash, height);
-  download_mgr_add_work(mgr, &hash, &height, 1);
-  download_mgr_distribute_work(mgr);
-  download_mgr_block_received(mgr, (peer_t *)&peer1, &hash, 1000);
+  hash256_t hashes[10];
+  uint32_t heights[10];
+  for (uint32_t i = 0; i < 10; i++) {
+    make_test_hash(&hashes[i], i + 100);
+    heights[i] = i + 100;
+  }
+  download_mgr_add_work(mgr, hashes, heights, 10);
+  download_mgr_peer_request_work(mgr, (peer_t *)&peer1);
 
-  download_mgr_block_complete(mgr, &hash, height);
+  /* Split from peer1 - returns ALL work and disconnects */
+  download_mgr_peer_split(mgr, (peer_t *)&peer1);
 
-  if (download_mgr_has_block(mgr, &hash)) {
-    test_fail("block should be removed after completion");
+  /* Peer should be disconnected */
+  if (ctx.disconnect_calls != 1) {
+    test_fail_uint("disconnect calls", 1, ctx.disconnect_calls);
+    download_mgr_destroy(mgr);
+    return;
+  }
+
+  /* ALL work should be back in queue (not half like old split_work) */
+  if (download_mgr_pending_count(mgr) != 10) {
+    test_fail_uint("pending after split", 10, download_mgr_pending_count(mgr));
     download_mgr_destroy(mgr);
     return;
   }
@@ -536,14 +728,14 @@ static void test_get_peer_stats(void) {
                                     .disconnect_peer = mock_disconnect_peer,
                                     .ctx = &ctx};
 
-  download_mgr_t *mgr = download_mgr_create(&callbacks, 1024);
+  download_mgr_t *mgr = download_mgr_create(&callbacks);
   mock_peer_t peer1 = {.id = 1};
   download_mgr_add_peer(mgr, (peer_t *)&peer1);
 
   float rate;
-  uint32_t in_flight;
+  uint32_t remaining;
   bool found =
-      download_mgr_get_peer_stats(mgr, (peer_t *)&peer1, &rate, &in_flight);
+      download_mgr_get_peer_stats(mgr, (peer_t *)&peer1, &rate, &remaining);
 
   if (!found) {
     test_fail("should find peer stats");
@@ -551,8 +743,8 @@ static void test_get_peer_stats(void) {
     return;
   }
 
-  if (in_flight != 0) {
-    test_fail_uint("initial in_flight", 0, in_flight);
+  if (remaining != 0) {
+    test_fail_uint("initial remaining", 0, remaining);
     download_mgr_destroy(mgr);
     return;
   }
@@ -569,13 +761,13 @@ static void test_get_unknown_peer_stats(void) {
                                     .disconnect_peer = mock_disconnect_peer,
                                     .ctx = &ctx};
 
-  download_mgr_t *mgr = download_mgr_create(&callbacks, 1024);
+  download_mgr_t *mgr = download_mgr_create(&callbacks);
   mock_peer_t unknown = {.id = 999};
 
   float rate;
-  uint32_t in_flight;
+  uint32_t remaining;
   bool found =
-      download_mgr_get_peer_stats(mgr, (peer_t *)&unknown, &rate, &in_flight);
+      download_mgr_get_peer_stats(mgr, (peer_t *)&unknown, &rate, &remaining);
 
   if (found) {
     test_fail("should not find unknown peer");
@@ -600,7 +792,7 @@ static void test_metrics(void) {
                                     .disconnect_peer = mock_disconnect_peer,
                                     .ctx = &ctx};
 
-  download_mgr_t *mgr = download_mgr_create(&callbacks, 1024);
+  download_mgr_t *mgr = download_mgr_create(&callbacks);
   mock_peer_t peer1 = {.id = 1};
   download_mgr_add_peer(mgr, (peer_t *)&peer1);
 
@@ -611,7 +803,7 @@ static void test_metrics(void) {
     heights[i] = i + 100;
   }
   download_mgr_add_work(mgr, hashes, heights, 5);
-  download_mgr_distribute_work(mgr);
+  download_mgr_peer_request_work(mgr, (peer_t *)&peer1);
 
   download_metrics_t metrics;
   download_mgr_get_metrics(mgr, &metrics);
@@ -645,51 +837,6 @@ static void test_metrics(void) {
 }
 
 /* ============================================================================
- * Work Splitting Tests
- * ============================================================================
- */
-
-static void test_split_work(void) {
-  test_case("split work from peer");
-
-  test_ctx_t ctx = {0};
-  download_callbacks_t callbacks = {.send_getdata = mock_send_getdata,
-                                    .disconnect_peer = mock_disconnect_peer,
-                                    .ctx = &ctx};
-
-  download_mgr_t *mgr = download_mgr_create(&callbacks, 1024);
-  mock_peer_t peer1 = {.id = 1};
-  download_mgr_add_peer(mgr, (peer_t *)&peer1);
-
-  hash256_t hashes[10];
-  uint32_t heights[10];
-  for (uint32_t i = 0; i < 10; i++) {
-    make_test_hash(&hashes[i], i + 100);
-    heights[i] = i + 100;
-  }
-  download_mgr_add_work(mgr, hashes, heights, 10);
-  download_mgr_distribute_work(mgr);
-
-  /* Split work from peer1 */
-  size_t split = download_mgr_split_work(mgr, (peer_t *)&peer1);
-
-  if (split != 5) { /* Half of 10 */
-    test_fail_uint("blocks split", 5, split);
-    download_mgr_destroy(mgr);
-    return;
-  }
-
-  if (download_mgr_pending_count(mgr) != 5) {
-    test_fail_uint("pending after split", 5, download_mgr_pending_count(mgr));
-    download_mgr_destroy(mgr);
-    return;
-  }
-
-  download_mgr_destroy(mgr);
-  test_pass();
-}
-
-/* ============================================================================
  * Remove Peer with Work Tests
  * ============================================================================
  */
@@ -702,7 +849,7 @@ static void test_remove_peer_with_work(void) {
                                     .disconnect_peer = mock_disconnect_peer,
                                     .ctx = &ctx};
 
-  download_mgr_t *mgr = download_mgr_create(&callbacks, 1024);
+  download_mgr_t *mgr = download_mgr_create(&callbacks);
   mock_peer_t peer1 = {.id = 1};
   download_mgr_add_peer(mgr, (peer_t *)&peer1);
 
@@ -713,7 +860,7 @@ static void test_remove_peer_with_work(void) {
     heights[i] = i + 100;
   }
   download_mgr_add_work(mgr, hashes, heights, 5);
-  download_mgr_distribute_work(mgr);
+  download_mgr_peer_request_work(mgr, (peer_t *)&peer1);
 
   /* Remove peer - work should return to pending */
   download_mgr_remove_peer(mgr, (peer_t *)&peer1);
@@ -742,7 +889,7 @@ static void test_remove_peer_with_work(void) {
  */
 
 int main(void) {
-  test_suite_begin("Download Manager tests");
+  test_suite_begin("Download Manager tests (PULL model)");
 
   /* Creation tests */
   test_create_destroy();
@@ -756,19 +903,22 @@ int main(void) {
 
   /* Work queue tests */
   test_add_work();
+  test_add_work_multiple_batches();
   test_has_block();
 
-  /* Work distribution tests */
-  test_distribute_work();
-  test_distribute_round_robin();
-  test_no_work_without_peers();
+  /* PULL model work assignment tests */
+  test_peer_request_work();
+  test_peer_request_no_work();
+  test_peer_is_idle();
+  test_multiple_peers_pull();
 
   /* Block receipt tests */
   test_block_received();
   test_unexpected_block();
 
-  /* Block completion tests */
-  test_block_complete();
+  /* Starved/split tests */
+  test_peer_starved();
+  test_peer_split();
 
   /* Peer stats tests */
   test_get_peer_stats();
@@ -776,9 +926,6 @@ int main(void) {
 
   /* Metrics tests */
   test_metrics();
-
-  /* Work splitting tests */
-  test_split_work();
 
   /* Peer removal with work tests */
   test_remove_peer_with_work();

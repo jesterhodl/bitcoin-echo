@@ -542,7 +542,7 @@ echo_result_t peer_queue_message(peer_t *peer, const msg_t *msg) {
 static echo_result_t peer_send_message_internal(peer_t *peer,
                                                 const msg_t *msg) {
   uint8_t header_buf[24];
-  uint8_t payload_buf[4096]; /* Most messages are small */
+  uint8_t payload_buf[20480]; /* 20KB: supports getdata with up to 555 blocks */
   size_t payload_len = 0;
   echo_result_t result;
 

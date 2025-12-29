@@ -608,9 +608,18 @@ uint64_t sync_estimate_remaining_time(const sync_progress_t *progress);
  *
  * Contains derived performance metrics calculated from internal sync state.
  * These are the "source of truth" metrics the GUI should display.
+ *
+ * KEY INSIGHT: Download and validation rates are DIFFERENT:
+ * - download_rate: Blocks received from network (any order)
+ * - validation_rate: Blocks added to chain (strict order)
+ *
+ * When validation_rate << download_rate, we have head-of-line blocking.
+ * pending_validation shows the gap (blocks downloaded but waiting).
  */
 typedef struct {
-  float blocks_per_second;          /* Current sync rate (blk/s) */
+  float download_rate;              /* Blocks downloaded per second */
+  float validation_rate;            /* Blocks validated per second */
+  uint32_t pending_validation;      /* Downloaded but not yet validated */
   uint64_t eta_seconds;             /* Estimated time remaining */
   uint64_t network_median_latency;  /* Network baseline latency (ms) */
   uint32_t active_sync_peers;       /* Peers actively contributing blocks */
