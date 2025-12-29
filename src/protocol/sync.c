@@ -38,23 +38,13 @@
 #define SYNC_MAX_PEERS 128
 
 /**
- * Number of rounds in header race before selecting winner.
- * Higher = more accurate selection, but slower to start single-peer mode.
- * 2 rounds filters lucky responses while keeping race duration short.
+ * Simple header sync: one peer at a time, probe occasionally for faster peers.
+ *
+ * HEADER_PROBE_INTERVAL: Every N successful batches, try one random peer.
+ * HEADER_SLOW_THRESHOLD_MS: If active peer takes longer than this, try another.
  */
-#define HEADERS_RACE_ROUNDS 2
-
-/**
- * Minimum peers required before declaring a race winner.
- * Matches HEADER_POOL_SIZE since we only need enough to fill the pool.
- */
-#define HEADERS_RACE_MIN_PEERS 8
-
-/**
- * Post-race pool management: top 8 peers form a pool, always use best performer.
- */
-#define HEADER_POOL_SIZE 8            /* Top 8 peers form the header pool */
-#define POOL_PROBE_INTERVAL 1         /* Probe non-active pool members every N responses */
+#define HEADER_PROBE_INTERVAL 5       /* Probe a random peer every 5 batches (10k headers) */
+#define HEADER_SLOW_THRESHOLD_MS 2000 /* Consider peer slow if batch takes >2s */
 
 /**
  * Rolling window size for blocks_per_second calculation.
@@ -135,17 +125,13 @@ struct sync_manager {
   /* Network latency baseline (kept for API compatibility, currently always 0) */
   uint64_t network_median_latency_ms;
 
-  /* Headers race: all peers compete, fastest wins and becomes designated peer.
-   * This avoids wasting bandwidth on duplicate headers from slower peers. */
-  bool headers_race_complete;       /* True once we've identified the fastest peer */
-  size_t fastest_header_peer_idx;   /* Index of winning peer in peers[] array */
-  uint64_t headers_race_start_time; /* When the race started */
-
-  /* Post-race pool: top 8 peers, always use best performer */
-  size_t header_pool_indices[HEADER_POOL_SIZE]; /* Indices of top 8 peers */
-  size_t header_pool_count;                     /* Number of peers in pool */
-  size_t active_pool_peer_idx;                  /* Currently active peer index (in peers[]) */
-  uint32_t active_peer_responses;               /* Responses since last pool evaluation */
+  /* Simple header sync: one peer at a time, probe occasionally for faster peers */
+  bool have_header_peer;            /* True once we have an active header peer */
+  size_t active_header_peer_idx;    /* Index of current header peer in peers[] */
+  uint32_t header_batch_count;      /* Batches received from active peer */
+  uint64_t last_header_response_ms; /* Response time of last batch (for performance) */
+  size_t probe_peer_idx;            /* Peer being probed (SIZE_MAX if none) */
+  uint64_t probe_sent_time;         /* When probe was sent */
 
   /* Deferred header persistence: queue headers during SYNC_MODE_HEADERS,
    * flush all at once when transitioning to SYNC_MODE_BLOCKS. */
@@ -624,6 +610,14 @@ sync_manager_t *sync_create(chainstate_t *chainstate,
   mgr->pending_headers_count = 0;
   mgr->pending_headers_capacity = 0;
 
+  /* Initialize simple header sync state */
+  mgr->have_header_peer = false;
+  mgr->active_header_peer_idx = SIZE_MAX;
+  mgr->header_batch_count = 0;
+  mgr->last_header_response_ms = 0;
+  mgr->probe_peer_idx = SIZE_MAX;
+  mgr->probe_sent_time = 0;
+
   /* Initialize best header to current tip_index (which should be the best
    * header after restoration, not the validated tip) */
   mgr->best_header = chainstate_get_tip_index(chainstate);
@@ -802,191 +796,75 @@ echo_result_t sync_handle_headers(sync_manager_t *mgr, peer_t *peer,
   /* Clear in-flight flag */
   ps->headers_in_flight = false;
 
-  /* Track response time for peer performance ranking.
-   * Used to identify the fastest peer in header sync race. */
+  /* Simple header sync: one peer at a time, probe occasionally for faster peers.
+   *
+   * Strategy:
+   * 1. First peer to respond with 2000 headers becomes active peer
+   * 2. Track response time for each batch
+   * 3. Every HEADER_PROBE_INTERVAL batches, send probe to ONE random peer
+   * 4. BOTH responses are useful (headers processed either way)
+   * 5. Whichever responds faster becomes/stays active (race to win)
+   *
+   * This is efficient: probes are never "wasted" since both responses
+   * contain headers we need. We just naturally select the faster peer.
+   */
   uint64_t now = plat_time_ms();
+  size_t peer_idx = (size_t)(ps - mgr->peers);
+
   if (ps->headers_sent_time > 0 && count == SYNC_MAX_HEADERS_PER_REQUEST) {
     uint64_t response_ms = now - ps->headers_sent_time;
 
-    /* Accumulate race statistics for best-of-N selection */
-    if (mgr->mode == SYNC_MODE_HEADERS && !mgr->headers_race_complete) {
-      ps->headers_race_responses++;
-      ps->headers_race_total_ms += response_ms;
+    /* Is there a race in progress? (probe was sent, waiting for responses) */
+    bool is_probe_peer = (mgr->probe_peer_idx == peer_idx);
+    bool is_active_peer = (mgr->have_header_peer && peer_idx == mgr->active_header_peer_idx);
+    bool race_in_progress = (mgr->probe_sent_time > 0);
 
-      /* Check if this peer has completed all race rounds */
-      if (ps->headers_race_responses >= HEADERS_RACE_ROUNDS) {
-        /* Count how many peers have completed the race */
-        size_t completed_count = 0;
-        uint64_t best_avg = UINT64_MAX;
+    if (!mgr->have_header_peer) {
+      /* First peer to respond with a full batch becomes active */
+      log_info(LOG_COMP_SYNC, "Header peer selected: %s (%lums response)",
+               ps->peer->address, (unsigned long)response_ms);
 
-        for (size_t i = 0; i < mgr->peer_count; i++) {
-          peer_sync_state_t *candidate = &mgr->peers[i];
-          if (candidate->headers_race_responses >= HEADERS_RACE_ROUNDS) {
-            completed_count++;
-            uint64_t avg = candidate->headers_race_total_ms /
-                           candidate->headers_race_responses;
-            if (avg < best_avg) {
-              best_avg = avg;
-            }
-          }
-        }
+      mgr->have_header_peer = true;
+      mgr->active_header_peer_idx = peer_idx;
+      mgr->last_header_response_ms = response_ms;
+      mgr->header_batch_count = 1;
+      mgr->probe_peer_idx = SIZE_MAX;
+      mgr->probe_sent_time = 0;
+    } else if (race_in_progress && (is_probe_peer || is_active_peer)) {
+      /* Race in progress - first responder wins! */
+      uint64_t race_time = now - mgr->probe_sent_time;
 
-        /* Select pool once MIN_PEERS complete the race.
-         * Top 8 peers form a pool - we always use the best performer. */
-        if (completed_count >= HEADERS_RACE_MIN_PEERS) {
-          mgr->headers_race_complete = true;
-          mgr->header_pool_count = 0;
-          mgr->active_peer_responses = 0;
+      if (is_probe_peer) {
+        /* Probe peer responded first - they win! */
+        peer_sync_state_t *old_active = &mgr->peers[mgr->active_header_peer_idx];
+        log_info(LOG_COMP_SYNC,
+                 "Probe won race (%lums): switching %s -> %s",
+                 (unsigned long)race_time,
+                 old_active->peer->address, ps->peer->address);
 
-          /* Build sorted list of top HEADER_POOL_SIZE peers by avg response time */
-          for (size_t p = 0; p < HEADER_POOL_SIZE && p < completed_count; p++) {
-            uint64_t pool_best_avg = UINT64_MAX;
-            size_t pool_best_idx = 0;
-
-            for (size_t i = 0; i < mgr->peer_count; i++) {
-              /* Skip if already in pool */
-              bool already_in_pool = false;
-              for (size_t k = 0; k < mgr->header_pool_count; k++) {
-                if (mgr->header_pool_indices[k] == i) {
-                  already_in_pool = true;
-                  break;
-                }
-              }
-              if (already_in_pool) continue;
-
-              peer_sync_state_t *c = &mgr->peers[i];
-              if (c->headers_race_responses >= HEADERS_RACE_ROUNDS) {
-                uint64_t avg = c->headers_race_total_ms / c->headers_race_responses;
-                if (avg < pool_best_avg) {
-                  pool_best_avg = avg;
-                  pool_best_idx = i;
-                }
-              }
-            }
-
-            if (pool_best_avg < UINT64_MAX) {
-              mgr->header_pool_indices[mgr->header_pool_count++] = pool_best_idx;
-            }
-          }
-
-          /* First peer in pool is the initial active peer (best from race) */
-          if (mgr->header_pool_count > 0) {
-            mgr->active_pool_peer_idx = mgr->header_pool_indices[0];
-            mgr->fastest_header_peer_idx = mgr->active_pool_peer_idx; /* For compatibility */
-          }
-
-          log_info(LOG_COMP_SYNC,
-                   "Headers race complete: pool of %zu peers from %zu candidates (best avg=%lums)",
-                   mgr->header_pool_count, completed_count, (unsigned long)best_avg);
-        }
+        mgr->active_header_peer_idx = peer_idx;
+        mgr->last_header_response_ms = response_ms;
+        mgr->header_batch_count = 1;
+      } else {
+        /* Active peer responded first - they keep their spot */
+        log_debug(LOG_COMP_SYNC, "Active peer won race (%lums)",
+                  (unsigned long)race_time);
+        mgr->last_header_response_ms = response_ms;
+        mgr->header_batch_count++;
       }
+
+      /* Race complete */
+      mgr->probe_peer_idx = SIZE_MAX;
+      mgr->probe_sent_time = 0;
+    } else if (is_active_peer) {
+      /* Normal response from active peer (no race) */
+      mgr->last_header_response_ms = response_ms;
+      mgr->header_batch_count++;
+      /* Race starting is handled in immediate follow-up section below,
+       * so both requests go out at the same time */
     }
-
-    /* Post-race: track performance for all pool members */
-    if (mgr->headers_race_complete) {
-      size_t peer_idx = (size_t)(ps - mgr->peers);
-
-      /* Update ring buffer for this peer's response times */
-      ps->recent_times[ps->recent_times_idx] = response_ms;
-      ps->recent_times_idx = (ps->recent_times_idx + 1) % SYNC_HEADER_RESPONSE_WINDOW;
-      if (ps->recent_times_count < SYNC_HEADER_RESPONSE_WINDOW) {
-        ps->recent_times_count++;
-      }
-
-      /* If this is the active peer, increment response counter and evaluate pool */
-      if (peer_idx == mgr->active_pool_peer_idx) {
-        mgr->active_peer_responses++;
-
-        if (mgr->active_peer_responses >= POOL_PROBE_INTERVAL) {
-          mgr->active_peer_responses = 0;
-
-          /* Find best performer in pool based on recent performance */
-          uint64_t best_recent_avg = UINT64_MAX;
-          size_t best_pool_idx = mgr->active_pool_peer_idx;
-
-          for (size_t p = 0; p < mgr->header_pool_count; p++) {
-            size_t idx = mgr->header_pool_indices[p];
-            if (idx >= mgr->peer_count) continue;
-
-            peer_sync_state_t *pool_peer = &mgr->peers[idx];
-            if (!pool_peer->sync_candidate || !peer_is_ready(pool_peer->peer)) continue;
-
-            /* Calculate average from ring buffer */
-            if (pool_peer->recent_times_count > 0) {
-              uint64_t sum = 0;
-              for (uint32_t i = 0; i < pool_peer->recent_times_count; i++) {
-                sum += pool_peer->recent_times[i];
-              }
-              uint64_t avg = sum / pool_peer->recent_times_count;
-              if (avg < best_recent_avg) {
-                best_recent_avg = avg;
-                best_pool_idx = idx;
-              }
-            }
-          }
-
-          /* Switch if a different peer is now best */
-          if (best_pool_idx != mgr->active_pool_peer_idx && best_recent_avg < UINT64_MAX) {
-            peer_sync_state_t *old_active = &mgr->peers[mgr->active_pool_peer_idx];
-            peer_sync_state_t *new_active = &mgr->peers[best_pool_idx];
-
-            /* Calculate old active's average for logging */
-            uint64_t old_avg = UINT64_MAX;
-            if (old_active->recent_times_count > 0) {
-              uint64_t sum = 0;
-              for (uint32_t i = 0; i < old_active->recent_times_count; i++) {
-                sum += old_active->recent_times[i];
-              }
-              old_avg = sum / old_active->recent_times_count;
-            }
-
-            log_info(LOG_COMP_SYNC,
-                     "Pool switch: %s (avg=%lums) -> %s (avg=%lums)",
-                     old_active->peer->address, (unsigned long)old_avg,
-                     new_active->peer->address, (unsigned long)best_recent_avg);
-
-            mgr->active_pool_peer_idx = best_pool_idx;
-            mgr->fastest_header_peer_idx = best_pool_idx; /* For compatibility */
-          }
-
-          /* Probe non-active pool members to keep their stats fresh */
-          if (mgr->header_pool_count > 1) {
-            uint64_t now = plat_time_ms();
-
-            /* Build locator once for all probes */
-            hash256_t locator[SYNC_MAX_LOCATOR_HASHES];
-            size_t locator_len = 0;
-            block_index_t *locator_tip = mgr->best_header;
-            if (locator_tip != NULL) {
-              block_index_map_t *map =
-                  chainstate_get_block_index_map(mgr->chainstate);
-              sync_build_locator_from(map, locator_tip, locator, &locator_len);
-            } else {
-              sync_build_locator(mgr->chainstate, locator, &locator_len);
-            }
-
-            /* Send probe to each non-active pool member that's available */
-            for (size_t p = 0; p < mgr->header_pool_count; p++) {
-              size_t idx = mgr->header_pool_indices[p];
-              if (idx == mgr->active_pool_peer_idx) continue; /* Skip active peer */
-              if (idx >= mgr->peer_count) continue;
-
-              peer_sync_state_t *pool_peer = &mgr->peers[idx];
-              if (!pool_peer->sync_candidate || !peer_is_ready(pool_peer->peer)) continue;
-              if (pool_peer->headers_in_flight) continue;
-
-              pool_peer->headers_in_flight = true;
-              pool_peer->headers_sent_time = now;
-
-              if (mgr->callbacks.send_getheaders) {
-                mgr->callbacks.send_getheaders(pool_peer->peer, locator, locator_len,
-                                               NULL, mgr->callbacks.ctx);
-              }
-            }
-          }
-        }
-      }
-    }
+    /* Note: responses from non-active, non-probe peers are ignored for
+     * performance tracking but their headers are still processed below. */
   }
 
   /* Reset sent time to allow immediate follow-up request (fixes 5-second throttle bug).
@@ -1153,12 +1031,19 @@ echo_result_t sync_handle_headers(sync_manager_t *mgr, peer_t *peer,
 
   /* Immediate follow-up: If we got a full batch (2000 headers), there's more to fetch.
    * Send the next getheaders request immediately instead of waiting for sync_tick.
-   * This dramatically improves header sync throughput. */
+   * This dramatically improves header sync throughput.
+   *
+   * PARALLEL RACING: Every HEADER_PROBE_INTERVAL batches, we send requests to BOTH
+   * the active peer AND a random challenger at the same time. Whichever responds
+   * first becomes/stays active. Both responses' headers are used - no waste!
+   */
   if (mgr->mode == SYNC_MODE_HEADERS && count == SYNC_MAX_HEADERS_PER_REQUEST &&
+      mgr->have_header_peer && peer_idx == mgr->active_header_peer_idx &&
       ps->sync_candidate && peer_is_ready(ps->peer) && mgr->callbacks.send_getheaders) {
+
+    /* Build locator once - used for both active and challenger */
     hash256_t locator[SYNC_MAX_LOCATOR_HASHES];
     size_t locator_len = 0;
-
     block_index_t *locator_tip = mgr->best_header;
     if (locator_tip != NULL) {
       block_index_map_t *map = chainstate_get_block_index_map(mgr->chainstate);
@@ -1167,10 +1052,48 @@ echo_result_t sync_handle_headers(sync_manager_t *mgr, peer_t *peer,
       sync_build_locator(mgr->chainstate, locator, &locator_len);
     }
 
+    uint64_t send_time = plat_time_ms();
+
+    /* Always send to active peer */
     ps->headers_in_flight = true;
-    ps->headers_sent_time = plat_time_ms();
+    ps->headers_sent_time = send_time;
     mgr->callbacks.send_getheaders(ps->peer, locator, locator_len, NULL,
                                    mgr->callbacks.ctx);
+
+    /* Every N batches, ALSO send to a random challenger (parallel race) */
+    if (mgr->header_batch_count % HEADER_PROBE_INTERVAL == 0) {
+      /* Find available challenger peers */
+      size_t candidates[SYNC_MAX_PEERS];
+      size_t candidate_count = 0;
+
+      for (size_t i = 0; i < mgr->peer_count && candidate_count < SYNC_MAX_PEERS; i++) {
+        if (i == mgr->active_header_peer_idx) continue;
+        peer_sync_state_t *candidate = &mgr->peers[i];
+        if (candidate->sync_candidate && peer_is_ready(candidate->peer) &&
+            !candidate->headers_in_flight) {
+          candidates[candidate_count++] = i;
+        }
+      }
+
+      if (candidate_count > 0) {
+        /* Pick random challenger */
+        size_t pick = (size_t)(send_time % candidate_count);
+        size_t challenger_idx = candidates[pick];
+        peer_sync_state_t *challenger = &mgr->peers[challenger_idx];
+
+        /* Send to challenger IN PARALLEL with active peer */
+        mgr->probe_peer_idx = challenger_idx;
+        mgr->probe_sent_time = send_time;
+        challenger->headers_in_flight = true;
+        challenger->headers_sent_time = send_time;
+        mgr->callbacks.send_getheaders(challenger->peer, locator, locator_len,
+                                       NULL, mgr->callbacks.ctx);
+
+        log_info(LOG_COMP_SYNC, "Header race started: %s vs %s (batch %u)",
+                 ps->peer->address, challenger->peer->address,
+                 mgr->header_batch_count);
+      }
+    }
   }
 
   return ECHO_OK;
@@ -1490,41 +1413,38 @@ void sync_tick(sync_manager_t *mgr) {
   switch (mgr->mode) {
   case SYNC_MODE_HEADERS: {
     /*
-     * Race-to-win header sync: all peers compete, fastest wins.
+     * Simple header sync: one peer at a time, probe occasionally.
      *
-     * Phase 1 (race): Send getheaders to ALL sync-candidate peers.
-     * Phase 2 (winner): First peer to return 2000 headers wins.
-     *                   Only use that peer for remaining headers.
-     *
-     * This combines parallel discovery (find fastest) with single-peer
-     * efficiency (no duplicate processing). Much faster than pure parallel
-     * which wastes 90%+ bandwidth on duplicates.
+     * - First peer to respond with 2000 headers becomes active
+     * - Only request from active peer (no parallel requests = no duplication)
+     * - Every HEADER_PROBE_INTERVAL batches, probe one random peer
+     * - If probe is faster, switch to them
      */
     uint64_t now = plat_time_ms();
 
-    /* Check if race winner is still valid */
-    if (mgr->headers_race_complete) {
-      if (mgr->fastest_header_peer_idx >= mgr->peer_count) {
-        /* Winner index is out of bounds (peers removed) - reset race */
-        log_info(LOG_COMP_SYNC, "Headers race winner gone (index OOB), restarting race");
-        mgr->headers_race_complete = false;
+    /* Check if active header peer is still valid */
+    if (mgr->have_header_peer) {
+      if (mgr->active_header_peer_idx >= mgr->peer_count) {
+        /* Active peer index is out of bounds (peers removed) - reset */
+        log_info(LOG_COMP_SYNC, "Header peer gone (index OOB), finding new peer");
+        mgr->have_header_peer = false;
       } else {
-        peer_sync_state_t *winner = &mgr->peers[mgr->fastest_header_peer_idx];
-        if (!winner->sync_candidate || !peer_is_ready(winner->peer)) {
-          /* Winner is no longer usable - reset race */
-          log_info(LOG_COMP_SYNC, "Headers race winner disconnected, restarting race");
-          mgr->headers_race_complete = false;
+        peer_sync_state_t *active = &mgr->peers[mgr->active_header_peer_idx];
+        if (!active->sync_candidate || !peer_is_ready(active->peer)) {
+          /* Active peer is no longer usable - reset */
+          log_info(LOG_COMP_SYNC, "Header peer disconnected, finding new peer");
+          mgr->have_header_peer = false;
         }
       }
     }
 
-    if (!mgr->headers_race_complete) {
-      /* RACE MODE: Send to ALL peers to find the fastest */
-      if (mgr->headers_race_start_time == 0) {
-        mgr->headers_race_start_time = now;
-      }
+    if (!mgr->have_header_peer) {
+      /* No active peer yet - send to a few peers to find the fastest.
+       * Keep it small (4 peers max) to avoid flooding. First to respond wins. */
+      size_t discovery_limit = mgr->peer_count < 4 ? mgr->peer_count : 4;
+      size_t sent = 0;
 
-      for (size_t i = 0; i < mgr->peer_count; i++) {
+      for (size_t i = 0; i < mgr->peer_count && sent < discovery_limit; i++) {
         peer_sync_state_t *ps = &mgr->peers[i];
 
         if (!ps->sync_candidate || !peer_is_ready(ps->peer)) {
@@ -1551,12 +1471,13 @@ void sync_tick(sync_manager_t *mgr) {
 
             mgr->callbacks.send_getheaders(ps->peer, locator, locator_len, NULL,
                                            mgr->callbacks.ctx);
+            sent++;
           }
         }
       }
     } else {
-      /* WINNER MODE: Only send to the fastest peer */
-      peer_sync_state_t *ps = &mgr->peers[mgr->fastest_header_peer_idx];
+      /* Have active peer - only send to them (no duplication!) */
+      peer_sync_state_t *ps = &mgr->peers[mgr->active_header_peer_idx];
 
       if (!ps->headers_in_flight &&
           now - ps->headers_sent_time >= SYNC_HEADER_RETRY_INTERVAL_MS) {
@@ -1581,8 +1502,7 @@ void sync_tick(sync_manager_t *mgr) {
         }
       }
 
-      /* Note: Probing of non-active pool members is now done in sync_handle_headers
-       * when the active peer responds, ensuring probes actually execute. */
+      /* Probing is handled in sync_handle_headers when active peer responds */
     }
     break;
   }
