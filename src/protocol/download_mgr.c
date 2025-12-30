@@ -751,32 +751,72 @@ bool download_mgr_check_stall(download_mgr_t *mgr, uint32_t validated_height) {
     return false;
   }
 
-  /* Steal their batch - return to queue front */
-  batch_node_t *node = (batch_node_t *)(void *)blocker->batch;
-  uint32_t steal_start = node->batch.heights[0];
-  uint32_t steal_end = steal_start + (uint32_t)node->batch.count - 1;
+  /* Block race strategy: Instead of stealing the whole batch and disconnecting
+   * the peer, we create a redundant request for just the blocking block.
+   * This way:
+   *   - The original peer keeps working and might still deliver
+   *   - The next peer to request work gets the blocking block as priority
+   *   - Whoever delivers first wins - we get redundancy without burning peers
+   */
+
+  /* Find the blocking block in the blocker's batch */
+  size_t block_idx = next_height - blocker_height;
+  batch_node_t *blocker_node = (batch_node_t *)(void *)blocker->batch;
+
+  /* Check if blocker is actively delivering blocks */
+  uint64_t since_last_delivery = now - blocker->last_delivery_time;
+  bool blocker_is_active = (blocker->last_delivery_time > 0 &&
+                            since_last_delivery < stall_timeout);
 
   LOG_INFO("download_mgr: validation stalled at height %u for %llu ms "
-           "(timeout=%llu ms, backoff=%u) - stealing batch [%u-%u]",
+           "(timeout=%llu ms, backoff=%u) - blocker has batch [%u-%u], "
+           "last delivery %llu ms ago, %s",
            validated_height, (unsigned long long)stall_duration,
            (unsigned long long)stall_timeout, mgr->stall_backoff_count,
-           steal_start, steal_end);
+           blocker_height, blocker_end,
+           (unsigned long long)since_last_delivery,
+           blocker_is_active ? "ACTIVE (racing)" : "STALLED (stealing)");
 
-  node->batch.assigned_time = 0;
-  queue_push_front(mgr, node);
-  blocker->batch = NULL;
-
-  /* Increment backoff for next steal at this height */
+  /* Increment backoff for next check at this height */
   mgr->stall_backoff_count++;
 
-  /* libbitcoin-style: Disconnect the blocker immediately */
-  LOG_INFO("download_mgr: disconnecting peer blocking validation");
-  if (mgr->callbacks.disconnect_peer != NULL) {
-    mgr->callbacks.disconnect_peer(blocker->peer, "blocking validation",
-                                   mgr->callbacks.ctx);
+  if (blocker_is_active) {
+    /* Blocker is actively delivering - use block race strategy.
+     * Create a 1-block priority batch with just the blocking block.
+     * The original peer keeps their batch and might still deliver. */
+    batch_node_t *priority = batch_node_create();
+    if (priority != NULL) {
+      memcpy(&priority->batch.hashes[0], &blocker_node->batch.hashes[block_idx],
+             sizeof(hash256_t));
+      priority->batch.heights[0] = next_height;
+      priority->batch.count = 1;
+      priority->batch.remaining = 1;
+      priority->batch.assigned_time = 0;
+      priority->batch.received[0] = false;
+
+      queue_push_front(mgr, priority);
+      LOG_INFO("download_mgr: queued redundant request for blocking block %u "
+               "(race against active peer)",
+               next_height);
+    }
+    /* Don't disconnect - let them race */
+  } else {
+    /* Blocker has truly stalled (no recent delivery) - steal their batch.
+     * This is the original aggressive behavior for genuinely dead peers. */
+    blocker_node->batch.assigned_time = 0;
+    queue_push_front(mgr, blocker_node);
+    blocker->batch = NULL;
+
+    LOG_INFO("download_mgr: stole batch [%u-%u] from stalled peer",
+             blocker_height, blocker_end);
+
+    if (mgr->callbacks.disconnect_peer != NULL) {
+      mgr->callbacks.disconnect_peer(blocker->peer, "blocking validation (stalled)",
+                                     mgr->callbacks.ctx);
+    }
   }
 
-  /* Reset stall timer so we don't immediately steal again */
+  /* Reset stall timer so we don't immediately trigger again */
   mgr->last_progress_time = now;
 
   return true;
@@ -850,7 +890,12 @@ size_t download_mgr_check_performance(download_mgr_t *mgr) {
   }
 
   /* Phase 3: Disconnect stalled peers (had rate > 0, now rate = 0).
-   * These are peers who WERE delivering but stopped. */
+   * These are peers who WERE delivering but stopped.
+   *
+   * IMPORTANT: Check last_delivery_time, not just bytes_per_second.
+   * A peer with rate=0 might have just finished their batch and be
+   * waiting for new blocks - they're not truly stalled. Only disconnect
+   * if they haven't delivered for 2x the window (20 seconds). */
   for (size_t i = 0; i < stalled_count; i++) {
     if (reporters - dropped <= DOWNLOAD_MIN_PEERS_FOR_STATS) {
       LOG_DEBUG("download_mgr: keeping stalled peer to maintain minimum");
@@ -859,13 +904,23 @@ size_t download_mgr_check_performance(download_mgr_t *mgr) {
 
     peer_perf_t *perf = stalled_peers[i];
 
+    /* Check if peer recently delivered - if so, they're just between batches */
+    uint64_t since_last_delivery = now - perf->last_delivery_time;
+    if (perf->last_delivery_time > 0 &&
+        since_last_delivery < (uint64_t)(DOWNLOAD_PERF_WINDOW_MS * 2)) {
+      LOG_INFO("download_mgr: peer shows 0 B/s but delivered %llu ms ago, "
+               "keeping (between batches)",
+               (unsigned long long)since_last_delivery);
+      continue; /* Not truly stalled, just between batches */
+    }
+
     batch_node_t *node = (batch_node_t *)(void *)perf->batch;
     uint32_t batch_start = node->batch.heights[0];
     uint32_t batch_end = batch_start + (uint32_t)node->batch.count - 1;
 
-    LOG_INFO("download_mgr: peer stalled (was delivering, now 0 B/s), "
+    LOG_INFO("download_mgr: peer truly stalled (0 B/s, last delivery %llu ms ago), "
              "returning batch [%u-%u] to queue",
-             batch_start, batch_end);
+             (unsigned long long)since_last_delivery, batch_start, batch_end);
 
     node->batch.assigned_time = 0;
     queue_push_front(mgr, node);
