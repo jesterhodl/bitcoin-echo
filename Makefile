@@ -186,10 +186,10 @@ $(TEST_BLOCK_VALIDATE): test/unit/test_block_validate.c src/consensus/block_vali
 $(TEST_COINBASE): test/unit/test_coinbase.c src/consensus/block_validate.c src/consensus/block.c src/consensus/tx.c src/consensus/serialize.c src/consensus/merkle.c src/crypto/sha256.c  $(TEST_UTILS_OBJ)
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(TEST_UTXO): test/unit/test_utxo.c src/consensus/utxo.c  $(TEST_UTILS_OBJ)
+$(TEST_UTXO): test/unit/test_utxo.c src/consensus/utxo.c src/platform/posix.c src/app/log.c $(TEST_UTILS_OBJ)
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(TEST_CHAINSTATE): test/unit/test_chainstate.c src/consensus/chainstate.c src/consensus/utxo.c src/consensus/block.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c  $(TEST_UTILS_OBJ)
+$(TEST_CHAINSTATE): test/unit/test_chainstate.c src/consensus/chainstate.c src/consensus/utxo.c src/consensus/block.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c src/platform/posix.c src/app/log.c $(TEST_UTILS_OBJ)
 	$(CC) $(CFLAGS) -o $@ $^
 
 $(TEST_CONSENSUS): test/unit/test_consensus.c src/consensus/consensus.c src/consensus/chainstate.c src/consensus/utxo.c src/consensus/block_validate.c src/consensus/tx_validate.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/merkle.c src/consensus/block.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c src/crypto/sha1.c src/crypto/ripemd160.c src/crypto/secp256k1.c src/platform/posix.c src/app/log.c $(TEST_UTILS_OBJ) $(LIBSECP_OBJS)
@@ -201,7 +201,7 @@ $(TEST_BLOCK_STORAGE): test/unit/test_block_storage.c src/storage/blocks.c src/p
 $(TEST_DB): test/unit/test_db.c src/storage/db.c lib/sqlite/sqlite3.c  $(TEST_UTILS_OBJ)
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(TEST_UTXO_DB): test/unit/test_utxo_db.c src/storage/utxo_db.c src/storage/db.c src/consensus/utxo.c lib/sqlite/sqlite3.c  $(TEST_UTILS_OBJ)
+$(TEST_UTXO_DB): test/unit/test_utxo_db.c src/storage/utxo_db.c src/storage/db.c src/consensus/utxo.c lib/sqlite/sqlite3.c src/platform/posix.c src/app/log.c $(TEST_UTILS_OBJ)
 	$(CC) $(CFLAGS) -o $@ $^
 
 $(TEST_BLOCK_INDEX_DB): test/unit/test_block_index_db.c src/storage/block_index_db.c src/storage/db.c src/consensus/block.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c lib/sqlite/sqlite3.c  $(TEST_UTILS_OBJ)
@@ -228,7 +228,7 @@ $(TEST_SYNC): test/unit/test_sync.c src/protocol/sync.c src/protocol/download_mg
 $(TEST_DOWNLOAD_MGR): test/unit/test_download_mgr.c src/protocol/download_mgr.c src/platform/posix.c src/app/log.c $(TEST_UTILS_OBJ)
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(TEST_MEMPOOL): test/unit/test_mempool.c src/protocol/mempool.c src/consensus/tx_validate.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/utxo.c src/consensus/block.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c src/crypto/sha1.c src/crypto/ripemd160.c src/crypto/secp256k1.c $(TEST_UTILS_OBJ) $(LIBSECP_OBJS)
+$(TEST_MEMPOOL): test/unit/test_mempool.c src/protocol/mempool.c src/consensus/tx_validate.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/utxo.c src/consensus/block.c src/consensus/tx.c src/consensus/serialize.c src/crypto/sha256.c src/crypto/sha1.c src/crypto/ripemd160.c src/crypto/secp256k1.c src/platform/posix.c src/app/log.c $(TEST_UTILS_OBJ) $(LIBSECP_OBJS)
 	$(CC) $(CFLAGS) -o $@ $^
 
 $(TEST_NODE): test/unit/test_node.c src/app/node.c src/app/log.c src/protocol/mempool.c src/protocol/sync.c src/protocol/download_mgr.c src/protocol/discovery.c src/protocol/peer.c src/protocol/relay.c src/protocol/serialize.c src/protocol/messages.c src/consensus/consensus.c src/consensus/chainstate.c src/consensus/utxo.c src/consensus/block_validate.c src/consensus/tx_validate.c src/consensus/script.c src/consensus/sig_verify.c src/consensus/merkle.c src/consensus/block.c src/consensus/tx.c src/consensus/serialize.c src/storage/blocks.c src/storage/db.c src/storage/utxo_db.c src/storage/block_index_db.c src/crypto/sha256.c src/crypto/sha1.c src/crypto/ripemd160.c src/crypto/secp256k1.c src/platform/posix.c src/node/chase.c src/node/chaser.c src/node/chaser_validate.c src/node/chaser_confirm.c lib/sqlite/sqlite3.c $(TEST_UTILS_OBJ) $(LIBSECP_OBJS)
