@@ -473,10 +473,14 @@ bool download_mgr_peer_request_work(download_mgr_t *mgr, peer_t *peer) {
     perf->first_work_time = now;
   }
 
-  /* Reset remaining to count for reassigned batches.
-   * This handles the case where a batch was stolen and is being reassigned.
-   * We request all blocks again - storage layer deduplicates if needed. */
-  node->batch.remaining = node->batch.count;
+  /* NOTE: We do NOT reset remaining on reassignment.
+   *
+   * When a batch is stolen and reassigned, the received[] bitmap preserves
+   * which blocks we already have. We request ALL blocks again (storage layer
+   * deduplicates), but block_received() only decrements remaining for blocks
+   * not already marked received. This fixes the "duplicate block counting" bug
+   * where remaining would hit 0 even though some blocks were never delivered.
+   */
 
   /* Send getdata for all blocks in batch */
   if (mgr->callbacks.send_getdata != NULL) {
@@ -572,12 +576,24 @@ bool download_mgr_block_received(download_mgr_t *mgr, peer_t *peer,
   /* Find the block in the batch */
   for (size_t i = 0; i < perf->batch->count; i++) {
     if (memcmp(&perf->batch->hashes[i], hash, sizeof(hash256_t)) == 0) {
-      /* Found it - decrement remaining */
+      /* Found it - check if already received (duplicate) */
+      if (perf->batch->received[i]) {
+        /* Already received this block - don't decrement remaining.
+         * This happens when a batch is stolen and reassigned: we request
+         * all blocks again, and the new peer may send duplicates. */
+        LOG_DEBUG("download_mgr: duplicate block at index %zu (already received), "
+                  "remaining=%zu unchanged",
+                  i, perf->batch->remaining);
+        return true;
+      }
+
+      /* First time receiving this block - mark received and decrement */
+      perf->batch->received[i] = true;
       if (perf->batch->remaining > 0) {
         perf->batch->remaining--;
       }
-      LOG_DEBUG("download_mgr: block received, batch remaining=%zu",
-                perf->batch->remaining);
+      LOG_DEBUG("download_mgr: block received at index %zu, batch remaining=%zu",
+                i, perf->batch->remaining);
       return true;
     }
   }

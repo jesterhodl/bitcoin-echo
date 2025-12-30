@@ -90,6 +90,10 @@
  * libbitcoin-style: Each peer gets a batch. When batch is complete (all blocks
  * received), peer requests another batch. If no batches available, peer is
  * "starved" and triggers work splitting from the slowest peer.
+ *
+ * The received[] bitmap tracks which specific blocks have been received.
+ * This prevents duplicate blocks from decrementing remaining - critical for
+ * correct batch completion when batches are stolen and reassigned.
  */
 typedef struct work_batch {
   hash256_t hashes[DOWNLOAD_BATCH_SIZE_MAX]; /* Block hashes in this batch */
@@ -97,6 +101,7 @@ typedef struct work_batch {
   size_t count;                              /* Number of blocks in batch (variable) */
   size_t remaining;                          /* Blocks not yet received */
   uint64_t assigned_time;                    /* When assigned to peer (0 if queued) */
+  bool received[DOWNLOAD_BATCH_SIZE_MAX];    /* Bitmap: true if block already received */
 } work_batch_t;
 
 /* ============================================================================
