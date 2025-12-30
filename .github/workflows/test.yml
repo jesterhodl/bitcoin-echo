@@ -26,7 +26,7 @@ jobs:
           make clean
           make test \
             CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -O1 -g -fsanitize=address -fno-omit-frame-pointer -Iinclude -pthread" \
-            LDFLAGS="-pthread -fsanitize=address"
+            LDFLAGS="-pthread -fsanitize=address -lm"
 
       - name: Build main binary
         run: make all
