@@ -18,6 +18,7 @@
 #include "download_mgr.h"
 #include "log.h"
 #include "platform.h"
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -56,6 +57,14 @@ struct download_mgr {
   /* Peer performance tracking */
   peer_perf_t peers[DOWNLOAD_MAX_PEERS];
   size_t peer_count;
+
+  /* Stall detection */
+  uint32_t last_validated_height;  /* Last reported validated height */
+  uint64_t last_progress_time;     /* When validation last progressed */
+
+  /* Adaptive stall timeout (Bitcoin Core style backoff) */
+  uint32_t stall_backoff_height;   /* Height we're stuck at */
+  uint32_t stall_backoff_count;    /* Times we've stolen at this height */
 };
 
 /* ============================================================================
@@ -83,16 +92,16 @@ static void batch_node_destroy(batch_node_t *node) { free(node); }
  * Use smaller batches to minimize head-of-line blocking.
  */
 static size_t get_batch_size_for_height(uint32_t height) {
+  /* Smaller batches = faster completion = fewer timeouts.
+   * Trade-off: more overhead, but better stall recovery. */
   if (height < 10000) {
     return DOWNLOAD_BATCH_SIZE_16;
-  } else if (height < 50000) {
-    return DOWNLOAD_BATCH_SIZE_32;
   } else if (height < 100000) {
-    return DOWNLOAD_BATCH_SIZE_64;
-  } else if (height < 200000) {
-    return DOWNLOAD_BATCH_SIZE_128;
+    return DOWNLOAD_BATCH_SIZE_32; /* Keep batches small through early history */
+  } else if (height < 400000) {
+    return DOWNLOAD_BATCH_SIZE_64; /* Moderate size for medium blocks */
   } else {
-    return DOWNLOAD_BATCH_SIZE_256;
+    return DOWNLOAD_BATCH_SIZE_128; /* Larger batches only for recent blocks */
   }
 }
 
@@ -229,6 +238,10 @@ static void compact_peers(download_mgr_t *mgr) {
 /**
  * Update performance window for a peer.
  * Called when recording bytes or on timer.
+ *
+ * libbitcoin-style: Once a peer has delivered bytes (rate > 0), they're
+ * marked as "has_reported" and become subject to statistical checks.
+ * Peers who never delivered aren't in the performance pool.
  */
 static void update_peer_window(peer_perf_t *perf, uint64_t now) {
   uint64_t elapsed = now - perf->window_start_time;
@@ -237,6 +250,11 @@ static void update_peer_window(peer_perf_t *perf, uint64_t now) {
     /* Calculate bytes/second for the completed window */
     perf->bytes_per_second =
         (float)perf->bytes_this_window / ((float)elapsed / 1000.0f);
+
+    /* libbitcoin-style: Mark as "reported" once we've proven we can deliver */
+    if (perf->bytes_per_second > 0.0f) {
+      perf->has_reported = true;
+    }
 
     /* Reset window */
     perf->bytes_this_window = 0;
@@ -327,10 +345,13 @@ void download_mgr_remove_peer(download_mgr_t *mgr, peer_t *peer) {
   if (perf->batch != NULL) {
     /* batch is first field in batch_node_t, so cast is direct */
     batch_node_t *node = (batch_node_t *)(void *)perf->batch;
+    uint32_t batch_start = node->batch.heights[0];
+    uint32_t batch_end = batch_start + (uint32_t)node->batch.count - 1;
     node->batch.assigned_time = 0; /* Mark as unassigned */
     queue_push_front(mgr, node);   /* Return to front of queue */
     perf->batch = NULL;
-    LOG_DEBUG("download_mgr: returned batch to queue from removed peer");
+    LOG_INFO("download_mgr: returned batch [%u-%u] to queue from removed peer",
+             batch_start, batch_end);
   }
 
   /* Mark slot as empty */
@@ -425,8 +446,10 @@ bool download_mgr_peer_request_work(download_mgr_t *mgr, peer_t *peer) {
 
   /* If peer had a completed batch, free it */
   if (perf->batch != NULL) {
-    /* batch is first field in batch_node_t, so cast is direct */
     batch_node_t *old_node = (batch_node_t *)(void *)perf->batch;
+    uint32_t old_start = old_node->batch.heights[0];
+    uint32_t old_end = old_start + (uint32_t)old_node->batch.count - 1;
+    LOG_INFO("download_mgr: freeing completed batch [%u-%u]", old_start, old_end);
     batch_node_destroy(old_node);
     perf->batch = NULL;
   }
@@ -440,9 +463,20 @@ bool download_mgr_peer_request_work(download_mgr_t *mgr, peer_t *peer) {
   }
 
   /* Assign batch to peer */
-  node->batch.assigned_time = plat_time_ms();
+  uint64_t now = plat_time_ms();
+  node->batch.assigned_time = now;
   perf->batch = &node->batch;
-  perf->last_delivery_time = plat_time_ms();
+  perf->last_delivery_time = now;
+
+  /* Track first work assignment for grace period (set once, never reset) */
+  if (perf->first_work_time == 0) {
+    perf->first_work_time = now;
+  }
+
+  /* Reset remaining to count for reassigned batches.
+   * This handles the case where a batch was stolen and is being reassigned.
+   * We request all blocks again - storage layer deduplicates if needed. */
+  node->batch.remaining = node->batch.count;
 
   /* Send getdata for all blocks in batch */
   if (mgr->callbacks.send_getdata != NULL) {
@@ -450,8 +484,10 @@ bool download_mgr_peer_request_work(download_mgr_t *mgr, peer_t *peer) {
                                 mgr->callbacks.ctx);
   }
 
-  LOG_DEBUG("download_mgr: assigned batch of %zu blocks to peer",
-            node->batch.count);
+  uint32_t batch_start = node->batch.heights[0];
+  uint32_t batch_end = batch_start + (uint32_t)node->batch.count - 1;
+  LOG_INFO("download_mgr: assigned batch [%u-%u] (%zu blocks) to peer",
+           batch_start, batch_end, node->batch.count);
   return true;
 }
 
@@ -489,24 +525,22 @@ void download_mgr_peer_split(download_mgr_t *mgr, peer_t *peer) {
     return; /* Peer not found or has no work */
   }
 
-  /* libbitcoin-style: Return ALL work to queue */
-  /* batch is first field in batch_node_t, so cast is direct */
+  /* Return work to queue */
   batch_node_t *node = (batch_node_t *)(void *)perf->batch;
+  uint32_t batch_start = node->batch.heights[0];
+  uint32_t batch_end = batch_start + (uint32_t)node->batch.count - 1;
+
   node->batch.assigned_time = 0; /* Mark as unassigned */
   queue_push_front(mgr, node);   /* Return to FRONT (high priority) */
   perf->batch = NULL;
 
-  LOG_INFO("download_mgr: returned batch to queue, disconnecting slow peer");
-
-  /* libbitcoin-style: DISCONNECT the slow peer (sacrifice) */
+  /* libbitcoin-style: Disconnect immediately (no cooldowns) */
+  LOG_INFO("download_mgr: sacrificing slow peer (rate=%.0f B/s), "
+           "returning batch [%u-%u] to queue",
+           (double)perf->bytes_per_second, batch_start, batch_end);
   if (mgr->callbacks.disconnect_peer != NULL) {
-    mgr->callbacks.disconnect_peer(peer, "slow performance (sacrificed)",
-                                   mgr->callbacks.ctx);
+    mgr->callbacks.disconnect_peer(peer, "sacrificed (slow)", mgr->callbacks.ctx);
   }
-
-  /* Mark peer slot as empty (will be compacted on next removal or query) */
-  perf->peer = NULL;
-  compact_peers(mgr);
 }
 
 bool download_mgr_block_received(download_mgr_t *mgr, peer_t *peer,
@@ -567,21 +601,352 @@ bool download_mgr_peer_is_idle(const download_mgr_t *mgr, const peer_t *peer) {
   return perf->batch == NULL || perf->batch->remaining == 0;
 }
 
-bool download_mgr_update_peer_performance(download_mgr_t *mgr, peer_t *peer) {
-  if (mgr == NULL || peer == NULL) {
-    return true;
+/**
+ * Find peer with the lowest-height batch (blocking validation).
+ */
+static peer_perf_t *find_peer_with_lowest_batch(download_mgr_t *mgr) {
+  peer_perf_t *lowest = NULL;
+  uint32_t lowest_height = UINT32_MAX;
+
+  for (size_t i = 0; i < mgr->peer_count; i++) {
+    peer_perf_t *perf = &mgr->peers[i];
+    if (perf->peer == NULL || perf->batch == NULL ||
+        perf->batch->remaining == 0) {
+      continue;
+    }
+
+    /* Check the first (lowest) height in this batch */
+    uint32_t batch_height = perf->batch->heights[0];
+    if (batch_height < lowest_height) {
+      lowest_height = batch_height;
+      lowest = perf;
+    }
   }
 
-  peer_perf_t *perf = find_peer_perf(mgr, peer);
-  if (perf == NULL) {
+  return lowest;
+}
+
+bool download_mgr_check_stall(download_mgr_t *mgr, uint32_t validated_height) {
+  if (mgr == NULL) {
     return false;
   }
 
   uint64_t now = plat_time_ms();
-  update_peer_window(perf, now);
 
-  /* For now, always return healthy - stall detection handled elsewhere */
+  /* Check if validation has made progress */
+  if (validated_height > mgr->last_validated_height) {
+    /* Progress! Reset stall timer and backoff */
+    mgr->last_validated_height = validated_height;
+    mgr->last_progress_time = now;
+    mgr->stall_backoff_count = 0;  /* Reset backoff on progress */
+    return false;
+  }
+
+  /* No progress - check how long we've been stalled */
+  if (mgr->last_progress_time == 0) {
+    /* First call - initialize */
+    mgr->last_progress_time = now;
+    mgr->last_validated_height = validated_height;
+    return false;
+  }
+
+  uint64_t stall_duration = now - mgr->last_progress_time;
+
+  /* Adaptive stall timeout (Bitcoin Core style backoff).
+   *
+   * Base timeout is 2 seconds. Each time we steal at the same height,
+   * we double the timeout (up to a maximum of 64 seconds).
+   * This prevents burning through all peers at a problematic height.
+   *
+   * The timeout resets when validation makes progress.
+   */
+#define STALL_BASE_TIMEOUT_MS 2000   /* 2 second base */
+#define STALL_MAX_TIMEOUT_MS 64000   /* 64 second max (matches Bitcoin Core) */
+
+  uint64_t stall_timeout = STALL_BASE_TIMEOUT_MS;
+  for (uint32_t i = 0; i < mgr->stall_backoff_count && stall_timeout < STALL_MAX_TIMEOUT_MS; i++) {
+    stall_timeout *= 2;
+  }
+  if (stall_timeout > STALL_MAX_TIMEOUT_MS) {
+    stall_timeout = STALL_MAX_TIMEOUT_MS;
+  }
+
+  if (stall_duration < stall_timeout) {
+    /* Not stalled long enough yet */
+    return false;
+  }
+
+  /* We're stalled! Find the peer blocking validation (lowest batch) */
+  peer_perf_t *blocker = find_peer_with_lowest_batch(mgr);
+
+  if (blocker == NULL) {
+    /* No peer with work - nothing to steal */
+    LOG_INFO("download_mgr: stalled but no peers have work to steal");
+    return false;
+  }
+
+  uint32_t blocker_height = blocker->batch->heights[0];
+  uint32_t blocker_end = blocker_height + (uint32_t)blocker->batch->count - 1;
+  uint32_t next_height = validated_height + 1;
+
+  /* Check if this batch contains the block we need for validation.
+   * A batch is relevant if: start <= next_height <= end */
+  if (next_height < blocker_height) {
+    /* Lowest ASSIGNED batch is ahead of what we need. But the needed block
+     * might be in the QUEUE waiting to be assigned. Check the queue first
+     * before declaring a GAP. */
+    uint32_t queue_lowest = UINT32_MAX;
+    for (batch_node_t *qnode = mgr->queue_head; qnode != NULL; qnode = qnode->next) {
+      if (qnode->batch.heights[0] < queue_lowest) {
+        queue_lowest = qnode->batch.heights[0];
+      }
+    }
+
+    if (queue_lowest <= next_height) {
+      /* Found the needed block in the queue - just waiting for idle peer */
+      LOG_DEBUG("download_mgr: stalled at %u, need %u, in queue (lowest=%u) "
+                "- waiting for idle peer",
+                validated_height, next_height, queue_lowest);
+      return false;
+    }
+
+    /* Neither assigned nor queued - this is a real GAP */
+    LOG_WARN("download_mgr: stalled at %u, need block %u, but lowest assigned "
+             "batch starts at %u, lowest queued at %u - GAP! Block may be lost.",
+             validated_height, next_height, blocker_height, queue_lowest);
+    /* Don't free this batch - it's valid future work. Just reset stall timer. */
+    mgr->last_progress_time = now;
+    return false;
+  }
+
+  if (next_height > blocker_end) {
+    /* Batch is BEHIND what we need - it's stale (we've already validated these).
+     * Free this stale batch so we don't keep finding it. */
+    LOG_INFO("download_mgr: stalled at %u but lowest batch [%u-%u] is stale "
+             "(we already validated past it) - freeing",
+             validated_height, blocker_height, blocker_end);
+
+    batch_node_t *stale = (batch_node_t *)(void *)blocker->batch;
+    batch_node_destroy(stale);
+    blocker->batch = NULL;
+
+    /* Reset stall timer and try again next tick */
+    mgr->last_progress_time = now;
+    return false;
+  }
+
+  /* Steal their batch - return to queue front */
+  batch_node_t *node = (batch_node_t *)(void *)blocker->batch;
+  uint32_t steal_start = node->batch.heights[0];
+  uint32_t steal_end = steal_start + (uint32_t)node->batch.count - 1;
+
+  LOG_INFO("download_mgr: validation stalled at height %u for %llu ms "
+           "(timeout=%llu ms, backoff=%u) - stealing batch [%u-%u]",
+           validated_height, (unsigned long long)stall_duration,
+           (unsigned long long)stall_timeout, mgr->stall_backoff_count,
+           steal_start, steal_end);
+
+  node->batch.assigned_time = 0;
+  queue_push_front(mgr, node);
+  blocker->batch = NULL;
+
+  /* Increment backoff for next steal at this height */
+  mgr->stall_backoff_count++;
+
+  /* libbitcoin-style: Disconnect the blocker immediately */
+  LOG_INFO("download_mgr: disconnecting peer blocking validation");
+  if (mgr->callbacks.disconnect_peer != NULL) {
+    mgr->callbacks.disconnect_peer(blocker->peer, "blocking validation",
+                                   mgr->callbacks.ctx);
+  }
+
+  /* Reset stall timer so we don't immediately steal again */
+  mgr->last_progress_time = now;
+
   return true;
+}
+
+size_t download_mgr_check_performance(download_mgr_t *mgr) {
+  if (mgr == NULL) {
+    return 0;
+  }
+
+  uint64_t now = plat_time_ms();
+  size_t dropped = 0;
+
+  /* Phase 1: Update windows for all peers with work */
+  for (size_t i = 0; i < mgr->peer_count; i++) {
+    peer_perf_t *perf = &mgr->peers[i];
+    if (perf->peer != NULL && perf->batch != NULL) {
+      update_peer_window(perf, now);
+    }
+  }
+
+  /* Phase 2: Collect rates using libbitcoin's self-selection model.
+   *
+   * libbitcoin-style: The speeds_ map only contains channels that have
+   * successfully reported a positive rate. Channels that never delivered
+   * are not in the map and thus not subject to statistical checks.
+   *
+   * We mirror this by only including peers where has_reported == true.
+   * A peer with has_reported=true but current rate=0 is STALLED (used to
+   * deliver but stopped). A peer with has_reported=false is still warming
+   * up and we don't penalize them. */
+  float rates[DOWNLOAD_MAX_PEERS];
+  peer_perf_t *peers_with_rates[DOWNLOAD_MAX_PEERS];
+  peer_perf_t *stalled_peers[DOWNLOAD_MAX_PEERS];
+  size_t rate_count = 0;
+  size_t stalled_count = 0;
+  size_t reporters = 0; /* Peers who have ever reported (in the speeds_ pool) */
+
+  for (size_t i = 0; i < mgr->peer_count; i++) {
+    peer_perf_t *perf = &mgr->peers[i];
+    if (perf->peer == NULL || perf->batch == NULL) {
+      continue;
+    }
+
+    /* libbitcoin-style: Only peers who have proven they can deliver are
+     * in the performance pool. Peers who never delivered any bytes are
+     * still warming up and aren't penalized. */
+    if (!perf->has_reported) {
+      continue; /* Not in the speeds_ pool yet */
+    }
+
+    reporters++;
+
+    if (perf->bytes_per_second == 0.0f) {
+      /* Was delivering, now stopped - stalled */
+      stalled_peers[stalled_count++] = perf;
+    } else {
+      /* Still delivering - add to rates for statistical check */
+      rates[rate_count] = perf->bytes_per_second;
+      peers_with_rates[rate_count] = perf;
+      rate_count++;
+    }
+  }
+
+  /* libbitcoin-style: Need minimum peers in the pool for meaningful stats.
+   * If reporters <= 3, don't drop anyone - return success for all. */
+  if (reporters <= DOWNLOAD_MIN_PEERS_FOR_STATS) {
+    LOG_DEBUG("download_mgr: only %zu reporters, skipping performance check",
+              reporters);
+    return 0;
+  }
+
+  /* Phase 3: Disconnect stalled peers (had rate > 0, now rate = 0).
+   * These are peers who WERE delivering but stopped. */
+  for (size_t i = 0; i < stalled_count; i++) {
+    if (reporters - dropped <= DOWNLOAD_MIN_PEERS_FOR_STATS) {
+      LOG_DEBUG("download_mgr: keeping stalled peer to maintain minimum");
+      break;
+    }
+
+    peer_perf_t *perf = stalled_peers[i];
+
+    batch_node_t *node = (batch_node_t *)(void *)perf->batch;
+    uint32_t batch_start = node->batch.heights[0];
+    uint32_t batch_end = batch_start + (uint32_t)node->batch.count - 1;
+
+    LOG_INFO("download_mgr: peer stalled (was delivering, now 0 B/s), "
+             "returning batch [%u-%u] to queue",
+             batch_start, batch_end);
+
+    node->batch.assigned_time = 0;
+    queue_push_front(mgr, node);
+    perf->batch = NULL;
+
+    if (mgr->callbacks.disconnect_peer != NULL) {
+      mgr->callbacks.disconnect_peer(perf->peer, "stalled (0 B/s)",
+                                     mgr->callbacks.ctx);
+    }
+    dropped++;
+  }
+
+  /* Phase 4: Statistical deviation check (only if enough peers with rates) */
+  if (rate_count < DOWNLOAD_MIN_PEERS_FOR_STATS) {
+    return dropped;
+  }
+
+  /* Calculate mean */
+  float sum = 0.0f;
+  for (size_t i = 0; i < rate_count; i++) {
+    sum += rates[i];
+  }
+  float mean = sum / (float)rate_count;
+
+  /* Minimum rate floor: Skip deviation check when mean is too low.
+   *
+   * Early blocks are tiny (~200 bytes), so even fast peers show low bytes/sec.
+   * When everyone is below 10 KB/s, it's block size limiting throughput,
+   * not peer speed. Don't penalize peers for small blocks.
+   *
+   * This complements libbitcoin's model - they don't need this because their
+   * workloads have mixed block sizes, but during early IBD we hit this edge case.
+   */
+  if (mean < DOWNLOAD_MIN_RATE_FLOOR) {
+    LOG_DEBUG("download_mgr: mean rate %.0f B/s below floor, skipping deviation "
+              "check (blocks are tiny)",
+              (double)mean);
+    return dropped;
+  }
+
+  /* Calculate sample variance and standard deviation */
+  float variance = 0.0f;
+  for (size_t i = 0; i < rate_count; i++) {
+    float diff = rates[i] - mean;
+    variance += diff * diff;
+  }
+  variance /= (float)(rate_count - 1);
+  float stddev = sqrtf(variance);
+
+  /* Phase 5: Disconnect slow peers (below deviation threshold) */
+  float threshold = mean - (DOWNLOAD_ALLOWED_DEVIATION * stddev);
+
+  LOG_DEBUG("download_mgr: perf check - mean=%.0f B/s, stddev=%.0f, "
+            "threshold=%.0f, reporters=%zu, with_rates=%zu",
+            (double)mean, (double)stddev, (double)threshold,
+            reporters, rate_count);
+
+  for (size_t i = 0; i < rate_count; i++) {
+    if (rates[i] < threshold) {
+      if (reporters - dropped <= DOWNLOAD_MIN_PEERS_FOR_STATS) {
+        LOG_DEBUG("download_mgr: keeping slow peer to maintain minimum");
+        break;
+      }
+
+      peer_perf_t *perf = peers_with_rates[i];
+
+      if (perf->batch != NULL) {
+        batch_node_t *node = (batch_node_t *)(void *)perf->batch;
+        uint32_t batch_start = node->batch.heights[0];
+        uint32_t batch_end = batch_start + (uint32_t)node->batch.count - 1;
+
+        LOG_INFO("download_mgr: peer too slow (%.0f B/s < %.0f B/s threshold), "
+                 "returning batch [%u-%u] to queue",
+                 (double)rates[i], (double)threshold, batch_start, batch_end);
+
+        node->batch.assigned_time = 0;
+        queue_push_front(mgr, node);
+        perf->batch = NULL;
+      } else {
+        LOG_INFO("download_mgr: peer too slow (%.0f B/s < %.0f B/s threshold), "
+                 "no batch to return",
+                 (double)rates[i], (double)threshold);
+      }
+
+      if (mgr->callbacks.disconnect_peer != NULL) {
+        mgr->callbacks.disconnect_peer(perf->peer, "slow (below deviation)",
+                                       mgr->callbacks.ctx);
+      }
+      dropped++;
+    }
+  }
+
+  if (dropped > 0) {
+    LOG_INFO("download_mgr: performance check dropped %zu peers", dropped);
+  }
+
+  return dropped;
 }
 
 /* ============================================================================

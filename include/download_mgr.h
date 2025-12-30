@@ -56,8 +56,28 @@
 
 /* Performance measurement window in milliseconds (10 seconds).
  * Bytes received in this window are used to calculate bytes/sec.
+ * This matches libbitcoin's sample_period_seconds.
  */
 #define DOWNLOAD_PERF_WINDOW_MS 10000
+
+/* Allowed deviation for slow peer detection (standard deviations).
+ * Peers with throughput > this many stddevs below the mean are dropped.
+ * This matches libbitcoin's allowed_deviation setting.
+ */
+#define DOWNLOAD_ALLOWED_DEVIATION 1.5f
+
+/* Minimum peers required for statistical deviation calculation.
+ * Need at least 3 data points for meaningful standard deviation.
+ */
+#define DOWNLOAD_MIN_PEERS_FOR_STATS 3
+
+/* Minimum rate floor for deviation checks (bytes/second).
+ *
+ * Early blocks are tiny (~200 bytes), so even fast peers show low B/s.
+ * When the mean rate is below this floor, we skip deviation checks because
+ * block size is limiting throughput, not peer speed.
+ */
+#define DOWNLOAD_MIN_RATE_FLOOR 10000.0f /* 10 KB/s */
 
 /* ============================================================================
  * Work Batch
@@ -88,7 +108,8 @@ typedef struct work_batch {
  * Per-peer state for download tracking.
  *
  * libbitcoin-style: Each peer owns ONE batch at a time. When batch completes,
- * peer pulls another. Performance is tracked for slowest-peer detection.
+ * peer pulls another. Performance is tracked using statistical deviation -
+ * peers significantly slower than the mean are disconnected.
  */
 typedef struct {
   peer_t *peer;                 /* The peer (NULL if slot unused) */
@@ -97,6 +118,8 @@ typedef struct {
   uint64_t window_start_time;   /* When current window started (ms) */
   float bytes_per_second;       /* Calculated rate (updated each window) */
   uint64_t last_delivery_time;  /* Time of last block delivery (ms) */
+  uint64_t first_work_time;     /* When first assigned work (grace period start) */
+  bool has_reported;            /* True if ever had rate > 0 (libbitcoin-style) */
 } peer_perf_t;
 
 /* ============================================================================
@@ -273,12 +296,37 @@ bool download_mgr_block_received(download_mgr_t *mgr, peer_t *peer,
 bool download_mgr_peer_is_idle(const download_mgr_t *mgr, const peer_t *peer);
 
 /**
- * Update performance metrics for a peer.
+ * Check peer performance using statistical deviation model.
  *
- * Called periodically to update bytes/second calculations.
- * Returns true if peer is still healthy, false if peer should be dropped.
+ * libbitcoin-style: Called every DOWNLOAD_PERF_WINDOW_MS (10 seconds).
+ * - Updates all peer windows and calculates bytes/second
+ * - Calculates mean and standard deviation of active peer rates
+ * - Disconnects peers with rate = 0 (stalled)
+ * - Disconnects peers > DOWNLOAD_ALLOWED_DEVIATION stddev below mean (slow)
+ *
+ * Parameters:
+ *   mgr - Download manager
+ *
+ * Returns:
+ *   Number of peers dropped due to poor performance
  */
-bool download_mgr_update_peer_performance(download_mgr_t *mgr, peer_t *peer);
+size_t download_mgr_check_performance(download_mgr_t *mgr);
+
+/**
+ * Check for validation stall and steal work if needed.
+ *
+ * Called periodically with current validated height. If a peer's batch
+ * contains the block we need and they haven't delivered it, steal the batch.
+ * This handles the case where a slow peer is blocking validation progress.
+ *
+ * Parameters:
+ *   mgr              - Download manager
+ *   validated_height - Current validated block height
+ *
+ * Returns:
+ *   true if work was stolen (caller should retry validation), false otherwise
+ */
+bool download_mgr_check_stall(download_mgr_t *mgr, uint32_t validated_height);
 
 /* ============================================================================
  * Query Functions

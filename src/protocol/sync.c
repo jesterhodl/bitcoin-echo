@@ -92,6 +92,7 @@ struct sync_manager {
   uint32_t block_sync_start_height; /* Height when block sync started */
   uint64_t last_progress_time;
   uint64_t last_header_refresh_time; /* For periodic header refresh in blocks mode */
+  uint64_t last_performance_check_time; /* For statistical deviation checks */
 
   /* Stats */
   uint32_t headers_received_total;
@@ -212,8 +213,9 @@ static bool sync_chase_handler(chase_event_t event, chase_value_t value,
       if (ps->sync_candidate && peer_is_ready(ps->peer)) {
         if (download_mgr_peer_is_idle(mgr->download_mgr, ps->peer)) {
           bool got_work = download_mgr_peer_request_work(mgr->download_mgr, ps->peer);
-          if (!got_work) {
-            /* Queue empty - trigger starved/split flow */
+          if (!got_work && download_mgr_inflight_count(mgr->download_mgr) > 0) {
+            /* Queue empty but work in flight - trigger starved/split flow.
+             * Only sacrifice a peer if there's actually work to steal. */
             download_mgr_peer_starved(mgr->download_mgr, ps->peer);
             /* After split, try requesting work again */
             download_mgr_peer_request_work(mgr->download_mgr, ps->peer);
@@ -1183,8 +1185,9 @@ echo_result_t sync_handle_block(sync_manager_t *mgr, peer_t *peer,
      * for sync_tick. */
     if (download_mgr_peer_is_idle(mgr->download_mgr, peer)) {
       bool got_work = download_mgr_peer_request_work(mgr->download_mgr, peer);
-      if (!got_work) {
-        /* Queue empty - peer is starved, trigger split from slowest */
+      if (!got_work && download_mgr_inflight_count(mgr->download_mgr) > 0) {
+        /* Queue empty but work in flight - peer is starved, trigger split.
+         * Only sacrifice a peer if there's actually work to steal. */
         download_mgr_peer_starved(mgr->download_mgr, peer);
         /* After split, try again */
         download_mgr_peer_request_work(mgr->download_mgr, peer);
@@ -1562,6 +1565,19 @@ void sync_tick(sync_manager_t *mgr) {
                (size_t)progress.blocks_in_flight, eta_hours, eta_mins,
                mgr->peer_count);
     }
+
+    /* Statistical deviation check: every DOWNLOAD_PERF_WINDOW_MS (10 seconds).
+     * Disconnects stalled peers (0 B/s) and slow peers (> 1.5 stddev below mean).
+     * This is the libbitcoin-style performance model. */
+    if (now - mgr->last_performance_check_time >= DOWNLOAD_PERF_WINDOW_MS) {
+      mgr->last_performance_check_time = now;
+      size_t dropped = download_mgr_check_performance(mgr->download_mgr);
+      if (dropped > 0) {
+        log_info(LOG_COMP_SYNC,
+                 "Performance check dropped %zu slow/stalled peers", dropped);
+      }
+    }
+
     uint32_t our_best_height =
         mgr->best_header ? mgr->best_header->height : 0;
 
@@ -1672,6 +1688,18 @@ void sync_tick(sync_manager_t *mgr) {
       if (mgr->dispatcher != NULL) {
         /* Fire BUMP to trigger chasers to check for work */
         chase_notify_height(mgr->dispatcher, CHASE_BUMP, 0);
+      }
+    }
+
+    /* Stall detection: Check if validation is stuck waiting for a slow peer.
+     * If so, steal their batch and give another peer a chance. */
+    {
+      uint32_t validated_height = chainstate_get_height(mgr->chainstate);
+      if (download_mgr_check_stall(mgr->download_mgr, validated_height)) {
+        /* Batch was stolen - bump chasers to retry validation */
+        if (mgr->dispatcher != NULL) {
+          chase_notify_height(mgr->dispatcher, CHASE_BUMP, 0);
+        }
       }
     }
 
