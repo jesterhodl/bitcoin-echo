@@ -923,10 +923,22 @@ size_t download_mgr_check_performance(download_mgr_t *mgr) {
             (double)mean, (double)stddev, (double)threshold,
             reporters, rate_count);
 
+  /* Limit slow peer drops to 2 per check cycle.
+   * This gives the connection manager time to reconnect before we drop more.
+   * Without this limit, we can drop 6+ peers at once and peer count spirals down. */
+#define MAX_SLOW_DROPS_PER_CHECK 2
+  size_t slow_drops = 0;
+
   for (size_t i = 0; i < rate_count; i++) {
     if (rates[i] < threshold) {
       if (reporters - dropped <= DOWNLOAD_MIN_PEERS_FOR_STATS) {
         LOG_DEBUG("download_mgr: keeping slow peer to maintain minimum");
+        break;
+      }
+
+      if (slow_drops >= MAX_SLOW_DROPS_PER_CHECK) {
+        LOG_DEBUG("download_mgr: hit per-check drop limit, deferring %zu more slow peers",
+                  rate_count - i);
         break;
       }
 
@@ -955,6 +967,7 @@ size_t download_mgr_check_performance(download_mgr_t *mgr) {
                                        mgr->callbacks.ctx);
       }
       dropped++;
+      slow_drops++;
     }
   }
 
