@@ -120,12 +120,13 @@ void chaser_destroy(chaser_t *self) {
         return;
     }
 
-    /* Call derived destroy method */
+    /* Clean up base resources first (before derived destroy may free self) */
+    chaser_cleanup(self);
+
+    /* Call derived destroy method (may free self) */
     if (self->vtable && self->vtable->destroy) {
         self->vtable->destroy(self);
     }
-
-    chaser_cleanup(self);
 }
 
 bool chaser_is_closed(chaser_t *self) {

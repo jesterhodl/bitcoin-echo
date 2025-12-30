@@ -1960,15 +1960,16 @@ static void node_cleanup(node_t *node) {
     node->chaser_validate = NULL;
   }
 
-  if (node->dispatcher != NULL) {
-    chase_dispatcher_destroy(node->dispatcher);
-    node->dispatcher = NULL;
-  }
-
-  /* Destroy sync manager */
+  /* Destroy sync manager first (it unsubscribes from dispatcher) */
   if (node->sync_mgr != NULL) {
     sync_destroy(node->sync_mgr);
     node->sync_mgr = NULL;
+  }
+
+  /* Destroy dispatcher after subscribers are cleaned up */
+  if (node->dispatcher != NULL) {
+    chase_dispatcher_destroy(node->dispatcher);
+    node->dispatcher = NULL;
   }
 
   /* Destroy mempool */
