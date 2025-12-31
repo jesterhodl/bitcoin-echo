@@ -8,23 +8,16 @@
 #include "platform.h"
 #include "protocol.h"
 #include <stdint.h>
-#include <stdio.h>
 #include <string.h>
 #include "test_utils.h"
 
-
+/* Assertion macro that properly calls test_fail() on failure */
 #define ASSERT(cond)                                                           \
   do {                                                                         \
     if (!(cond)) {                                                             \
-      printf("    FAILED: %s:%d: %s\n", __FILE__, __LINE__, #cond);            \
+      test_fail("Assertion failed: " #cond);                                   \
       return;                                                                  \
     }                                                                          \
-  } while (0)
-
-#define PASS()                                                                 \
-  do {                                                                         \
-    tests_passed++;                                                            \
-    printf("    PASSED\n");                                                    \
   } while (0)
 
 /* Static manager to avoid 5MB stack allocations per test */
@@ -54,6 +47,8 @@ static net_addr_t make_test_addr(uint8_t a, uint8_t b, uint8_t c, uint8_t d,
 
 /* Test: Initialize address manager */
 static void test_init(void) {
+  test_case("Init");
+
   peer_addr_manager_t *mgr = &g_mgr;
   discovery_init(mgr, NETWORK_MAINNET);
 
@@ -66,6 +61,8 @@ static void test_init(void) {
 
 /* Test: Add valid address */
 static void test_add_address(void) {
+  test_case("Add address");
+
   peer_addr_manager_t *mgr = &g_mgr;
   discovery_init(mgr, NETWORK_MAINNET);
 
@@ -85,6 +82,8 @@ static void test_add_address(void) {
 
 /* Test: Reject duplicate address */
 static void test_add_duplicate(void) {
+  test_case("Add duplicate");
+
   peer_addr_manager_t *mgr = &g_mgr;
   discovery_init(mgr, NETWORK_MAINNET);
 
@@ -105,6 +104,8 @@ static void test_add_duplicate(void) {
 
 /* Test: Reject loopback address on mainnet */
 static void test_reject_loopback_mainnet(void) {
+  test_case("Reject loopback mainnet");
+
   peer_addr_manager_t *mgr = &g_mgr;
   discovery_init(mgr, NETWORK_MAINNET);
 
@@ -119,6 +120,8 @@ static void test_reject_loopback_mainnet(void) {
 
 /* Test: Accept loopback address on regtest */
 static void test_accept_loopback_regtest(void) {
+  test_case("Accept loopback regtest");
+
   peer_addr_manager_t *mgr = &g_mgr;
   discovery_init(mgr, NETWORK_REGTEST);
 
@@ -133,6 +136,8 @@ static void test_accept_loopback_regtest(void) {
 
 /* Test: Reject unspecified address (0.0.0.0) */
 static void test_reject_unspecified(void) {
+  test_case("Reject unspecified");
+
   peer_addr_manager_t *mgr = &g_mgr;
   discovery_init(mgr, NETWORK_MAINNET);
 
@@ -147,6 +152,8 @@ static void test_reject_unspecified(void) {
 
 /* Test: Reject multicast address */
 static void test_reject_multicast(void) {
+  test_case("Reject multicast");
+
   peer_addr_manager_t *mgr = &g_mgr;
   discovery_init(mgr, NETWORK_MAINNET);
 
@@ -161,6 +168,8 @@ static void test_reject_multicast(void) {
 
 /* Test: Reject zero port */
 static void test_reject_zero_port(void) {
+  test_case("Reject zero port");
+
   peer_addr_manager_t *mgr = &g_mgr;
   discovery_init(mgr, NETWORK_MAINNET);
 
@@ -175,6 +184,8 @@ static void test_reject_zero_port(void) {
 
 /* Test: Add multiple addresses */
 static void test_add_multiple(void) {
+  test_case("Add multiple");
+
   peer_addr_manager_t *mgr = &g_mgr;
   discovery_init(mgr, NETWORK_MAINNET);
 
@@ -192,6 +203,8 @@ static void test_add_multiple(void) {
 
 /* Test: Address validation */
 static void test_address_validation(void) {
+  test_case("Address validation");
+
   peer_addr_manager_t *mgr = &g_mgr;
   discovery_init(mgr, NETWORK_MAINNET);
 
@@ -220,6 +233,8 @@ static void test_address_validation(void) {
 
 /* Test: Select outbound address */
 static void test_select_outbound(void) {
+  test_case("Select outbound");
+
   peer_addr_manager_t *mgr = &g_mgr;
   discovery_init(mgr, NETWORK_MAINNET);
 
@@ -251,6 +266,8 @@ static void test_select_outbound(void) {
 
 /* Test: Mark address in use */
 static void test_mark_in_use(void) {
+  test_case("Mark in use");
+
   peer_addr_manager_t *mgr = &g_mgr;
   discovery_init(mgr, NETWORK_MAINNET);
 
@@ -278,6 +295,8 @@ static void test_mark_in_use(void) {
 
 /* Test: Mark connection attempt */
 static void test_mark_attempt(void) {
+  test_case("Mark attempt");
+
   peer_addr_manager_t *mgr = &g_mgr;
   discovery_init(mgr, NETWORK_MAINNET);
 
@@ -302,6 +321,8 @@ static void test_mark_attempt(void) {
 
 /* Test: Mark successful connection */
 static void test_mark_success(void) {
+  test_case("Mark success");
+
   peer_addr_manager_t *mgr = &g_mgr;
   discovery_init(mgr, NETWORK_MAINNET);
 
@@ -322,6 +343,8 @@ static void test_mark_success(void) {
 
 /* Test: Get address counts */
 static void test_get_counts(void) {
+  test_case("Get counts");
+
   peer_addr_manager_t *mgr = &g_mgr;
   discovery_init(mgr, NETWORK_MAINNET);
 
@@ -353,6 +376,8 @@ static void test_get_counts(void) {
 
 /* Test: Select addresses to advertise */
 static void test_select_to_advertise(void) {
+  test_case("Select to advertise");
+
   peer_addr_manager_t *mgr = &g_mgr;
   discovery_init(mgr, NETWORK_MAINNET);
 
@@ -381,6 +406,8 @@ static void test_select_to_advertise(void) {
 
 /* Test: Add hardcoded seeds (currently empty - we use DNS seeds) */
 static void test_hardcoded_seeds(void) {
+  test_case("Hardcoded seeds");
+
   peer_addr_manager_t *mgr = &g_mgr;
   discovery_init(mgr, NETWORK_MAINNET);
 
@@ -396,6 +423,8 @@ static void test_hardcoded_seeds(void) {
 
 /* Test: Regtest doesn't use hardcoded seeds */
 static void test_regtest_no_hardcoded(void) {
+  test_case("Regtest no hardcoded");
+
   peer_addr_manager_t *mgr = &g_mgr;
   discovery_init(mgr, NETWORK_REGTEST);
 
@@ -410,6 +439,8 @@ static void test_regtest_no_hardcoded(void) {
 
 /* Test: Address capacity limit */
 static void test_capacity_limit(void) {
+  test_case("Capacity limit");
+
   peer_addr_manager_t *mgr = &g_mgr;
   discovery_init(mgr, NETWORK_MAINNET);
 
@@ -434,6 +465,8 @@ static void test_capacity_limit(void) {
 
 /* Test: Prefer reachable addresses for outbound */
 static void test_prefer_reachable(void) {
+  test_case("Prefer reachable");
+
   peer_addr_manager_t *mgr = &g_mgr;
   discovery_init(mgr, NETWORK_MAINNET);
 
@@ -459,29 +492,29 @@ static void test_prefer_reachable(void) {
 }
 
 int main(void) {
-    test_suite_begin("Discovery Tests");
+  test_suite_begin("Discovery Tests");
 
-    test_case("Init"); test_init(); test_pass();
-    test_case("Add address"); test_add_address(); test_pass();
-    test_case("Add duplicate"); test_add_duplicate(); test_pass();
-    test_case("Reject loopback mainnet"); test_reject_loopback_mainnet(); test_pass();
-    test_case("Accept loopback regtest"); test_accept_loopback_regtest(); test_pass();
-    test_case("Reject unspecified"); test_reject_unspecified(); test_pass();
-    test_case("Reject multicast"); test_reject_multicast(); test_pass();
-    test_case("Reject zero port"); test_reject_zero_port(); test_pass();
-    test_case("Add multiple"); test_add_multiple(); test_pass();
-    test_case("Address validation"); test_address_validation(); test_pass();
-    test_case("Select outbound"); test_select_outbound(); test_pass();
-    test_case("Mark in use"); test_mark_in_use(); test_pass();
-    test_case("Mark attempt"); test_mark_attempt(); test_pass();
-    test_case("Mark success"); test_mark_success(); test_pass();
-    test_case("Get counts"); test_get_counts(); test_pass();
-    test_case("Select to advertise"); test_select_to_advertise(); test_pass();
-    test_case("Hardcoded seeds"); test_hardcoded_seeds(); test_pass();
-    test_case("Regno hardcoded"); test_regtest_no_hardcoded(); test_pass();
-    test_case("Capacity limit"); test_capacity_limit(); test_pass();
-    test_case("Prefer reachable"); test_prefer_reachable(); test_pass();
+  test_init();
+  test_add_address();
+  test_add_duplicate();
+  test_reject_loopback_mainnet();
+  test_accept_loopback_regtest();
+  test_reject_unspecified();
+  test_reject_multicast();
+  test_reject_zero_port();
+  test_add_multiple();
+  test_address_validation();
+  test_select_outbound();
+  test_mark_in_use();
+  test_mark_attempt();
+  test_mark_success();
+  test_get_counts();
+  test_select_to_advertise();
+  test_hardcoded_seeds();
+  test_regtest_no_hardcoded();
+  test_capacity_limit();
+  test_prefer_reachable();
 
-    test_suite_end();
-    return test_global_summary();
+  test_suite_end();
+  return test_global_summary();
 }
