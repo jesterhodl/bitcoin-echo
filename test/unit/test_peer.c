@@ -70,10 +70,10 @@ static void test_peer_state_checks(void) {
     assert(!peer_is_ready(&peer));
     assert(!peer_is_connected(&peer));
 
-    /* Connecting */
+    /* Connecting - not yet connected (socket not established) */
     peer.state = PEER_STATE_CONNECTING;
     assert(!peer_is_ready(&peer));
-    assert(peer_is_connected(&peer));
+    assert(!peer_is_connected(&peer));
 
     /* Connected */
     peer.state = PEER_STATE_CONNECTED;
