@@ -26,27 +26,16 @@
  * ============================================================================
  */
 
-/* Dynamic batch sizing based on height.
+/* Batch size: 16 blocks per peer (matches Bitcoin Core MAX_BLOCKS_IN_TRANSIT_PER_PEER).
  *
- * Early blocks are tiny (coinbase only) and critical for validation progress.
- * If a slow peer gets the first batch, validation stalls completely.
- * Use smaller batches early to minimize head-of-line blocking.
- *
- * Height ranges and batch sizes (powers of 2):
- *   0-10000:       16 blocks (tiny blocks, critical path)
- *   10000-50000:   32 blocks
- *   50000-100000:  64 blocks
- *   100000-200000: 128 blocks
- *   200000+:       256 blocks (full size for throughput)
+ * This is the practical maximum a peer will deliver before needing more
+ * getdata requests. Larger batches just assign more work than peers can
+ * deliver at once, increasing head-of-line blocking risk.
  */
 #define DOWNLOAD_BATCH_SIZE_16 16
-#define DOWNLOAD_BATCH_SIZE_32 32
-#define DOWNLOAD_BATCH_SIZE_64 64
-#define DOWNLOAD_BATCH_SIZE_128 128
-#define DOWNLOAD_BATCH_SIZE_256 256
 
 /* Maximum batch size (for array allocation) */
-#define DOWNLOAD_BATCH_SIZE_MAX 256
+#define DOWNLOAD_BATCH_SIZE_MAX 16
 
 /* Maximum batches in the queue. */
 #define DOWNLOAD_MAX_BATCHES 200

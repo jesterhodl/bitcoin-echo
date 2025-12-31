@@ -88,21 +88,16 @@ static void batch_node_destroy(batch_node_t *node) { free(node); }
 /**
  * Get batch size for a given block height.
  *
- * Early blocks are tiny and critical for validation progress.
- * Use smaller batches to minimize head-of-line blocking.
+ * Bitcoin Core uses MAX_BLOCKS_IN_TRANSIT_PER_PEER = 16 as a fixed limit.
+ * This is the practical maximum a peer will deliver before needing more
+ * getdata requests, so larger batches just assign more work than peers
+ * can deliver at once.
+ *
+ * We use 16 blocks per batch universally, matching Bitcoin Core's approach.
  */
 static size_t get_batch_size_for_height(uint32_t height) {
-  /* Smaller batches = faster completion = fewer timeouts.
-   * Trade-off: more overhead, but better stall recovery. */
-  if (height < 10000) {
-    return DOWNLOAD_BATCH_SIZE_16;
-  } else if (height < 100000) {
-    return DOWNLOAD_BATCH_SIZE_32; /* Keep batches small through early history */
-  } else if (height < 400000) {
-    return DOWNLOAD_BATCH_SIZE_64; /* Moderate size for medium blocks */
-  } else {
-    return DOWNLOAD_BATCH_SIZE_128; /* Larger batches only for recent blocks */
-  }
+  (void)height; /* Unused - fixed batch size */
+  return DOWNLOAD_BATCH_SIZE_16;
 }
 
 /**

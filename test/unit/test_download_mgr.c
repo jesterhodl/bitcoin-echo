@@ -280,7 +280,7 @@ static void test_add_work_multiple_batches(void) {
 
   download_mgr_t *mgr = download_mgr_create(&callbacks);
 
-  /* Add enough blocks for 3 batches. Heights 100+ use DOWNLOAD_BATCH_SIZE_16. */
+  /* Add enough blocks for 3 batches (16 blocks each). */
   size_t num_blocks = (size_t)DOWNLOAD_BATCH_SIZE_16 * 2 + 1;
   hash256_t *hashes = malloc(num_blocks * sizeof(hash256_t));
   uint32_t *heights = malloc(num_blocks * sizeof(uint32_t));
@@ -501,7 +501,7 @@ static void test_multiple_peers_pull(void) {
     download_mgr_add_peer(mgr, (peer_t *)&peers[i]);
   }
 
-  /* Add exactly 3 batches worth of blocks. Heights 100+ use DOWNLOAD_BATCH_SIZE_16. */
+  /* Add exactly 3 batches worth of blocks (16 blocks each). */
   size_t num_blocks = (size_t)DOWNLOAD_BATCH_SIZE_16 * 3;
   hash256_t *hashes = malloc(num_blocks * sizeof(hash256_t));
   uint32_t *heights = malloc(num_blocks * sizeof(uint32_t));
