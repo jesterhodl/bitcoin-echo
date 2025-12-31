@@ -305,24 +305,6 @@ echo_bool_t block_validate_header(const block_header_t *header,
                                   block_validation_error_t *error);
 
 /*
- * Validate a genesis block header.
- *
- * The genesis block has special rules:
- *   - prev_hash must be all zeros
- *   - No MTP check (no previous blocks)
- *   - Specific values for mainnet/testnet/regtest
- *
- * Parameters:
- *   header - Block header to validate
- *   error  - Output: specific error if validation fails (may be NULL)
- *
- * Returns:
- *   ECHO_TRUE if this is a valid genesis block, ECHO_FALSE otherwise
- */
-echo_bool_t block_validate_genesis(const block_header_t *header,
-                                   block_validation_error_t *error);
-
-/*
  * Convert a block validation error to a human-readable string.
  *
  * Parameters:
@@ -649,23 +631,6 @@ echo_bool_t coinbase_validate(const tx_t *coinbase, uint32_t height,
                               block_validation_error_t *error);
 
 /*
- * Check if a coinbase output is mature (spendable).
- *
- * Coinbase outputs cannot be spent until COINBASE_MATURITY blocks
- * have been mined on top of the block containing them.
- *
- * Parameters:
- *   coinbase_height - Height of block containing the coinbase
- *   current_height  - Current chain height
- *
- * Returns:
- *   ECHO_TRUE if mature (current_height - coinbase_height >= COINBASE_MATURITY)
- *   ECHO_FALSE if immature
- */
-echo_bool_t coinbase_is_mature(uint32_t coinbase_height,
-                               uint32_t current_height);
-
-/*
  * ============================================================================
  * Full Block Validation
  * ============================================================================
@@ -811,49 +776,5 @@ echo_bool_t block_validate_size(const block_t *block,
  */
 echo_bool_t block_validate_tx_structure(const block_t *block,
                                         block_validation_error_t *error);
-
-/*
- * Perform complete block validation.
- *
- * This is the main entry point for full block validation. It performs:
- *   1. Header validation (PoW, timestamp, prev_block, version)
- *   2. Difficulty validation (bits match expected)
- *   3. Block size/weight limits
- *   4. Transaction structure (coinbase, no duplicates)
- *   5. Merkle root verification
- *   6. Coinbase validation (BIP-34 height, subsidy limit)
- *   7. Witness commitment verification (if SegWit active)
- *
- * Note: This does NOT validate individual transaction scripts or
- * UTXO availability—that requires the UTXO set.
- *
- * Parameters:
- *   block  - Block to validate
- *   ctx    - Full validation context
- *   result - Output: detailed validation result
- *
- * Returns:
- *   ECHO_TRUE if block passes all checks, ECHO_FALSE otherwise
- */
-echo_bool_t block_validate(const block_t *block, const full_block_ctx_t *ctx,
-                           block_validation_result_t *result);
-
-/*
- * Validate a block with minimal context (header-only checks).
- *
- * This performs only the checks that don't require chain context:
- *   - Header validation (PoW, basic timestamp)
- *   - Block structure (coinbase, size)
- *   - Merkle root
- *
- * Parameters:
- *   block  - Block to validate
- *   error  - Output: specific error (may be NULL)
- *
- * Returns:
- *   ECHO_TRUE if block passes basic checks, ECHO_FALSE otherwise
- */
-echo_bool_t block_validate_basic(const block_t *block,
-                                 block_validation_error_t *error);
 
 #endif /* ECHO_BLOCK_VALIDATE_H */

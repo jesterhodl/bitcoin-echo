@@ -86,26 +86,4 @@ echo_result_t varint_write(uint8_t *buf, size_t buf_len, uint64_t value,
 echo_result_t varint_read(const uint8_t *buf, size_t buf_len, uint64_t *value,
                           size_t *consumed);
 
-/*
- * Read a varint without strict canonical checking.
- *
- * This is provided for compatibility with potentially malformed data
- * that may exist in historical blocks. The consensus engine uses
- * varint_read() for strict validation; this function may be used
- * when parsing data where non-canonical encoding must be tolerated.
- *
- * Parameters:
- *   buf       - Input buffer
- *   buf_len   - Size of input buffer
- *   value     - Output: the decoded value
- *   consumed  - Output: number of bytes consumed (may be NULL)
- *
- * Returns:
- *   ECHO_OK on success
- *   ECHO_ERR_NULL_PARAM if buf or value is NULL
- *   ECHO_ERR_TRUNCATED if buffer too short for complete varint
- */
-echo_result_t varint_read_nonstrict(const uint8_t *buf, size_t buf_len,
-                                    uint64_t *value, size_t *consumed);
-
 #endif /* ECHO_SERIALIZE_H */

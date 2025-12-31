@@ -96,33 +96,3 @@ uint32_t msg_checksum(const uint8_t *payload, size_t len) {
 
   return checksum;
 }
-
-/**
- * Validate message header.
- */
-echo_bool_t msg_header_valid(const msg_header_t *header,
-                             uint32_t expected_magic) {
-  /* Check magic bytes */
-  if (header->magic != expected_magic) {
-    return ECHO_FALSE;
-  }
-
-  /* Verify command is null-terminated */
-  echo_bool_t has_null = ECHO_FALSE;
-  for (size_t i = 0; i < COMMAND_LEN; i++) {
-    if (header->command[i] == '\0') {
-      has_null = ECHO_TRUE;
-      break;
-    }
-  }
-  if (!has_null) {
-    return ECHO_FALSE;
-  }
-
-  /* Check length is within bounds */
-  if (header->length > MAX_MESSAGE_SIZE) {
-    return ECHO_FALSE;
-  }
-
-  return ECHO_TRUE;
-}

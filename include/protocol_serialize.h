@@ -233,11 +233,6 @@ echo_result_t msg_sendcmpct_deserialize(const uint8_t *buf, size_t buf_len,
 echo_result_t write_u8(uint8_t **ptr, const uint8_t *end, uint8_t val);
 
 /**
- * Write a uint16_t to buffer (little-endian).
- */
-echo_result_t write_u16_le(uint8_t **ptr, const uint8_t *end, uint16_t val);
-
-/**
  * Write a uint16_t to buffer (big-endian, for port numbers).
  */
 echo_result_t write_u16_be(uint8_t **ptr, const uint8_t *end, uint16_t val);
@@ -272,12 +267,6 @@ echo_result_t write_bytes(uint8_t **ptr, const uint8_t *end,
  * Read a uint8_t from buffer.
  */
 echo_result_t read_u8(const uint8_t **ptr, const uint8_t *end, uint8_t *val);
-
-/**
- * Read a uint16_t from buffer (little-endian).
- */
-echo_result_t read_u16_le(const uint8_t **ptr, const uint8_t *end,
-                          uint16_t *val);
 
 /**
  * Read a uint16_t from buffer (big-endian, for port numbers).

@@ -40,16 +40,6 @@ echo_result_t write_u8(uint8_t **ptr, const uint8_t *end, uint8_t val) {
   return ECHO_OK;
 }
 
-echo_result_t write_u16_le(uint8_t **ptr, const uint8_t *end, uint16_t val) {
-  if (*ptr + 2 > end) {
-    return ECHO_ERR_BUFFER_TOO_SMALL;
-  }
-  (*ptr)[0] = (uint8_t)(val & 0xFF);
-  (*ptr)[1] = (uint8_t)((val >> 8) & 0xFF);
-  *ptr += 2;
-  return ECHO_OK;
-}
-
 echo_result_t write_u16_be(uint8_t **ptr, const uint8_t *end, uint16_t val) {
   if (*ptr + 2 > end) {
     return ECHO_ERR_BUFFER_TOO_SMALL;
@@ -112,16 +102,6 @@ echo_result_t read_u8(const uint8_t **ptr, const uint8_t *end, uint8_t *val) {
   }
   *val = **ptr;
   (*ptr)++;
-  return ECHO_OK;
-}
-
-echo_result_t read_u16_le(const uint8_t **ptr, const uint8_t *end,
-                          uint16_t *val) {
-  if (*ptr + 2 > end) {
-    return ECHO_ERR_TRUNCATED;
-  }
-  *val = (uint16_t)((uint16_t)((*ptr)[0]) | ((uint16_t)((*ptr)[1]) << 8));
-  *ptr += 2;
   return ECHO_OK;
 }
 

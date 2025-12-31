@@ -405,60 +405,6 @@ static void test_json_builder_object(void) {
 
 /*
  * ============================================================================
- * TEST: RPC Request Parsing
- * ============================================================================
- */
-
-static void test_rpc_request_parse_basic(void) {
-  const char *json =
-      "{\"id\": \"1\", \"method\": \"getblockchaininfo\", \"params\": []}";
-
-  rpc_request_t req;
-  echo_result_t res = rpc_request_parse(json, &req);
-
-  assert(res == ECHO_OK);
-  assert(req.id != NULL);
-  assert(strcmp(req.id, "1") == 0);
-  assert(req.method != NULL);
-  assert(strcmp(req.method, "getblockchaininfo") == 0);
-  assert(req.params != NULL);
-
-  rpc_request_free(&req);
-  test_pass();
-}
-
-static void test_rpc_request_parse_numeric_id(void) {
-  const char *json =
-      "{\"id\": 42, \"method\": \"getblock\", \"params\": [\"hash\"]}";
-
-  rpc_request_t req;
-  echo_result_t res = rpc_request_parse(json, &req);
-
-  assert(res == ECHO_OK);
-  assert(req.id != NULL);
-  assert(strcmp(req.id, "42") == 0);
-  assert(strcmp(req.method, "getblock") == 0);
-
-  rpc_request_free(&req);
-  test_pass();
-}
-
-static void test_rpc_request_parse_null_id(void) {
-  const char *json = "{\"id\": null, \"method\": \"test\", \"params\": []}";
-
-  rpc_request_t req;
-  echo_result_t res = rpc_request_parse(json, &req);
-
-  assert(res == ECHO_OK);
-  assert(req.id == NULL);
-  assert(strcmp(req.method, "test") == 0);
-
-  rpc_request_free(&req);
-  test_pass();
-}
-
-/*
- * ============================================================================
  * TEST: RPC Response Building
  * ============================================================================
  */
@@ -819,9 +765,6 @@ int main(void) {
     test_case("Json builder null"); test_json_builder_null(); test_pass();
     test_case("Json builder hex"); test_json_builder_hex(); test_pass();
     test_case("Json builder object"); test_json_builder_object(); test_pass();
-    test_case("Rpc request parse basic"); test_rpc_request_parse_basic(); test_pass();
-    test_case("Rpc request parse numeric id"); test_rpc_request_parse_numeric_id(); test_pass();
-    test_case("Rpc request parse null id"); test_rpc_request_parse_null_id(); test_pass();
     test_case("Rpc response success"); test_rpc_response_success(); test_pass();
     test_case("Rpc response error"); test_rpc_response_error(); test_pass();
     test_case("Hex decode valid"); test_hex_decode_valid(); test_pass();

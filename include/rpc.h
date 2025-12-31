@@ -416,26 +416,6 @@ typedef struct {
 } rpc_request_t;
 
 /**
- * Parse an RPC request from JSON.
- *
- * Parameters:
- *   json - JSON string
- *   req  - Output: parsed request
- *
- * Returns:
- *   ECHO_OK on success, error code on failure.
- */
-echo_result_t rpc_request_parse(const char *json, rpc_request_t *req);
-
-/**
- * Free an RPC request.
- *
- * Parameters:
- *   req - Request to free
- */
-void rpc_request_free(rpc_request_t *req);
-
-/**
  * Build an RPC success response.
  *
  * Parameters:

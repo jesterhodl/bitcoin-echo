@@ -620,82 +620,6 @@ static void test_coinbase_before_bip34(void)
 
 /*
  * ============================================================================
- * Coinbase Maturity Tests
- * ============================================================================
- */
-
-static void test_maturity_immature(void)
-{
-
-    /* Coinbase at height 100, current height 150 (only 50 confirmations) */
-    if (!coinbase_is_mature(100, 150)) {
-        test_pass();
-        test_case("Immature coinbase (50 confs) rejected");
-        test_pass();
-    } else {
-        test_case("Immature coinbase accepted");
-        test_fail("Immature coinbase accepted");
-    }
-}
-
-static void test_maturity_at_boundary(void)
-{
-
-    /* Coinbase at height 100, current height 199 (99 confirmations) */
-    if (!coinbase_is_mature(100, 199)) {
-        test_pass();
-        test_case("Immature coinbase (99 confs) rejected");
-        test_pass();
-    } else {
-        test_case("Immature coinbase (99 confs) accepted");
-        test_fail("Immature coinbase (99 confs) accepted");
-    }
-}
-
-static void test_maturity_exactly_100(void)
-{
-
-    /* Coinbase at height 100, current height 200 (exactly 100 confirmations) */
-    if (coinbase_is_mature(100, 200)) {
-        test_pass();
-        test_case("Mature coinbase (100 confs) accepted");
-        test_pass();
-    } else {
-        test_case("Mature coinbase (100 confs) rejected");
-        test_fail("Mature coinbase (100 confs) rejected");
-    }
-}
-
-static void test_maturity_genesis(void)
-{
-
-    /* Genesis coinbase at height 0, current height 100 */
-    if (coinbase_is_mature(0, 100)) {
-        test_pass();
-        test_case("Genesis coinbase mature at height 100");
-        test_pass();
-    } else {
-        test_case("Genesis coinbase immature at height 100");
-        test_fail("Genesis coinbase immature at height 100");
-    }
-}
-
-static void test_maturity_same_block(void)
-{
-
-    /* Can't spend in same block */
-    if (!coinbase_is_mature(100, 100)) {
-        test_pass();
-        test_case("Cannot spend coinbase in same block");
-        test_pass();
-    } else {
-        test_case("Same-block coinbase spend allowed");
-        test_fail("Same-block coinbase spend allowed");
-    }
-}
-
-/*
- * ============================================================================
  * Witness Commitment Tests
  * ============================================================================
  */
@@ -845,14 +769,6 @@ int main(void)
     test_coinbase_with_fees();
     test_coinbase_height_mismatch();
     test_coinbase_before_bip34();
-
-    /* Maturity Tests */
-    test_section("Coinbase maturity tests");
-    test_maturity_immature();
-    test_maturity_at_boundary();
-    test_maturity_exactly_100();
-    test_maturity_genesis();
-    test_maturity_same_block();
 
     /* Witness Commitment Tests */
     test_section("Witness commitment tests");

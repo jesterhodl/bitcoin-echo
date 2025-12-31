@@ -173,143 +173,6 @@ static void test_msg_checksum_verack(void) {
     test_pass();
 }
 
-/* Test header validation */
-static void test_msg_header_valid_mainnet(void) {
-    test_case("Valid mainnet header");
-
-    msg_header_t header;
-    header.magic = MAGIC_MAINNET;
-    strcpy(header.command, "version");
-    header.length = 100;
-    header.checksum = 0x12345678;
-
-    if (msg_header_valid(&header, MAGIC_MAINNET) != ECHO_TRUE) {
-        test_fail("mainnet header validation failed");
-        return;
-    }
-
-    test_pass();
-}
-
-static void test_msg_header_valid_testnet(void) {
-    test_case("Valid testnet header");
-
-    msg_header_t header;
-    header.magic = MAGIC_TESTNET;
-    strcpy(header.command, "ping");
-    header.length = 8;
-    header.checksum = 0x12345678;
-
-    if (msg_header_valid(&header, MAGIC_TESTNET) != ECHO_TRUE) {
-        test_fail("testnet header validation failed");
-        return;
-    }
-
-    test_pass();
-}
-
-static void test_msg_header_valid_regtest(void) {
-    test_case("Valid regtest header");
-
-    msg_header_t header;
-    header.magic = MAGIC_REGTEST;
-    strcpy(header.command, "pong");
-    header.length = 8;
-    header.checksum = 0x12345678;
-
-    if (msg_header_valid(&header, MAGIC_REGTEST) != ECHO_TRUE) {
-        test_fail("regtest header validation failed");
-        return;
-    }
-
-    test_pass();
-}
-
-static void test_msg_header_invalid_magic(void) {
-    test_case("Reject invalid magic");
-
-    msg_header_t header;
-    header.magic = 0xDEADBEEF;  /* Wrong magic */
-    strcpy(header.command, "version");
-    header.length = 100;
-    header.checksum = 0x12345678;
-
-    if (msg_header_valid(&header, MAGIC_MAINNET) != ECHO_FALSE) {
-        test_fail("should reject invalid magic");
-        return;
-    }
-
-    test_pass();
-}
-
-static void test_msg_header_no_null_terminator(void) {
-    test_case("Reject missing null terminator");
-
-    msg_header_t header;
-    header.magic = MAGIC_MAINNET;
-    memset(header.command, 'x', COMMAND_LEN);  /* No null terminator */
-    header.length = 100;
-    header.checksum = 0x12345678;
-
-    if (msg_header_valid(&header, MAGIC_MAINNET) != ECHO_FALSE) {
-        test_fail("should reject command without null terminator");
-        return;
-    }
-
-    test_pass();
-}
-
-static void test_msg_header_oversized_payload(void) {
-    test_case("Reject oversized payload");
-
-    msg_header_t header;
-    header.magic = MAGIC_MAINNET;
-    strcpy(header.command, "block");
-    header.length = MAX_MESSAGE_SIZE + 1;  /* Too large */
-    header.checksum = 0x12345678;
-
-    if (msg_header_valid(&header, MAGIC_MAINNET) != ECHO_FALSE) {
-        test_fail("should reject oversized payload");
-        return;
-    }
-
-    test_pass();
-}
-
-static void test_msg_header_max_size_payload(void) {
-    test_case("Accept max size payload");
-
-    msg_header_t header;
-    header.magic = MAGIC_MAINNET;
-    strcpy(header.command, "block");
-    header.length = MAX_MESSAGE_SIZE;  /* Exactly at limit */
-    header.checksum = 0x12345678;
-
-    if (msg_header_valid(&header, MAGIC_MAINNET) != ECHO_TRUE) {
-        test_fail("should accept max size payload");
-        return;
-    }
-
-    test_pass();
-}
-
-static void test_msg_header_zero_length(void) {
-    test_case("Accept zero length payload");
-
-    msg_header_t header;
-    header.magic = MAGIC_MAINNET;
-    strcpy(header.command, "verack");
-    header.length = 0;  /* Empty payload */
-    header.checksum = 0xe2e0f65d;
-
-    if (msg_header_valid(&header, MAGIC_MAINNET) != ECHO_TRUE) {
-        test_fail("should accept zero length payload");
-        return;
-    }
-
-    test_pass();
-}
-
 /* Test message header size */
 static void test_msg_header_size(void) {
     test_case("Header size is 24 bytes");
@@ -342,14 +205,6 @@ static void test_command_padding(void) {
             test_fail("command padding not null");
             return;
         }
-    }
-
-    header.length = 8;
-    header.checksum = 0x12345678;
-
-    if (msg_header_valid(&header, MAGIC_MAINNET) != ECHO_TRUE) {
-        test_fail("header validation failed");
-        return;
     }
 
     test_pass();
@@ -462,15 +317,7 @@ int main(void) {
     test_msg_checksum_known();
     test_msg_checksum_verack();
 
-    test_section("Header Validation");
-    test_msg_header_valid_mainnet();
-    test_msg_header_valid_testnet();
-    test_msg_header_valid_regtest();
-    test_msg_header_invalid_magic();
-    test_msg_header_no_null_terminator();
-    test_msg_header_oversized_payload();
-    test_msg_header_max_size_payload();
-    test_msg_header_zero_length();
+    test_section("Header Structure");
     test_msg_header_size();
     test_command_padding();
 

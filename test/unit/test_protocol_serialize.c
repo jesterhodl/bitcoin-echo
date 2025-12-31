@@ -40,29 +40,23 @@ static void test_read_write_primitives(void) {
     ASSERT(write_u8(&ptr, end, 0x42) == ECHO_OK);
     ASSERT(ptr - buf == 1);
 
-    /* Test u16_le */
-    ASSERT(write_u16_le(&ptr, end, 0x1234) == ECHO_OK);
-    ASSERT(ptr - buf == 3);
-    ASSERT(buf[1] == 0x34);
-    ASSERT(buf[2] == 0x12);
-
     /* Test u16_be (for ports) */
     ASSERT(write_u16_be(&ptr, end, 0x5678) == ECHO_OK);
-    ASSERT(ptr - buf == 5);
-    ASSERT(buf[3] == 0x56);
-    ASSERT(buf[4] == 0x78);
+    ASSERT(ptr - buf == 3);
+    ASSERT(buf[1] == 0x56);
+    ASSERT(buf[2] == 0x78);
 
     /* Test u32_le */
     ASSERT(write_u32_le(&ptr, end, 0x12345678) == ECHO_OK);
-    ASSERT(ptr - buf == 9);
-    ASSERT(buf[5] == 0x78);
-    ASSERT(buf[8] == 0x12);
+    ASSERT(ptr - buf == 7);
+    ASSERT(buf[3] == 0x78);
+    ASSERT(buf[6] == 0x12);
 
     /* Test u64_le */
     ASSERT(write_u64_le(&ptr, end, 0x123456789ABCDEF0ULL) == ECHO_OK);
-    ASSERT(ptr - buf == 17);
-    ASSERT(buf[9] == 0xF0);
-    ASSERT(buf[16] == 0x12);
+    ASSERT(ptr - buf == 15);
+    ASSERT(buf[7] == 0xF0);
+    ASSERT(buf[14] == 0x12);
 
     /* Test reading back */
     const uint8_t *rptr = buf;
@@ -73,9 +67,6 @@ static void test_read_write_primitives(void) {
 
     ASSERT(read_u8(&rptr, end, &v8) == ECHO_OK);
     ASSERT(v8 == 0x42);
-
-    ASSERT(read_u16_le(&rptr, end, &v16) == ECHO_OK);
-    ASSERT(v16 == 0x1234);
 
     ASSERT(read_u16_be(&rptr, end, &v16) == ECHO_OK);
     ASSERT(v16 == 0x5678);

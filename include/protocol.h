@@ -372,17 +372,4 @@ const char *msg_command_string(msg_type_t type);
  */
 uint32_t msg_checksum(const uint8_t *payload, size_t len);
 
-/**
- * Validate message header.
- *
- * Checks:
- * - Magic bytes match expected network
- * - Command is null-terminated
- * - Length is within bounds
- *
- * Returns true if valid, false otherwise.
- */
-echo_bool_t msg_header_valid(const msg_header_t *header,
-                             uint32_t expected_magic);
-
 #endif /* ECHO_PROTOCOL_H */

@@ -640,92 +640,6 @@ static void test_header_full_valid(void) {
 
 /*
  * ============================================================================
- * Genesis Block Validation Tests
- * ============================================================================
- */
-
-static void test_genesis_valid(void) {
-  block_header_t header;
-  block_validation_error_t error = BLOCK_VALID;
-  block_genesis_header(&header);
-
-  if (block_validate_genesis(&header, &error)) {
-    test_case("Genesis block validated");
-        test_pass();
-  } else {
-    printf("  [FAIL] Genesis block rejected (error: %s)\n",
-           block_validation_error_str(error));
-  }
-}
-
-static void test_genesis_wrong_nonce(void) {
-  block_header_t header;
-  block_validation_error_t error = BLOCK_VALID;
-  block_genesis_header(&header);
-  header.nonce = 12345;
-
-  if (!block_validate_genesis(&header, &error)) {
-    test_case("Genesis with wrong nonce rejected");
-        test_pass();
-  } else {
-    test_case("Genesis with wrong nonce accepted");
-        test_fail("Genesis with wrong nonce accepted");
-  }
-}
-
-static void test_genesis_wrong_timestamp(void) {
-  block_header_t header;
-  block_validation_error_t error = BLOCK_VALID;
-  block_genesis_header(&header);
-  header.timestamp = 1;
-
-  if (!block_validate_genesis(&header, &error)) {
-    test_case("Genesis with wrong timestamp rejected");
-        test_pass();
-  } else {
-    test_case("Genesis with wrong timestamp accepted");
-        test_fail("Genesis with wrong timestamp accepted");
-  }
-}
-
-static void test_genesis_wrong_bits(void) {
-  block_header_t header;
-  block_validation_error_t error = BLOCK_VALID;
-  block_genesis_header(&header);
-  header.bits = 0x1d00f000;
-
-  if (!block_validate_genesis(&header, &error)) {
-    test_case("Genesis with wrong bits rejected");
-        test_pass();
-  } else {
-    test_case("Genesis with wrong bits accepted");
-        test_fail("Genesis with wrong bits accepted");
-  }
-}
-
-static void test_genesis_nonzero_prev(void) {
-  block_header_t header;
-  block_validation_error_t error = BLOCK_VALID;
-  block_genesis_header(&header);
-  header.prev_hash.bytes[0] = 0x01;
-
-  if (!block_validate_genesis(&header, &error)) {
-    if (error == BLOCK_ERR_PREV_BLOCK_UNKNOWN) {
-      test_case("Genesis with non-zero prev_hash rejected");
-        test_pass();
-    } else {
-      printf("  [FAIL] Genesis with non-zero prev_hash rejected with wrong "
-             "error: %s\n",
-             block_validation_error_str(error));
-    }
-  } else {
-    test_case("Genesis with non-zero prev_hash accepted");
-        test_fail("Genesis with non-zero prev_hash accepted");
-  }
-}
-
-/*
- * ============================================================================
  * Difficulty Adjustment Tests
  * ============================================================================
  */
@@ -1641,13 +1555,6 @@ int main(void) {
 
   test_section("Full header validation");
   test_header_full_valid();
-
-  test_section("Genesis block validation");
-  test_genesis_valid();
-  test_genesis_wrong_nonce();
-  test_genesis_wrong_timestamp();
-  test_genesis_wrong_bits();
-  test_genesis_nonzero_prev();
 
   test_section("Difficulty adjustment");
   test_difficulty_retarget_height();

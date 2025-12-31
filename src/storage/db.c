@@ -86,32 +86,6 @@ echo_result_t db_set_ibd_mode(db_t *db, bool ibd_mode) {
   return ECHO_OK;
 }
 
-echo_result_t db_checkpoint(db_t *db) {
-  if (!db || !db->handle) {
-    return ECHO_ERR_NULL_PARAM;
-  }
-
-  /*
-   * Checkpoint the WAL file using TRUNCATE mode.
-   * TRUNCATE is the most aggressive mode - it checkpoints all frames
-   * and truncates the WAL to zero bytes if all frames are transferred.
-   *
-   * Without periodic checkpointing during IBD:
-   * - WAL grows unbounded (100s of MB)
-   * - Every read must scan the WAL linearly
-   * - Performance degrades exponentially
-   *
-   * With checkpointing every ~500 blocks:
-   * - WAL stays small
-   * - Reads remain fast
-   * - Steady ~100+ blk/s throughput
-   */
-  int rc = sqlite3_wal_checkpoint_v2(db->handle, NULL, SQLITE_CHECKPOINT_TRUNCATE,
-                                     NULL, NULL);
-
-  return (rc == SQLITE_OK) ? ECHO_OK : ECHO_ERR_DB;
-}
-
 void db_close(db_t *db) {
   if (!db || !db->handle) {
     return;

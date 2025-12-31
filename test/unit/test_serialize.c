@@ -151,36 +151,6 @@ static void test_varint_error(const char *name, const uint8_t *input,
     }
 }
 
-/*
- * Test non-strict reading of non-canonical encoding.
- */
-static void test_varint_nonstrict(const char *name, const uint8_t *input,
-                                  size_t input_len, uint64_t expected_value,
-                                  size_t expected_consumed)
-{
-    uint64_t value;
-    size_t consumed;
-    echo_result_t result;
-
-    result = varint_read_nonstrict(input, input_len, &value, &consumed);
-
-    test_case(name);
-    if (result == ECHO_OK && value == expected_value &&
-        consumed == expected_consumed) {
-        test_pass();
-    } else {
-        test_fail(name);
-        printf("    Input: ");
-        print_hex(input, input_len);
-        
-        printf("    Result: %d\n", result);
-        printf("    Expected: value=%llu, consumed=%zu\n",
-               (unsigned long long)expected_value, expected_consumed);
-        printf("    Got: value=%llu, consumed=%zu\n",
-               (unsigned long long)value, consumed);
-    }
-}
-
 int main(void)
 {
     test_suite_begin("Serialization Tests");
@@ -323,16 +293,6 @@ int main(void)
         test_varint_error("non-canonical 252 as 3-byte", noncanon_253_max, 3, ECHO_ERR_INVALID_FORMAT);
         test_varint_error("non-canonical 65535 as 5-byte", noncanon_32_small, 5, ECHO_ERR_INVALID_FORMAT);
         test_varint_error("non-canonical 4294967295 as 9-byte", noncanon_64_small, 9, ECHO_ERR_INVALID_FORMAT);
-    }
-    
-
-    /* Test non-strict mode accepts non-canonical encoding */
-    test_section("Non-strict mode tests");
-    {
-        uint8_t noncanon_0[] = {0xFD, 0x00, 0x00};  /* 0 encoded as 3-byte */
-        uint8_t noncanon_252[] = {0xFD, 0xFC, 0x00};  /* 252 encoded as 3-byte */
-        test_varint_nonstrict("non-strict 0 as 3-byte", noncanon_0, 3, 0, 3);
-        test_varint_nonstrict("non-strict 252 as 3-byte", noncanon_252, 3, 252, 3);
     }
 
     test_suite_end();
