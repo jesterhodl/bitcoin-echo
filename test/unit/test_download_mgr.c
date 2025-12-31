@@ -238,28 +238,28 @@ static void test_add_work(void) {
 
   download_mgr_t *mgr = download_mgr_create(&callbacks);
 
-  hash256_t hashes[10];
-  uint32_t heights[10];
-  for (uint32_t i = 0; i < 10; i++) {
+  hash256_t hashes[5];
+  uint32_t heights[5];
+  for (uint32_t i = 0; i < 5; i++) {
     make_test_hash(&hashes[i], i + 100);
     heights[i] = i + 100;
   }
 
-  size_t added = download_mgr_add_work(mgr, hashes, heights, 10);
+  size_t added = download_mgr_add_work(mgr, hashes, heights, 5);
 
-  if (added != 10) {
-    test_fail_uint("blocks added", 10, added);
+  if (added != 5) {
+    test_fail_uint("blocks added", 5, added);
     download_mgr_destroy(mgr);
     return;
   }
 
-  if (download_mgr_pending_count(mgr) != 10) {
-    test_fail_uint("pending count", 10, download_mgr_pending_count(mgr));
+  if (download_mgr_pending_count(mgr) != 5) {
+    test_fail_uint("pending count", 5, download_mgr_pending_count(mgr));
     download_mgr_destroy(mgr);
     return;
   }
 
-  /* Should have created 1 batch (10 < DOWNLOAD_BATCH_SIZE blocks per batch) */
+  /* Should have created 1 batch (5 < DOWNLOAD_BATCH_SIZE blocks per batch) */
   if (download_mgr_queue_count(mgr) != 1) {
     test_fail_uint("queue count", 1, download_mgr_queue_count(mgr));
     download_mgr_destroy(mgr);
@@ -634,14 +634,14 @@ static void test_peer_starved(void) {
   download_mgr_add_peer(mgr, (peer_t *)&peer1);
   download_mgr_add_peer(mgr, (peer_t *)&peer2);
 
-  /* Give peer1 some work */
-  hash256_t hashes[16];
-  uint32_t heights[16];
-  for (uint32_t i = 0; i < 16; i++) {
+  /* Give peer1 some work (exactly 1 batch worth) */
+  hash256_t hashes[DOWNLOAD_BATCH_SIZE];
+  uint32_t heights[DOWNLOAD_BATCH_SIZE];
+  for (uint32_t i = 0; i < DOWNLOAD_BATCH_SIZE; i++) {
     make_test_hash(&hashes[i], i + 100);
     heights[i] = i + 100;
   }
-  download_mgr_add_work(mgr, hashes, heights, 16);
+  download_mgr_add_work(mgr, hashes, heights, DOWNLOAD_BATCH_SIZE);
   download_mgr_peer_request_work(mgr, (peer_t *)&peer1);
 
   /* peer2 tries to request work but queue is empty */
@@ -663,8 +663,9 @@ static void test_peer_starved(void) {
   }
 
   /* Work should be back in queue */
-  if (download_mgr_pending_count(mgr) != 16) {
-    test_fail_uint("pending after split", 16, download_mgr_pending_count(mgr));
+  if (download_mgr_pending_count(mgr) != DOWNLOAD_BATCH_SIZE) {
+    test_fail_uint("pending after split", DOWNLOAD_BATCH_SIZE,
+                   download_mgr_pending_count(mgr));
     download_mgr_destroy(mgr);
     return;
   }
