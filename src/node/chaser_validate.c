@@ -390,9 +390,20 @@ static void *worker_thread(void *arg) {
                         }
                     }
 
-                    log_error(LOG_COMP_SYNC,
-                              "chaser_validate: block %u validation failed (confirmed=%u)",
-                              work->height, post_confirmed);
+                    /* During parallel IBD, blocks often arrive out of order.
+                     * A block N+2 can't be validated until block N+1 is confirmed
+                     * because its parent's UTXO state isn't committed yet.
+                     * This is NOT an error - block will be retried via CHASE_BUMP. */
+                    if (work->height > post_confirmed + 1) {
+                        log_debug(LOG_COMP_SYNC,
+                                  "chaser_validate: block %u waiting for parent "
+                                  "(confirmed=%u), will retry",
+                                  work->height, post_confirmed);
+                    } else {
+                        log_error(LOG_COMP_SYNC,
+                                  "chaser_validate: block %u validation failed (confirmed=%u)",
+                                  work->height, post_confirmed);
+                    }
                     result = -1;
                 }
                 block_free(&block);
