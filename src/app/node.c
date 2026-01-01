@@ -3943,24 +3943,24 @@ uint32_t node_prune_blocks(node_t *node, uint32_t target_height) {
     }
 
     /*
-     * CRITICAL: Don't delete files containing blocks not yet validated!
+     * CRITICAL: Don't delete files within the 550-block safety margin!
      *
-     * During IBD, blocks are downloaded ahead of validation and stored in
-     * block files. The safety margin (chain_height - 550) is based on
-     * VALIDATED height, but files may contain DOWNLOADED-but-not-validated
-     * blocks at higher heights.
+     * We must keep at least 550 blocks for potential reorg handling.
+     * Additionally, during IBD, blocks are downloaded ahead of validation,
+     * so we must also ensure we don't delete unvalidated blocks.
      *
-     * We must check that ALL blocks in the file are validated (i.e., the
-     * file's max height is below the validated chain height) before deleting.
+     * The min_keep_height (chain_height - 550) enforces both constraints:
+     * - Maintains reorg safety margin
+     * - Since chain_height is validated height, anything >= min_keep_height
+     *   is either within the safety margin or not yet validated
      *
-     * Bug fixed 2025-01-01: Previously we deleted files based only on
-     * storage size and safety margin without checking if the file contained
-     * unvalidated blocks, causing validation failures during IBD.
+     * Bug fixed 2025-01-01: Previously checked against chain_height directly,
+     * which didn't respect the 550-block safety margin.
      */
-    if (file_max_height >= chain_height) {
+    if (file_max_height >= min_keep_height) {
       log_debug(LOG_COMP_STORE,
-                "Skipping blk%05u.dat: contains unvalidated blocks (max %u >= validated %u)",
-                file_idx, file_max_height, chain_height);
+                "Skipping blk%05u.dat: within safety margin (max %u >= keep %u)",
+                file_idx, file_max_height, min_keep_height);
       continue;
     }
 
