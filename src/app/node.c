@@ -3953,6 +3953,28 @@ uint32_t node_prune_blocks(node_t *node, uint32_t target_height) {
       continue;
     }
 
+    /*
+     * CRITICAL: Don't delete files containing blocks not yet validated!
+     *
+     * During IBD, blocks are downloaded ahead of validation and stored in
+     * block files. The safety margin (chain_height - 550) is based on
+     * VALIDATED height, but files may contain DOWNLOADED-but-not-validated
+     * blocks at higher heights.
+     *
+     * We must check that ALL blocks in the file are validated (i.e., the
+     * file's max height is below the validated chain height) before deleting.
+     *
+     * Bug fixed 2025-01-01: Previously we deleted files based only on
+     * storage size and safety margin without checking if the file contained
+     * unvalidated blocks, causing validation failures during IBD.
+     */
+    if (file_max_height >= chain_height) {
+      log_debug(LOG_COMP_STORE,
+                "Skipping blk%05u.dat: contains unvalidated blocks (max %u >= validated %u)",
+                file_idx, file_max_height, chain_height);
+      continue;
+    }
+
     /* Get file size before deleting */
     uint64_t file_size = 0;
     block_storage_get_file_size(&node->block_storage, file_idx, &file_size);
@@ -4020,9 +4042,9 @@ echo_result_t node_maybe_prune(node_t *node) {
    * Progressive IBD Pruning: We prune validated blocks even during IBD.
    *
    * The 550-block safety margin in node_prune_blocks() ensures we never
-   * prune blocks needed for reorg. Since consensus_get_height() returns
-   * the VALIDATED height (not downloaded height), we never prune blocks
-   * that are downloaded but not yet validated.
+   * prune blocks needed for reorg. Additionally, node_prune_blocks() checks
+   * each file's max height against the validated height to ensure we never
+   * delete files containing downloaded-but-not-validated blocks.
    *
    * This keeps disk usage bounded during IBD rather than accumulating
    * potentially 100GB+ before pruning begins.
