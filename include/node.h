@@ -62,6 +62,7 @@ typedef struct {
   bool observer_mode;       /* If true, skip consensus/storage */
   uint64_t prune_target_mb; /* Pruning target in MB (0 = archival/no pruning) */
   log_level_t log_level;    /* Log verbosity (default: LOG_LEVEL_INFO) */
+  bool assume_valid;        /* Skip script verification for old blocks (default: true) */
 } node_config_t;
 
 /**

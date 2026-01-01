@@ -204,6 +204,19 @@ consensus_engine_t *consensus_engine_create(void);
 void consensus_engine_destroy(consensus_engine_t *engine);
 
 /*
+ * Set the AssumeValid height for script verification bypass.
+ *
+ * Blocks at or below this height skip script verification during IBD.
+ * Set to 0 to verify all scripts (full verification mode).
+ *
+ * Parameters:
+ *   engine - The consensus engine
+ *   height - AssumeValid height (0 = verify all scripts)
+ */
+void consensus_set_assume_valid_height(consensus_engine_t *engine,
+                                       uint32_t height);
+
+/*
  * ============================================================================
  * CHAIN TIP QUERIES
  * ============================================================================

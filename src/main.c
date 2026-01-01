@@ -72,6 +72,8 @@ static void print_usage(const char *program_name) {
       "  --rpcport=<port>    RPC listening port (default: network-specific)\n");
   printf("  --loglevel=<level>  Log verbosity: error, warn, info, debug\n");
   printf("                      (default: info)\n");
+  printf("  --assumevalid=<bool> Skip script verification for historical blocks\n");
+  printf("                      (default: true, set false for full verification)\n");
   printf("\n");
   printf("Network: %s (compile-time)\n", ECHO_NETWORK_NAME);
   printf("\n");
@@ -205,6 +207,17 @@ static int parse_arguments(int argc, char *argv[], node_config_t *config) {
         fprintf(stderr, "Valid levels: error, warn, info, debug\n");
         return -1;
       }
+    } else if (strncmp(arg, "--assumevalid=", 14) == 0) {
+      const char *value = arg + 14;
+      if (strcmp(value, "true") == 0 || strcmp(value, "1") == 0) {
+        config->assume_valid = true;
+      } else if (strcmp(value, "false") == 0 || strcmp(value, "0") == 0) {
+        config->assume_valid = false;
+      } else {
+        fprintf(stderr, "Error: Invalid assumevalid value '%s'\n", value);
+        fprintf(stderr, "Valid values: true, false, 1, 0\n");
+        return -1;
+      }
     } else {
       fprintf(stderr, "Error: Unknown option: %s\n", arg);
       fprintf(stderr, "Use --help for usage information\n");
@@ -311,7 +324,8 @@ int main(int argc, char *argv[]) {
   printf("Data directory: %s\n", config.data_dir);
   printf("P2P port: %u\n", config.port);
   printf("RPC port: %u\n", config.rpc_port);
-  printf("Log level: %s\n\n", log_level_string(config.log_level));
+  printf("Log level: %s\n", log_level_string(config.log_level));
+  printf("AssumeValid: %s\n\n", config.assume_valid ? "enabled" : "disabled");
 
   /* Initialize logging */
   log_init();

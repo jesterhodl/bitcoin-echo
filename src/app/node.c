@@ -269,6 +269,9 @@ void node_config_init(node_config_t *config, const char *data_dir) {
 
   /* Default log level */
   config->log_level = LOG_LEVEL_INFO;
+
+  /* Default to AssumeValid enabled (skip scripts for historical blocks) */
+  config->assume_valid = true;
 }
 
 /*
@@ -850,6 +853,11 @@ static echo_result_t node_init_consensus(node_t *node) {
   node->consensus = consensus_engine_create();
   if (node->consensus == NULL) {
     return ECHO_ERR_OUT_OF_MEMORY;
+  }
+
+  /* Configure AssumeValid based on node config */
+  if (!node->config.assume_valid) {
+    consensus_set_assume_valid_height(node->consensus, 0);
   }
 
   /*

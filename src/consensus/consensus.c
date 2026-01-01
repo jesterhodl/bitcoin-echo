@@ -46,8 +46,9 @@
  */
 
 struct consensus_engine {
-  chainstate_t *chainstate; /* Chain state (tip, UTXO set, block index) */
-  bool initialized;         /* True if genesis has been processed */
+  chainstate_t *chainstate;     /* Chain state (tip, UTXO set, block index) */
+  bool initialized;             /* True if genesis has been processed */
+  uint32_t assume_valid_height; /* Skip scripts for blocks <= this height */
 };
 
 /*
@@ -131,6 +132,7 @@ consensus_engine_t *consensus_engine_create(void) {
   }
 
   engine->initialized = false;
+  engine->assume_valid_height = PLATFORM_ASSUMEVALID_HEIGHT;
 
   return engine;
 }
@@ -142,6 +144,18 @@ void consensus_engine_destroy(consensus_engine_t *engine) {
 
   chainstate_destroy(engine->chainstate);
   free(engine);
+}
+
+void consensus_set_assume_valid_height(consensus_engine_t *engine,
+                                       uint32_t height) {
+  ECHO_ASSERT(engine != NULL);
+  engine->assume_valid_height = height;
+
+  if (height == 0) {
+    log_info(LOG_COMP_CONS, "AssumeValid disabled - verifying all scripts");
+  } else {
+    log_info(LOG_COMP_CONS, "AssumeValid enabled at height %u", height);
+  }
 }
 
 /*
@@ -1069,13 +1083,13 @@ echo_result_t consensus_validate_and_apply_block(consensus_engine_t *engine,
    * structure, UTXO availability, and value accounting.
    */
   uint32_t height = get_block_height(engine, &block->header);
-  bool skip_scripts = (PLATFORM_ASSUMEVALID_HEIGHT > 0 &&
-                       height <= PLATFORM_ASSUMEVALID_HEIGHT);
+  bool skip_scripts = (engine->assume_valid_height > 0 &&
+                       height <= engine->assume_valid_height);
 
   if (skip_scripts && height % 10000 == 0) {
     log_info(LOG_COMP_CONS, "AssumeValid: skipping script verification for "
                             "block %u (<= %u)",
-             height, PLATFORM_ASSUMEVALID_HEIGHT);
+             height, engine->assume_valid_height);
   }
 
   /* Validate block, getting TXIDs for reuse in apply */
