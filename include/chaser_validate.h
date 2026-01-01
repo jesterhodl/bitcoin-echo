@@ -1,8 +1,7 @@
 /**
  * chaser_validate.h — Parallel block validation chaser
  *
- * Validates blocks concurrently using a threadpool. Based on libbitcoin-node's
- * chaser_validate pattern with atomic backlog control.
+ * Validates blocks concurrently using a threadpool with atomic backlog control.
  *
  * Key features:
  * - Independent threadpool for validation work
@@ -139,8 +138,8 @@ int chaser_validate_submit(chaser_validate_t *chaser, uint32_t height,
  * Set the checkpoint height for validation bypass
  *
  * Blocks at or below this height skip full validation during IBD.
- * libbitcoin-node uses this to bypass validation for blocks that have
- * been network-validated (under known checkpoint).
+ * This bypasses validation for blocks that have been network-validated
+ * for years (under known checkpoint).
  *
  * @param chaser     Chaser to configure
  * @param height     Height of the checkpoint (blocks <= this are bypassed)

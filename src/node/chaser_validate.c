@@ -20,15 +20,15 @@
 
 /* Default configuration
  *
- * libbitcoin-node uses maximum_concurrency (typically hundreds) for both
- * the download window and validation backlog. This ensures the validator
- * always has work available.
+ * We use a large validation backlog (hundreds of blocks) to ensure the
+ * validator always has work available. This keeps all CPU cores busy
+ * during IBD when blocks arrive faster than they can be validated.
  *
  * Worker count should match CPU cores for maximum parallel validation.
  * Backlog should be large enough to keep all workers busy.
  */
 #define DEFAULT_WORKER_COUNT 0  /* 0 = auto-detect CPU count */
-#define DEFAULT_MAX_BACKLOG 500 /* libbitcoin uses maximum_concurrency */
+#define DEFAULT_MAX_BACKLOG 500 /* large backlog keeps workers saturated */
 
 /* Forward declarations */
 static int validate_start(chaser_t *self);

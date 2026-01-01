@@ -28,8 +28,7 @@
 
 /* Maximum outbound connections (connections we initiate)
  * During IBD, we use many peers for faster parallel block downloads.
- * Bitcoin Core uses 8, libbitcoin-node uses 100 during IBD.
- * We match libbitcoin-node's aggressive approach.
+ * Bitcoin Core uses 8; we use 100 for aggressive parallelism during IBD.
  */
 #define PLATFORM_MAX_OUTBOUND_PEERS 100
 

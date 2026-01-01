@@ -911,9 +911,9 @@ static echo_result_t node_init_chase(node_t *node) {
 
   /* Set checkpoint for validation bypass.
    *
-   * libbitcoin-style: Use PLATFORM_ASSUMEVALID_HEIGHT as the checkpoint
-   * for fresh IBD. This skips full validation (including script verification)
-   * for historical blocks that have been network-validated for years.
+   * Use PLATFORM_ASSUMEVALID_HEIGHT as the checkpoint for fresh IBD.
+   * This skips full validation (including script verification) for
+   * historical blocks that have been network-validated for years.
    *
    * We use the MAX of:
    * 1. Current validated height (from checkpoint restore or previous runs)
@@ -2318,8 +2318,8 @@ static void node_handle_peer_message(node_t *node, peer_t *peer,
       log_debug(LOG_COMP_NET, "Sent GETADDR to peer %s", peer->address);
 
       /*
-       * libbitcoin-style: Keep pruned peers connected but don't use them for
-       * block downloads during IBD. Pruned peers are still useful for:
+       * Keep pruned peers connected but don't use them for block downloads
+       * during IBD. Pruned peers are still useful for:
        *   - Headers sync (they have headers)
        *   - Transaction relay (after IBD)
        *   - Address discovery (getaddr)
@@ -3618,7 +3618,7 @@ echo_result_t node_process_received_block(node_t *node, const block_t *block) {
    * This routes ALL blocks (IBD + relay) through the chase event system:
    *   CHASE_CHECKED → chaser_validate → CHASE_VALID → chaser_confirm
    *
-   * This matches libbitcoin-node's unified organize() approach.
+   * A single code path for all blocks simplifies reasoning about state.
    */
 
   /* Determine block height from parent */

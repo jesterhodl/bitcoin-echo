@@ -1546,7 +1546,7 @@ void sync_tick(sync_manager_t *mgr) {
 
     /* Statistical deviation check: every DOWNLOAD_PERF_WINDOW_MS (10 seconds).
      * Disconnects stalled peers (0 B/s) and slow peers (> 1.5 stddev below mean).
-     * This is the libbitcoin-style performance model. */
+     * This cooperative model rewards fast peers with more work. */
     if (now - mgr->last_performance_check_time >= DOWNLOAD_PERF_WINDOW_MS) {
       mgr->last_performance_check_time = now;
       size_t dropped = download_mgr_check_performance(mgr->download_mgr);
@@ -1645,9 +1645,9 @@ void sync_tick(sync_manager_t *mgr) {
     }
 
     /* Queue blocks from headers - but only if queue has capacity.
-     * libbitcoin-style flow control: don't queue more work until current
-     * work is being consumed. This prevents excessive memory usage and
-     * reduces per-tick overhead from repeated storage lookups. */
+     * Flow control: don't queue more work until current work is being
+     * consumed. This prevents excessive memory usage and reduces per-tick
+     * overhead from repeated storage lookups. */
     size_t pending = download_mgr_pending_count(mgr->download_mgr);
     size_t inflight = download_mgr_inflight_count(mgr->download_mgr);
     size_t total_queued = pending + inflight;

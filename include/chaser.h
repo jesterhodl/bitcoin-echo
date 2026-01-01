@@ -4,8 +4,6 @@
  * Chasers are components that process chain data in a coordinated way.
  * Each chaser operates with thread safety and communicates via events.
  *
- * Based on libbitcoin-node's chaser pattern.
- *
  * Copyright (c) 2024 Bitcoin Echo
  * SPDX-License-Identifier: MIT
  */

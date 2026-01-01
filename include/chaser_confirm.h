@@ -2,7 +2,6 @@
  * chaser_confirm.h — Sequential block confirmation chaser
  *
  * Confirms validated blocks to the chainstate in height order.
- * Based on libbitcoin-node's chaser_confirm pattern.
  *
  * Key features:
  * - Sequential confirmation (single-threaded)

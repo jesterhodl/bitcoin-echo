@@ -1,8 +1,9 @@
 /**
  * chase.h — Event-driven chaser communication system
  *
- * Modeled after libbitcoin-node's chase event system.
- * Chasers subscribe to events and react asynchronously.
+ * "Chaser" terminology and event-driven architecture adapted from
+ * libbitcoin's design. Chasers subscribe to events and react
+ * asynchronously.
  *
  * Copyright (c) 2024 Bitcoin Echo
  * SPDX-License-Identifier: MIT

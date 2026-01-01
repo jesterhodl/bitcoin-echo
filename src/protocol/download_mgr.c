@@ -37,7 +37,7 @@ typedef struct batch_node {
 /**
  * Download manager internal state.
  *
- * libbitcoin-style: Batch queue + peer performance tracking.
+ * Cooperative model: Batch queue + peer performance tracking.
  */
 struct download_mgr {
   /* Callbacks for network operations */
@@ -224,9 +224,9 @@ static void compact_peers(download_mgr_t *mgr) {
  * Update performance window for a peer.
  * Called when recording bytes or on timer.
  *
- * libbitcoin-style: Once a peer has delivered bytes (rate > 0), they're
- * marked as "has_reported" and become subject to statistical checks.
- * Peers who never delivered aren't in the performance pool.
+ * Once a peer has delivered bytes (rate > 0), they're marked as "has_reported"
+ * and become subject to statistical checks. Peers who never delivered aren't
+ * in the performance pool yet.
  */
 static void update_peer_window(peer_perf_t *perf, uint64_t now) {
   uint64_t elapsed = now - perf->window_start_time;
@@ -236,7 +236,7 @@ static void update_peer_window(peer_perf_t *perf, uint64_t now) {
     perf->bytes_per_second =
         (float)perf->bytes_this_window / ((float)elapsed / 1000.0f);
 
-    /* libbitcoin-style: Mark as "reported" once we've proven we can deliver */
+    /* Mark as "reported" once we've proven we can deliver */
     if (perf->bytes_per_second > 0.0f) {
       perf->has_reported = true;
     }
@@ -408,7 +408,7 @@ size_t download_mgr_add_work(download_mgr_t *mgr, const hash256_t *hashes,
 }
 
 /* ============================================================================
- * PULL Model API Implementation (libbitcoin-style)
+ * PULL Model API Implementation
  * ============================================================================
  */
 
@@ -423,7 +423,7 @@ bool download_mgr_peer_request_work(download_mgr_t *mgr, peer_t *peer) {
     return false;
   }
 
-  /* libbitcoin-style: Peer should be idle when requesting work */
+  /* Peer should be idle when requesting work */
   if (perf->batch != NULL && perf->batch->remaining > 0) {
     LOG_DEBUG("download_mgr: peer still has work, ignoring request");
     return false;
@@ -852,13 +852,12 @@ size_t download_mgr_check_performance(download_mgr_t *mgr) {
     }
   }
 
-  /* Phase 2: Collect rates using libbitcoin's self-selection model.
+  /* Phase 2: Collect rates using self-selection model.
    *
-   * libbitcoin-style: The speeds_ map only contains channels that have
-   * successfully reported a positive rate. Channels that never delivered
-   * are not in the map and thus not subject to statistical checks.
+   * Only peers who have successfully reported a positive rate are subject
+   * to statistical checks. Peers who never delivered are not yet in the
+   * performance pool.
    *
-   * We mirror this by only including peers where has_reported == true.
    * A peer with has_reported=true but current rate=0 is STALLED (used to
    * deliver but stopped). A peer with has_reported=false is still warming
    * up and we don't penalize them. */
@@ -882,9 +881,9 @@ size_t download_mgr_check_performance(download_mgr_t *mgr) {
       continue; /* Completed batch, idle not stalled */
     }
 
-    /* libbitcoin-style: Only peers who have proven they can deliver are
-     * in the performance pool. Peers who never delivered any bytes are
-     * still warming up and aren't penalized. */
+    /* Only peers who have proven they can deliver are in the performance
+     * pool. Peers who never delivered any bytes are still warming up and
+     * aren't penalized. */
     if (!perf->has_reported) {
       continue; /* Not in the speeds_ pool yet */
     }

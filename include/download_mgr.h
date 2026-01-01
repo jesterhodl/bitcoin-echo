@@ -1,7 +1,7 @@
 /**
  * Bitcoin Echo — PULL-Based Block Download Manager
  *
- * Cooperative work distribution (inspired by libbitcoin):
+ * Cooperative work distribution:
  *
  * - Work is organized as BATCHES, not individual items
  * - Peers PULL work when idle, coordinator doesn't push
@@ -41,7 +41,6 @@
 
 /* Performance measurement window in milliseconds (10 seconds).
  * Bytes received in this window are used to calculate bytes/sec.
- * This matches libbitcoin's sample_period_seconds.
  */
 #define DOWNLOAD_PERF_WINDOW_MS 10000
 
@@ -89,9 +88,9 @@ typedef struct work_batch {
 /**
  * Per-peer state for download tracking.
  *
- * libbitcoin-style: Each peer owns ONE batch at a time. When batch completes,
- * peer pulls another. Performance is tracked using statistical deviation -
- * peers significantly slower than the mean are disconnected.
+ * Each peer owns ONE batch at a time. When batch completes, peer pulls another.
+ * Performance is tracked using statistical deviation - peers significantly
+ * slower than the mean are disconnected.
  */
 typedef struct {
   peer_t *peer;                 /* The peer (NULL if slot unused) */
@@ -101,7 +100,7 @@ typedef struct {
   float bytes_per_second;       /* Calculated rate (updated each window) */
   uint64_t last_delivery_time;  /* Time of last block delivery (ms) */
   uint64_t first_work_time;     /* When first assigned work (grace period start) */
-  bool has_reported;            /* True if ever had rate > 0 (libbitcoin-style) */
+  bool has_reported;            /* True if ever had rate > 0 */
 } peer_perf_t;
 
 /* ============================================================================
@@ -205,7 +204,7 @@ size_t download_mgr_add_work(download_mgr_t *mgr, const hash256_t *hashes,
                              const uint32_t *heights, size_t count);
 
 /* ============================================================================
- * PULL Model API (libbitcoin-style)
+ * PULL Model API
  * ============================================================================
  */
 
@@ -257,7 +256,7 @@ bool download_mgr_peer_is_idle(const download_mgr_t *mgr, const peer_t *peer);
 /**
  * Check peer performance using statistical deviation model.
  *
- * libbitcoin-style: Called every DOWNLOAD_PERF_WINDOW_MS (10 seconds).
+ * Called every DOWNLOAD_PERF_WINDOW_MS (10 seconds):
  * - Updates all peer windows and calculates bytes/second
  * - Calculates mean and standard deviation of active peer rates
  * - Disconnects peers with rate = 0 (stalled)
