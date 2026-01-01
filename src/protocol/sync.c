@@ -863,6 +863,21 @@ echo_result_t sync_handle_headers(sync_manager_t *mgr, peer_t *peer,
     if (mgr->mode == SYNC_MODE_HEADERS && mgr->best_header) {
       uint32_t tip_height = chainstate_get_height(mgr->chainstate);
       if (mgr->best_header->height > tip_height) {
+        /* Flush all queued headers to database before switching modes.
+         * Bug fixed 2025-01-01: This path was missing the flush call,
+         * causing block downloads to fail with "hash lookup failed". */
+        if (mgr->pending_headers_count > 0) {
+          log_info(LOG_COMP_SYNC,
+                   "Flushing %zu queued headers to database...",
+                   mgr->pending_headers_count);
+          echo_result_t flush_result = pending_headers_flush(mgr);
+          if (flush_result != ECHO_OK) {
+            log_error(LOG_COMP_SYNC, "Failed to flush headers: %d",
+                      flush_result);
+            /* Continue anyway - headers are in memory */
+          }
+        }
+
         log_info(LOG_COMP_SYNC,
                  "Transitioning to BLOCKS mode (best_header=%u, validated=%u)",
                  mgr->best_header->height, tip_height);
