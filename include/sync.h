@@ -49,9 +49,6 @@ typedef struct chase_dispatcher chase_dispatcher_t;
 /* Maximum block stalling timeout (64 seconds) - matches Bitcoin Core */
 #define SYNC_BLOCK_STALLING_TIMEOUT_MAX_MS 64000
 
-/* Timeout decay factor when blocks connect successfully (0.85) */
-#define SYNC_STALLING_TIMEOUT_DECAY 0.85
-
 /* Minimum time between header sync attempts with same peer (5 seconds) */
 #define SYNC_HEADER_RETRY_INTERVAL_MS 5000
 
@@ -60,9 +57,6 @@ typedef struct chase_dispatcher chase_dispatcher_t;
 
 /* Stale tip threshold - consider sync stalled if no progress in this time */
 #define SYNC_STALE_TIP_THRESHOLD_MS (30ULL * 60 * 1000) /* 30 minutes */
-
-/* Rolling window size for header peer response time tracking */
-#define SYNC_HEADER_RESPONSE_WINDOW 3
 
 /* ============================================================================
  * Sync State
@@ -109,15 +103,6 @@ typedef struct {
   uint32_t blocks_requested;  /* Blocks requested from this peer */
   uint64_t first_block_time;  /* When peer started delivering blocks (ms) */
   uint64_t last_delivery_time; /* When peer last delivered a block (ms) */
-
-  /* Header race metrics (best-of-N selection) */
-  uint32_t headers_race_responses;    /* Number of full header batches during race */
-  uint64_t headers_race_total_ms;     /* Total response time during race */
-
-  /* Post-race monitoring: ring buffer for accurate rolling window of response times */
-  uint64_t recent_times[SYNC_HEADER_RESPONSE_WINDOW]; /* Ring buffer of response times (ms) */
-  uint32_t recent_times_idx;    /* Next write position in ring buffer */
-  uint32_t recent_times_count;  /* Number of valid entries (0 to SYNC_HEADER_RESPONSE_WINDOW) */
 } peer_sync_state_t;
 
 /**
