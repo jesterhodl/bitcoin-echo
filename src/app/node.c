@@ -3890,11 +3890,57 @@ echo_result_t node_load_block_at_height(node_t *node, uint32_t height,
     return ECHO_ERR_NULL_PARAM;
   }
 
+  if (!node->block_storage_init) {
+    return ECHO_ERR_NOT_FOUND;
+  }
+
+  /*
+   * Try in-memory block_index first. During IBD, headers may be in memory
+   * but not yet committed to the database (batched transaction). The in-memory
+   * block_index is always up-to-date with stored blocks.
+   */
+  chainstate_t *chainstate = consensus_get_chainstate(node->consensus);
+  if (chainstate != NULL) {
+    block_index_t *tip = chainstate_get_tip_index(chainstate);
+    if (tip != NULL && height <= tip->height) {
+      /* Walk backwards from tip to find block at height */
+      block_index_t *walk = tip;
+      while (walk != NULL && walk->height > height) {
+        walk = walk->prev;
+      }
+
+      if (walk != NULL && walk->height == height && walk->data_file >= 0) {
+        /* Found in memory with stored data - load directly */
+        block_file_pos_t pos;
+        pos.file_index = (uint32_t)walk->data_file;
+        pos.file_offset = walk->data_pos;
+
+        uint8_t *block_data = NULL;
+        uint32_t block_size = 0;
+        echo_result_t result =
+            block_storage_read(&node->block_storage, pos, &block_data, &block_size);
+        if (result == ECHO_OK) {
+          size_t consumed;
+          result = block_parse(block_data, block_size, block_out, &consumed);
+          free(block_data);
+
+          if (result == ECHO_OK) {
+            if (hash_out != NULL) {
+              memcpy(hash_out->bytes, walk->hash.bytes, 32);
+            }
+            return ECHO_OK;
+          }
+        }
+        /* Fall through to database lookup on failure */
+      }
+    }
+  }
+
+  /* Fall back to database lookup */
   if (!node->block_index_db_open) {
     return ECHO_ERR_NOT_FOUND;
   }
 
-  /* Look up block entry at height (includes hash) */
   block_index_entry_t entry;
   echo_result_t result =
       block_index_db_lookup_by_height(&node->block_index_db, height, &entry);
