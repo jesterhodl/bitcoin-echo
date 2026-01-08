@@ -194,6 +194,13 @@ static void sync_cb_send_getdata_blocks(peer_t *peer, const hash256_t *hashes,
 static echo_result_t sync_cb_get_block_hash_at_height(uint32_t height,
                                                        hash256_t *hash,
                                                        void *ctx);
+static echo_result_t sync_cb_get_block_hashes_in_range(uint32_t start_height,
+                                                        uint32_t end_height,
+                                                        hash256_t *hashes_out,
+                                                        uint32_t *heights_out,
+                                                        size_t max_count,
+                                                        size_t *count_out,
+                                                        void *ctx);
 static void sync_cb_disconnect_peer(peer_t *peer, const char *reason,
                                     void *ctx);
 
@@ -1791,6 +1798,30 @@ static echo_result_t sync_cb_get_block_hash_at_height(uint32_t height,
 }
 
 /**
+ * Get block hashes for a range of heights (batch query).
+ *
+ * Much more efficient than calling get_block_hash_at_height in a loop,
+ * as it executes a single SQL query to fetch all hashes at once.
+ */
+static echo_result_t sync_cb_get_block_hashes_in_range(uint32_t start_height,
+                                                        uint32_t end_height,
+                                                        hash256_t *hashes_out,
+                                                        uint32_t *heights_out,
+                                                        size_t max_count,
+                                                        size_t *count_out,
+                                                        void *ctx) {
+  node_t *node = (node_t *)ctx;
+  if (node == NULL) {
+    return ECHO_ERR_NULL_PARAM;
+  }
+
+  return block_index_db_lookup_height_range(&node->block_index_db,
+                                             start_height, end_height,
+                                             hashes_out, heights_out,
+                                             max_count, count_out);
+}
+
+/**
  * Begin header batch transaction for performance.
  *
  * Batching header inserts in a single transaction is ~100x faster
@@ -1858,6 +1889,7 @@ static echo_result_t node_init_sync(node_t *node) {
       .send_getheaders = sync_cb_send_getheaders,
       .send_getdata_blocks = sync_cb_send_getdata_blocks,
       .get_block_hash_at_height = sync_cb_get_block_hash_at_height,
+      .get_block_hashes_in_range = sync_cb_get_block_hashes_in_range,
       .begin_header_batch = sync_cb_begin_header_batch,
       .commit_header_batch = sync_cb_commit_header_batch,
       .flush_headers = NULL,

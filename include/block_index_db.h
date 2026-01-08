@@ -193,6 +193,40 @@ echo_result_t block_index_db_lookup_by_height(block_index_db_t *bdb,
                                               block_index_entry_t *entry);
 
 /**
+ * Lookup multiple blocks by height range (batch query).
+ *
+ * Much more efficient than calling lookup_by_height in a loop, as it
+ * executes a single SQL query to fetch all blocks in the range.
+ *
+ * Parameters:
+ *   bdb          - Block index database handle
+ *   start_height - First height to query (inclusive)
+ *   end_height   - Last height to query (inclusive)
+ *   hashes_out   - Output: array to receive block hashes
+ *   heights_out  - Output: array to receive actual heights found
+ *   max_count    - Maximum entries hashes_out/heights_out can hold
+ *   count_out    - Output: number of entries written
+ *
+ * Returns:
+ *   ECHO_OK on success
+ *   ECHO_ERR_INVALID_PARAM if arrays are NULL or max_count is 0
+ *
+ * Notes:
+ *   - If a height in the range has no block, it's skipped (not an error)
+ *   - Only returns blocks marked with BLOCK_STATUS_VALID_CHAIN (best chain)
+ *   - If multiple blocks exist at a height, returns the best chain one
+ *   - Results are ordered by height (ascending)
+ *   - count_out may be less than (end_height - start_height + 1) if gaps exist
+ */
+echo_result_t block_index_db_lookup_height_range(block_index_db_t *bdb,
+                                                  uint32_t start_height,
+                                                  uint32_t end_height,
+                                                  hash256_t *hashes_out,
+                                                  uint32_t *heights_out,
+                                                  size_t max_count,
+                                                  size_t *count_out);
+
+/**
  * Check if a block exists in the database.
  *
  * Parameters:

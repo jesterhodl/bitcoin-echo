@@ -421,6 +421,101 @@ echo_result_t block_index_db_lookup_by_height(block_index_db_t *bdb,
   return ECHO_OK;
 }
 
+echo_result_t block_index_db_lookup_height_range(block_index_db_t *bdb,
+                                                  uint32_t start_height,
+                                                  uint32_t end_height,
+                                                  hash256_t *hashes_out,
+                                                  uint32_t *heights_out,
+                                                  size_t max_count,
+                                                  size_t *count_out) {
+  if (!bdb || !hashes_out || !heights_out || !count_out || max_count == 0) {
+    return ECHO_ERR_INVALID_PARAM;
+  }
+
+  *count_out = 0;
+
+  /* Build and execute range query.
+   * Returns ONE block per height that we need to DOWNLOAD (not already stored).
+   * Uses GROUP BY height to handle reorgs - if multiple blocks exist at a height,
+   * picks one (same as old code's LIMIT 1).
+   * Excludes blocks with HAVE_DATA flag set (already downloaded and stored).
+   * ORDER BY height ensures results are sorted. */
+  const char *query =
+      "SELECT hash, height FROM blocks "
+      "WHERE height >= ? AND height <= ? AND (status & ?) = 0 "
+      "GROUP BY height "
+      "ORDER BY height ASC";
+
+  pthread_mutex_lock(&bdb->mutex);
+
+  /* Prepare statement (not cached - ranges vary) */
+  db_stmt_t stmt;
+  echo_result_t result = db_prepare(&bdb->db, query, &stmt);
+  if (result != ECHO_OK) {
+    pthread_mutex_unlock(&bdb->mutex);
+    return result;
+  }
+
+  /* Bind parameters: start_height, end_height, HAVE_DATA flag */
+  result = db_bind_int(&stmt, 1, (int)start_height);
+  if (result != ECHO_OK) {
+    db_stmt_finalize(&stmt);
+    pthread_mutex_unlock(&bdb->mutex);
+    return result;
+  }
+
+  result = db_bind_int(&stmt, 2, (int)end_height);
+  if (result != ECHO_OK) {
+    db_stmt_finalize(&stmt);
+    pthread_mutex_unlock(&bdb->mutex);
+    return result;
+  }
+
+  result = db_bind_int(&stmt, 3, BLOCK_STATUS_HAVE_DATA);
+  if (result != ECHO_OK) {
+    db_stmt_finalize(&stmt);
+    pthread_mutex_unlock(&bdb->mutex);
+    return result;
+  }
+
+  /* Fetch all rows up to max_count */
+  size_t count = 0;
+  while (count < max_count) {
+    result = db_step(&stmt);
+    if (result == ECHO_DONE) {
+      /* No more rows */
+      break;
+    }
+    if (result != ECHO_OK) {
+      db_stmt_finalize(&stmt);
+      pthread_mutex_unlock(&bdb->mutex);
+      return result;
+    }
+
+    /* Extract hash (column 0, 32 bytes) */
+    const void *hash_blob = db_column_blob(&stmt, 0);
+    int hash_size = db_column_bytes(&stmt, 0);
+    if (!hash_blob || hash_size != 32) {
+      db_stmt_finalize(&stmt);
+      pthread_mutex_unlock(&bdb->mutex);
+      return ECHO_ERR_DB;
+    }
+    memcpy(hashes_out[count].bytes, hash_blob, 32);
+
+    /* Extract height (column 1) */
+    int height_val = db_column_int(&stmt, 1);
+    heights_out[count] = (uint32_t)height_val;
+
+    count++;
+  }
+
+  db_stmt_finalize(&stmt);
+  pthread_mutex_unlock(&bdb->mutex);
+
+  *count_out = count;
+  return ECHO_OK;
+}
+
 echo_result_t block_index_db_exists(block_index_db_t *bdb,
                                     const hash256_t *hash, bool *exists) {
   block_index_entry_t entry;

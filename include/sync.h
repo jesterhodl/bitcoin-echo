@@ -241,6 +241,36 @@ typedef struct {
                                             void *ctx);
 
   /**
+   * Get block hashes for a range of heights (batch query).
+   *
+   * Much more efficient than calling get_block_hash_at_height in a loop,
+   * as it allows the database to fetch all hashes in a single query.
+   *
+   * Parameters:
+   *   start_height - First height to query (inclusive)
+   *   end_height   - Last height to query (inclusive)
+   *   hashes_out   - Output: array to receive block hashes
+   *   heights_out  - Output: array to receive actual heights found
+   *   max_count    - Maximum entries hashes_out/heights_out can hold
+   *   count_out    - Output: number of entries written
+   *   ctx          - User context
+   *
+   * Returns:
+   *   ECHO_OK on success (count_out may be less than requested if some blocks missing)
+   *   ECHO_ERR_INVALID_PARAM if arrays are NULL or max_count is 0
+   *
+   * Note: If a height in the range has no block, it's skipped (not an error).
+   * Caller should check count_out to see how many blocks were actually found.
+   */
+  echo_result_t (*get_block_hashes_in_range)(uint32_t start_height,
+                                             uint32_t end_height,
+                                             hash256_t *hashes_out,
+                                             uint32_t *heights_out,
+                                             size_t max_count,
+                                             size_t *count_out,
+                                             void *ctx);
+
+  /**
    * Begin a header batch transaction.
    *
    * Called before processing a batch of headers to enable
