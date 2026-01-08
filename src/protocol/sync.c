@@ -1143,7 +1143,9 @@ echo_result_t sync_handle_block(sync_manager_t *mgr, peer_t *peer,
   /* Re-fetch block index after store_block (may have been created/updated) */
   block_index = block_index_map_lookup(index_map, &block_hash);
 
-  if (block_index) {
+  /* Only mark block complete if it wasn't already stored (prevents infinite loop
+   * when sticky batches send duplicates). Duplicates are already complete. */
+  if (block_index && !was_already_stored) {
     download_mgr_block_complete(mgr->download_mgr, &block_hash,
                                 block_index->height);
 
