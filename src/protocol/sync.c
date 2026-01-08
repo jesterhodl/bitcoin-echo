@@ -1122,6 +1122,12 @@ echo_result_t sync_handle_block(sync_manager_t *mgr, peer_t *peer,
   }
   ps->last_delivery_time = now;
 
+  /* Pre-check: is block already stored? (for duplicate detection) */
+  block_index_map_t *index_map =
+      chainstate_get_block_index_map(mgr->chainstate);
+  block_index_t *block_index = block_index_map_lookup(index_map, &block_hash);
+  bool was_already_stored = (block_index && block_index->data_file != BLOCK_DATA_NOT_STORED);
+
   /* Notify download manager of block receipt for performance tracking.
    * Calculate approximate block size: header + tx count varint + txs.
    * This doesn't need to be exact - it's for relative peer comparison.
@@ -1134,10 +1140,8 @@ echo_result_t sync_handle_block(sync_manager_t *mgr, peer_t *peer,
     mgr->callbacks.store_block(block, mgr->callbacks.ctx);
   }
 
-  /* Find block index and mark complete */
-  block_index_map_t *index_map =
-      chainstate_get_block_index_map(mgr->chainstate);
-  block_index_t *block_index = block_index_map_lookup(index_map, &block_hash);
+  /* Re-fetch block index after store_block (may have been created/updated) */
+  block_index = block_index_map_lookup(index_map, &block_hash);
 
   if (block_index) {
     download_mgr_block_complete(mgr->download_mgr, &block_hash,
@@ -1154,8 +1158,11 @@ echo_result_t sync_handle_block(sync_manager_t *mgr, peer_t *peer,
     }
   }
 
-  mgr->blocks_received_total++;
-  ps->blocks_received++;
+  /* Only count unique blocks (not duplicates from sticky batches) */
+  if (!was_already_stored) {
+    mgr->blocks_received_total++;
+    ps->blocks_received++;
+  }
   ps->last_delivery_time = plat_time_ms(); /* Track for session reputation */
   mgr->last_progress_time = ps->last_delivery_time;
 
