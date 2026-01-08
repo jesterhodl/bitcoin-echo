@@ -665,9 +665,9 @@ bool download_mgr_check_stall(download_mgr_t *mgr, uint32_t validated_height) {
    *
    * Early blocks are tiny and should arrive quickly, so use shorter timeouts.
    * Later blocks are larger and need more time. Scale with halving epoch:
-   *   Epoch 0 (blocks 0-209,999):     1 second base
-   *   Epoch 1 (blocks 210,000-419,999): 2 seconds base
-   *   Epoch 2 (blocks 420,000-629,999): 3 seconds base
+   *   Epoch 0 (blocks 0-209,999):     0.5 second base
+   *   Epoch 1 (blocks 210,000-419,999): 1.0 seconds base
+   *   Epoch 2 (blocks 420,000-629,999): 1.5 seconds base
    *   etc.
    *
    * This keeps momentum early in the chain while being patient later.
@@ -675,7 +675,7 @@ bool download_mgr_check_stall(download_mgr_t *mgr, uint32_t validated_height) {
    * Timeout resets when validation makes progress.
    */
 #define STALL_EPOCH_BLOCKS 210000    /* Blocks per halving epoch */
-#define STALL_MS_PER_EPOCH 1000      /* 1 second per epoch */
+#define STALL_MS_PER_EPOCH 500       /* 0.5 seconds per epoch */
 #define STALL_MAX_TIMEOUT_MS 64000   /* 64 second max (matches Bitcoin Core) */
 
   uint32_t epoch = validated_height / STALL_EPOCH_BLOCKS;
