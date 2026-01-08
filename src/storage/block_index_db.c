@@ -64,6 +64,17 @@ static echo_result_t create_schema(db_t *db) {
     return result;
   }
 
+  /* Create partial index for fast range queries on blocks needing download.
+   * Only indexes blocks where HAVE_DATA flag is NOT set (blocks we still need).
+   * Much smaller and faster than full index - used by batch block queueing during IBD.
+   * Optimizes: WHERE height >= ? AND height <= ? AND (status & 16) = 0 */
+  result = db_exec(
+      db, "CREATE INDEX IF NOT EXISTS idx_pending_blocks ON blocks(height) "
+          "WHERE (status & 16) = 0;");
+  if (result != ECHO_OK) {
+    return result;
+  }
+
   /*
    * Create metadata table for chainstate persistence.
    * Stores key-value pairs like 'validated_tip_height' for restart recovery.
@@ -439,12 +450,14 @@ echo_result_t block_index_db_lookup_height_range(block_index_db_t *bdb,
    * Uses GROUP BY height to handle reorgs - if multiple blocks exist at a height,
    * picks one (same as old code's LIMIT 1).
    * Excludes blocks with HAVE_DATA flag set (already downloaded and stored).
-   * ORDER BY height ensures results are sorted. */
+   * ORDER BY height ensures results are sorted.
+   * LIMIT clause stops query early for better performance on large ranges. */
   const char *query =
       "SELECT hash, height FROM blocks "
       "WHERE height >= ? AND height <= ? AND (status & ?) = 0 "
       "GROUP BY height "
-      "ORDER BY height ASC";
+      "ORDER BY height ASC "
+      "LIMIT ?";
 
   pthread_mutex_lock(&bdb->mutex);
 
@@ -478,9 +491,16 @@ echo_result_t block_index_db_lookup_height_range(block_index_db_t *bdb,
     return result;
   }
 
-  /* Fetch all rows up to max_count */
+  result = db_bind_int(&stmt, 4, (int)max_count);
+  if (result != ECHO_OK) {
+    db_stmt_finalize(&stmt);
+    pthread_mutex_unlock(&bdb->mutex);
+    return result;
+  }
+
+  /* Fetch all rows (SQL LIMIT stops at max_count) */
   size_t count = 0;
-  while (count < max_count) {
+  while (true) {
     result = db_step(&stmt);
     if (result == ECHO_DONE) {
       /* No more rows */
