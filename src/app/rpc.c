@@ -1628,6 +1628,19 @@ echo_result_t rpc_getblockchaininfo(node_t *node, const json_value_t *params,
     uint64_t prune_target = node_get_prune_target(node);
     json_builder_append(builder, ",\"prune_target_size\":");
     json_builder_uint(builder, prune_target * 1024 * 1024); /* MB to bytes */
+
+    /* Add last prune metrics */
+    uint64_t last_prune_time = node_get_last_prune_time(node);
+    if (last_prune_time > 0) {
+      json_builder_append(builder, ",\"last_prune_time\":");
+      json_builder_uint(builder, last_prune_time);
+
+      json_builder_append(builder, ",\"last_prune_files_deleted\":");
+      json_builder_uint(builder, node_get_last_prune_files_deleted(node));
+
+      json_builder_append(builder, ",\"last_prune_bytes_freed\":");
+      json_builder_uint(builder, node_get_last_prune_bytes_freed(node));
+    }
   }
 
   json_builder_append(builder, "}");

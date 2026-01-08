@@ -43,6 +43,7 @@
 #include "tx_validate.h"
 #include "utxo.h"
 #include "utxo_db.h"
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -112,6 +113,19 @@ struct node {
   size_t invalid_block_count;
   size_t invalid_block_write_idx;  /* Ring buffer write position */
 
+  /* Pruning thread (background pruning to avoid blocking main loop) */
+  pthread_t prune_thread;
+  pthread_mutex_t prune_mutex;
+  pthread_cond_t prune_cond;
+  volatile bool prune_requested;       /* Signal to wake pruning thread */
+  volatile bool prune_thread_running;  /* Thread lifecycle flag */
+  volatile bool prune_thread_shutdown; /* Signal thread to exit */
+
+  /* Pruning metrics (updated by pruning thread, read by RPC) */
+  volatile uint64_t last_prune_time;          /* Timestamp of last prune */
+  volatile uint32_t last_prune_files_deleted; /* Files deleted in last prune */
+  volatile uint64_t last_prune_bytes_freed;   /* Bytes freed in last prune */
+
 };
 
 /*
@@ -131,6 +145,7 @@ static echo_result_t node_init_sync(node_t *node);
 static echo_result_t node_init_chase(node_t *node);
 static void node_cleanup(node_t *node);
 static echo_result_t node_cleanup_orphan_block_files(node_t *node);
+static void *prune_thread_fn(void *arg);
 
 /* Sync manager callbacks */
 static echo_result_t sync_cb_get_block(const hash256_t *hash, block_t *block_out,
@@ -361,6 +376,15 @@ node_t *node_create(const node_config_t *config) {
       node_cleanup(node);
       free(node);
       return NULL;
+    }
+
+    /* Step 6: Initialize pruning thread primitives (full node only) */
+    if (node_is_pruning_enabled(node)) {
+      pthread_mutex_init(&node->prune_mutex, NULL);
+      pthread_cond_init(&node->prune_cond, NULL);
+      node->prune_requested = false;
+      node->prune_thread_running = false;
+      node->prune_thread_shutdown = false;
     }
 
   }
@@ -1843,6 +1867,16 @@ echo_result_t node_start(node_t *node) {
    * 4. Create and start sync manager for initial block download
    */
 
+  /* Start pruning thread if pruning is enabled */
+  if (node_is_pruning_enabled(node)) {
+    int ret = pthread_create(&node->prune_thread, NULL, prune_thread_fn, node);
+    if (ret != 0) {
+      log_warn(LOG_COMP_STORE, "Failed to start pruning thread: %d", ret);
+    } else {
+      node->prune_thread_running = true;
+    }
+  }
+
   node->state = NODE_STATE_RUNNING;
   return ECHO_OK;
 }
@@ -1868,12 +1902,26 @@ echo_result_t node_stop(node_t *node) {
 
   /*
    * Shutdown sequence:
+   * 0. Stop pruning thread
    * 1. Flush UTXO set to database (IBD mode only)
    * 2. Persist validated tip height
    * 3. Stop accepting new connections
    * 4. Disconnect all peers
    * 5. Databases will be closed in node_destroy()
    */
+
+  /* Step 0: Stop pruning thread */
+  if (node->prune_thread_running) {
+    log_info(LOG_COMP_STORE, "Stopping pruning thread...");
+    pthread_mutex_lock(&node->prune_mutex);
+    node->prune_thread_shutdown = true;
+    pthread_cond_signal(&node->prune_cond);
+    pthread_mutex_unlock(&node->prune_mutex);
+
+    pthread_join(node->prune_thread, NULL);
+    node->prune_thread_running = false;
+    log_info(LOG_COMP_STORE, "Pruning thread stopped");
+  }
 
   /* Step 1: Flush UTXO set during IBD mode */
   if (node->ibd_mode && node->consensus != NULL) {
@@ -2002,6 +2050,12 @@ static void node_cleanup(node_t *node) {
   if (node->block_storage_init) {
     block_storage_close(&node->block_storage);
     node->block_storage_init = false;
+  }
+
+  /* Destroy pruning thread primitives */
+  if (node_is_pruning_enabled(node)) {
+    pthread_mutex_destroy(&node->prune_mutex);
+    pthread_cond_destroy(&node->prune_cond);
   }
 
   /* Free listening socket if allocated */
@@ -3748,6 +3802,27 @@ bool node_is_block_pruned(const node_t *node, uint32_t height) {
   return height < pruned_height;
 }
 
+uint64_t node_get_last_prune_time(const node_t *node) {
+  if (node == NULL) {
+    return 0;
+  }
+  return node->last_prune_time;
+}
+
+uint32_t node_get_last_prune_files_deleted(const node_t *node) {
+  if (node == NULL) {
+    return 0;
+  }
+  return node->last_prune_files_deleted;
+}
+
+uint64_t node_get_last_prune_bytes_freed(const node_t *node) {
+  if (node == NULL) {
+    return 0;
+  }
+  return node->last_prune_bytes_freed;
+}
+
 uint64_t node_get_block_storage_size(const node_t *node) {
   if (node == NULL || !node->block_storage_init) {
     return 0;
@@ -3856,7 +3931,14 @@ uint32_t node_get_validated_height(node_t *node) {
   return consensus_get_height(node->consensus);
 }
 
-uint32_t node_prune_blocks(node_t *node, uint32_t target_height) {
+/*
+ * Internal pruning implementation.
+ * Called by both the pruning thread (automatic) and RPC (manual).
+ * Updates node metrics after pruning completes.
+ */
+static uint32_t node_prune_blocks_internal(node_t *node, uint32_t target_height,
+                                           uint32_t *files_deleted_out,
+                                           uint64_t *bytes_freed_out) {
   if (node == NULL || !node->block_storage_init || !node->block_index_db_open) {
     return 0;
   }
@@ -3915,12 +3997,7 @@ uint32_t node_prune_blocks(node_t *node, uint32_t target_height) {
   /* Get current write file (don't delete it) */
   uint32_t current_file = block_storage_get_current_file(&node->block_storage);
 
-  /* Calculate how many bytes we need to free */
-  uint64_t current_size = node_get_block_storage_size(node);
-  uint64_t target_size = node->config.prune_target_mb * 1024ULL * 1024ULL;
-  uint64_t bytes_to_free = (current_size > target_size) ? (current_size - target_size) : 0;
-
-  /* Delete old block files until we've freed enough space */
+  /* Delete as many old block files as safely possible */
   uint32_t files_deleted = 0;
   uint64_t bytes_freed = 0;
   uint32_t actual_max_pruned_height = current_pruned_height;
@@ -3990,11 +4067,6 @@ uint32_t node_prune_blocks(node_t *node, uint32_t target_height) {
       log_warn(LOG_COMP_STORE, "Failed to delete blk%05u.dat: %d",
                file_idx, result);
     }
-
-    /* Stop if we've freed enough bytes */
-    if (bytes_freed >= bytes_to_free) {
-      break;
-    }
   }
 
   /* Mark blocks as pruned in the database using ACTUAL heights, not estimate */
@@ -4016,7 +4088,90 @@ uint32_t node_prune_blocks(node_t *node, uint32_t target_height) {
              files_deleted, (unsigned long long)(bytes_freed / (1024 * 1024)));
   }
 
+  /* Return metrics to caller */
+  if (files_deleted_out != NULL) {
+    *files_deleted_out = files_deleted;
+  }
+  if (bytes_freed_out != NULL) {
+    *bytes_freed_out = bytes_freed;
+  }
+
   return new_pruned_height;
+}
+
+/*
+ * Public wrapper for manual pruning (RPC).
+ * Calls internal implementation and updates node metrics.
+ */
+uint32_t node_prune_blocks(node_t *node, uint32_t target_height) {
+  uint32_t files_deleted = 0;
+  uint64_t bytes_freed = 0;
+
+  uint32_t result = node_prune_blocks_internal(node, target_height,
+                                                &files_deleted, &bytes_freed);
+
+  /* Update metrics for RPC visibility */
+  if (files_deleted > 0) {
+    node->last_prune_time = plat_time_ms();
+    node->last_prune_files_deleted = files_deleted;
+    node->last_prune_bytes_freed = bytes_freed;
+  }
+
+  return result;
+}
+
+/*
+ * Pruning thread entry point.
+ * Waits for signals and performs background pruning.
+ */
+static void *prune_thread_fn(void *arg) {
+  node_t *node = (node_t *)arg;
+
+  log_info(LOG_COMP_STORE, "Pruning thread started");
+
+  pthread_mutex_lock(&node->prune_mutex);
+
+  while (!node->prune_thread_shutdown) {
+    /* Wait for prune request or shutdown signal */
+    while (!node->prune_requested && !node->prune_thread_shutdown) {
+      pthread_cond_wait(&node->prune_cond, &node->prune_mutex);
+    }
+
+    if (node->prune_thread_shutdown) {
+      break;
+    }
+
+    /* Clear request flag before releasing mutex */
+    node->prune_requested = false;
+    pthread_mutex_unlock(&node->prune_mutex);
+
+    /* Perform pruning (outside mutex to avoid blocking signallers) */
+    uint32_t files_deleted = 0;
+    uint64_t bytes_freed = 0;
+
+    /* Calculate target height based on current storage size */
+    uint64_t current_size_bytes = node_get_block_storage_size(node);
+    uint64_t target_size_bytes = node->config.prune_target_mb * 1024ULL * 1024ULL;
+
+    if (current_size_bytes > target_size_bytes) {
+      /* Prune as much as safely possible (pass UINT32_MAX as target) */
+      node_prune_blocks_internal(node, UINT32_MAX, &files_deleted, &bytes_freed);
+
+      /* Update metrics */
+      if (files_deleted > 0) {
+        node->last_prune_time = plat_time_ms();
+        node->last_prune_files_deleted = files_deleted;
+        node->last_prune_bytes_freed = bytes_freed;
+      }
+    }
+
+    pthread_mutex_lock(&node->prune_mutex);
+  }
+
+  pthread_mutex_unlock(&node->prune_mutex);
+
+  log_info(LOG_COMP_STORE, "Pruning thread exiting");
+  return NULL;
 }
 
 echo_result_t node_maybe_prune(node_t *node) {
@@ -4024,18 +4179,18 @@ echo_result_t node_maybe_prune(node_t *node) {
     return ECHO_ERR_NULL_PARAM;
   }
 
-  /* Nothing to do if pruning not enabled */
-  if (!node_is_pruning_enabled(node)) {
+  /* Nothing to do if pruning not enabled or thread not running */
+  if (!node_is_pruning_enabled(node) || !node->prune_thread_running) {
     return ECHO_OK;
   }
 
   /*
    * Progressive IBD Pruning: We prune validated blocks even during IBD.
    *
-   * The 550-block safety margin in node_prune_blocks() ensures we never
-   * prune blocks needed for reorg. Additionally, node_prune_blocks() checks
-   * each file's max height against the validated height to ensure we never
-   * delete files containing downloaded-but-not-validated blocks.
+   * The 550-block safety margin in node_prune_blocks_internal() ensures we
+   * never prune blocks needed for reorg. Additionally, it checks each file's
+   * max height against the validated height to ensure we never delete files
+   * containing downloaded-but-not-validated blocks.
    *
    * This keeps disk usage bounded during IBD rather than accumulating
    * potentially 100GB+ before pruning begins.
@@ -4043,7 +4198,7 @@ echo_result_t node_maybe_prune(node_t *node) {
 
   /* Get current storage size */
   uint64_t current_size_bytes = node_get_block_storage_size(node);
-  uint64_t target_size_bytes = node->config.prune_target_mb * 1024 * 1024;
+  uint64_t target_size_bytes = node->config.prune_target_mb * 1024ULL * 1024ULL;
 
   /* Check if we're over target */
   if (current_size_bytes <= target_size_bytes) {
@@ -4058,31 +4213,23 @@ echo_result_t node_maybe_prune(node_t *node) {
                                   : 0;
     if (current_height >= last_ibd_prune_height + 10000) {
       log_info(LOG_COMP_STORE,
-               "Storage %llu MB exceeds target %llu MB, progressive IBD "
-               "pruning...",
+               "Storage %llu MB exceeds target %llu MB, signaling prune thread",
                (unsigned long long)(current_size_bytes / (1024ULL * 1024ULL)),
                (unsigned long long)node->config.prune_target_mb);
       last_ibd_prune_height = current_height;
     }
   } else {
-    log_info(LOG_COMP_STORE,
-             "Storage size %llu MB exceeds target %llu MB, pruning...",
-             (unsigned long long)(current_size_bytes / (1024ULL * 1024ULL)),
-             (unsigned long long)node->config.prune_target_mb);
+    log_debug(LOG_COMP_STORE,
+              "Storage size %llu MB exceeds target %llu MB, signaling prune thread",
+              (unsigned long long)(current_size_bytes / (1024ULL * 1024ULL)),
+              (unsigned long long)node->config.prune_target_mb);
   }
 
-  /* Calculate how much to prune */
-  uint64_t excess_bytes = current_size_bytes - target_size_bytes;
-
-  /* Estimate blocks to prune (assuming ~1 MB per block on average) */
-  uint32_t blocks_to_prune = (uint32_t)(excess_bytes / (1024ULL * 1024ULL)) + 100;
-
-  /* Get current pruned height and calculate target */
-  uint32_t current_pruned_height = node_get_pruned_height(node);
-  uint32_t target_height = current_pruned_height + blocks_to_prune;
-
-  /* Perform pruning */
-  node_prune_blocks(node, target_height);
+  /* Signal the pruning thread to wake up (non-blocking) */
+  pthread_mutex_lock(&node->prune_mutex);
+  node->prune_requested = true;
+  pthread_cond_signal(&node->prune_cond);
+  pthread_mutex_unlock(&node->prune_mutex);
 
   return ECHO_OK;
 }

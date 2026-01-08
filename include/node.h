@@ -809,6 +809,39 @@ uint32_t node_get_pruned_height(const node_t *node);
 bool node_is_block_pruned(const node_t *node, uint32_t height);
 
 /**
+ * Get the timestamp of the last pruning operation.
+ *
+ * Parameters:
+ *   node - The node
+ *
+ * Returns:
+ *   Timestamp in milliseconds (0 if never pruned)
+ */
+uint64_t node_get_last_prune_time(const node_t *node);
+
+/**
+ * Get the number of files deleted in the last pruning operation.
+ *
+ * Parameters:
+ *   node - The node
+ *
+ * Returns:
+ *   Number of block files deleted (0 if never pruned)
+ */
+uint32_t node_get_last_prune_files_deleted(const node_t *node);
+
+/**
+ * Get the bytes freed in the last pruning operation.
+ *
+ * Parameters:
+ *   node - The node
+ *
+ * Returns:
+ *   Bytes freed (0 if never pruned)
+ */
+uint64_t node_get_last_prune_bytes_freed(const node_t *node);
+
+/**
  * Prune blocks up to the specified height.
  *
  * Deletes block files containing blocks up to (but not including) height.
