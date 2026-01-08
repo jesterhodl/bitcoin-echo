@@ -802,7 +802,7 @@ bool download_mgr_check_stall(download_mgr_t *mgr, uint32_t validated_height) {
    *
    * This proactively races blocks that would cause future stalls. */
 
-#define STICKY_BATCH_SIZE DOWNLOAD_BATCH_SIZE_MAX  /* 2x normal: blocker + next gaps */
+#define STICKY_BATCH_SIZE DOWNLOAD_BATCH_SIZE_MAX  /* 4x normal (256): blocker + next gaps */
 
   typedef struct {
     hash256_t hash;

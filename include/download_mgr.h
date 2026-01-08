@@ -32,8 +32,8 @@
 #define DOWNLOAD_BATCH_SIZE 64
 
 /* Maximum batch size (for array allocation).
- * Sticky batches use 2x normal size to hold blocker + next consecutive gaps. */
-#define DOWNLOAD_BATCH_SIZE_MAX 128
+ * Sticky batches use 4x normal size (256) to hold blocker + next consecutive gaps. */
+#define DOWNLOAD_BATCH_SIZE_MAX 256
 
 /* Maximum batches in the queue. */
 #define DOWNLOAD_MAX_BATCHES 128
