@@ -1062,7 +1062,14 @@ echo_result_t block_index_db_mark_pruned(block_index_db_t *bdb,
    * Update status for all blocks in the height range:
    * - Set BLOCK_STATUS_PRUNED flag
    * - Clear BLOCK_STATUS_HAVE_DATA flag
+   *
+   * Process in batches of 10,000 blocks to avoid long-duration locks that
+   * cause read contention. Large single UPDATEs (e.g., 163,531 blocks) lock
+   * the database long enough to block main thread queries, causing our
+   * throughput to drop and peers to be disconnected.
    */
+  const uint32_t BATCH_SIZE = 10000;
+
   result = db_prepare(
       &bdb->db,
       "UPDATE blocks SET status = (status | ?) & ? WHERE height >= ? AND height < ?",
@@ -1071,44 +1078,60 @@ echo_result_t block_index_db_mark_pruned(block_index_db_t *bdb,
     return result;
   }
 
-  /* Bind BLOCK_STATUS_PRUNED to set (parameter 1) */
-  result = db_bind_int(&stmt, 1, BLOCK_STATUS_PRUNED);
-  if (result != ECHO_OK) {
-    db_stmt_finalize(&stmt);
-    return result;
+  /* Process in batches */
+  for (uint32_t batch_start = start_height; batch_start < end_height;
+       batch_start += BATCH_SIZE) {
+    uint32_t batch_end = batch_start + BATCH_SIZE;
+    if (batch_end > end_height) {
+      batch_end = end_height;
+    }
+
+    /* Bind BLOCK_STATUS_PRUNED to set (parameter 1) */
+    result = db_bind_int(&stmt, 1, BLOCK_STATUS_PRUNED);
+    if (result != ECHO_OK) {
+      db_stmt_finalize(&stmt);
+      return result;
+    }
+
+    /* Bind mask to clear BLOCK_STATUS_HAVE_DATA (parameter 2) */
+    int clear_mask = ~BLOCK_STATUS_HAVE_DATA;
+    result = db_bind_int(&stmt, 2, clear_mask);
+    if (result != ECHO_OK) {
+      db_stmt_finalize(&stmt);
+      return result;
+    }
+
+    /* Bind batch_start (parameter 3) */
+    result = db_bind_int(&stmt, 3, (int)batch_start);
+    if (result != ECHO_OK) {
+      db_stmt_finalize(&stmt);
+      return result;
+    }
+
+    /* Bind batch_end (parameter 4) */
+    result = db_bind_int(&stmt, 4, (int)batch_end);
+    if (result != ECHO_OK) {
+      db_stmt_finalize(&stmt);
+      return result;
+    }
+
+    /* Execute update for this batch */
+    result = db_step(&stmt);
+    if (result != ECHO_DONE) {
+      db_stmt_finalize(&stmt);
+      return result;
+    }
+
+    /* Reset statement for next batch */
+    result = db_stmt_reset(&stmt);
+    if (result != ECHO_OK) {
+      db_stmt_finalize(&stmt);
+      return result;
+    }
   }
 
-  /* Bind mask to clear BLOCK_STATUS_HAVE_DATA (parameter 2) */
-  int clear_mask = ~BLOCK_STATUS_HAVE_DATA;
-  result = db_bind_int(&stmt, 2, clear_mask);
-  if (result != ECHO_OK) {
-    db_stmt_finalize(&stmt);
-    return result;
-  }
-
-  /* Bind start_height (parameter 3) */
-  result = db_bind_int(&stmt, 3, (int)start_height);
-  if (result != ECHO_OK) {
-    db_stmt_finalize(&stmt);
-    return result;
-  }
-
-  /* Bind end_height (parameter 4) */
-  result = db_bind_int(&stmt, 4, (int)end_height);
-  if (result != ECHO_OK) {
-    db_stmt_finalize(&stmt);
-    return result;
-  }
-
-  /* Execute update */
-  result = db_step(&stmt);
   db_stmt_finalize(&stmt);
-
-  if (result == ECHO_DONE) {
-    return ECHO_OK;
-  }
-
-  return result;
+  return ECHO_OK;
 }
 
 echo_result_t block_index_db_get_pruned_height(block_index_db_t *bdb,
