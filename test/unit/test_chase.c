@@ -79,6 +79,12 @@ void node_announce_block_to_peers(void *node, const void *block_hash) {
 uint32_t node_get_validated_height(const void *node) {
     (void)node; return 0; /* Return 0 so validation always proceeds */
 }
+void *node_get_block_index_db(void *node) {
+    (void)node; return NULL; /* Stub - checkpoint won't run with NULL */
+}
+void block_index_db_checkpoint(void *bdb) {
+    (void)bdb; /* No-op stub for tests */
+}
 
 /* Fake node for tests - just needs to be non-NULL */
 static int g_fake_node = 0;
