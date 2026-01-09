@@ -11,7 +11,6 @@
 #include "../../lib/sqlite/sqlite3.h"
 #include "echo_assert.h"
 #include "echo_types.h"
-#include "log.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -377,14 +376,10 @@ echo_result_t db_checkpoint(db_t *db) {
 
   /*
    * FULL checkpoint: waits for readers to finish, then checkpoints all frames.
-   * Brief blocking during IBD but ensures WAL doesn't grow unboundedly.
+   * Used for explicit checkpoint requests (not during IBD - auto-checkpoint disabled).
    */
-  int wal_frames = 0, checkpointed = 0;
   int rc = sqlite3_wal_checkpoint_v2(db->handle, NULL, SQLITE_CHECKPOINT_FULL,
-                                     &wal_frames, &checkpointed);
-
-  log_info(LOG_COMP_STORE, "WAL checkpoint: rc=%d frames=%d checkpointed=%d",
-           rc, wal_frames, checkpointed);
+                                     NULL, NULL);
 
   if (rc != SQLITE_OK && rc != SQLITE_BUSY && rc != SQLITE_LOCKED) {
     return ECHO_ERR_DB;
