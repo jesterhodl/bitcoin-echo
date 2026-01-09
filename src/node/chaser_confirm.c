@@ -79,8 +79,16 @@ uint32_t chaser_confirm_height(chaser_confirm_t *chaser) {
     return height;
 }
 
-confirm_result_t chaser_confirm_block(chaser_confirm_t *chaser, uint32_t height,
-                                      const uint8_t block_hash[32]) {
+/*
+ * Internal confirmation with optional preloaded block.
+ * If preloaded_block is NULL, loads from storage. Otherwise uses the provided block.
+ * Caller retains ownership of preloaded_block (we don't free it).
+ */
+static confirm_result_t confirm_block_internal(chaser_confirm_t *chaser,
+                                               uint32_t height,
+                                               const uint8_t block_hash[32],
+                                               const block_t *preloaded_block,
+                                               const hash256_t *preloaded_hash) {
     if (!chaser) {
         return CONFIRM_ERROR_INTERNAL;
     }
@@ -102,19 +110,35 @@ confirm_result_t chaser_confirm_block(chaser_confirm_t *chaser, uint32_t height,
 
     chaser_unlock(&chaser->base);
 
-    /* Load block from storage */
-    block_t block;
-    hash256_t hash;
-    echo_result_t result = node_load_block_at_height(node, height, &block, &hash);
-    if (result != ECHO_OK) {
-        log_error(LOG_COMP_SYNC, "chaser_confirm: failed to load block %u: %d",
-                  height, result);
-        return CONFIRM_ERROR_LOOKUP;
+    /* Use preloaded block or load from storage */
+    block_t local_block;
+    hash256_t local_hash;
+    const block_t *block;
+    const hash256_t *hash;
+
+    if (preloaded_block != NULL) {
+        block = preloaded_block;
+        hash = preloaded_hash;
+    } else {
+        echo_result_t result =
+            node_load_block_at_height(node, height, &local_block, &local_hash);
+        if (result != ECHO_OK) {
+            log_error(LOG_COMP_SYNC,
+                      "chaser_confirm: failed to load block %u: %d", height,
+                      result);
+            return CONFIRM_ERROR_LOOKUP;
+        }
+        block = &local_block;
+        hash = &local_hash;
     }
 
     /* Apply block to chainstate (validation already done by chaser_validate) */
-    result = node_apply_block(node, &block);
-    block_free(&block);
+    echo_result_t result = node_apply_block(node, block);
+
+    /* Free local block if we loaded it (preloaded block is caller's responsibility) */
+    if (preloaded_block == NULL) {
+        block_free(&local_block);
+    }
 
     if (result != ECHO_OK) {
         log_error(LOG_COMP_SYNC, "chaser_confirm: block %u apply failed: %d",
@@ -135,9 +159,15 @@ confirm_result_t chaser_confirm_block(chaser_confirm_t *chaser, uint32_t height,
      * This enables unified validation path: both IBD and post-IBD blocks
      * flow through the chase system and get announced here.
      */
-    node_announce_block_to_peers(node, &hash);
+    node_announce_block_to_peers(node, hash);
 
     return CONFIRM_SUCCESS;
+}
+
+confirm_result_t chaser_confirm_block(chaser_confirm_t *chaser, uint32_t height,
+                                      const uint8_t block_hash[32]) {
+    /* Public API: load block from storage */
+    return confirm_block_internal(chaser, height, block_hash, NULL, NULL);
 }
 
 bool chaser_confirm_is_bypass(chaser_confirm_t *chaser, uint32_t height) {
@@ -245,21 +275,23 @@ static bool confirm_handle_event(chaser_t *self, chase_event_t event,
                     break; /* Block not stored/validated yet */
                 }
 
-                block_free(&block); /* We just needed to check it exists */
-
                 /* Confirm the block */
                 bool bypass = chaser_confirm_is_bypass(chaser, next_height);
 
                 if (bypass) {
                     /* Just update height for checkpoint blocks */
+                    block_free(&block);
                     chaser_lock(&chaser->base);
                     chaser->confirmed_height = next_height;
                     chaser_unlock(&chaser->base);
                     chaser_notify_height(&chaser->base, CHASE_ORGANIZED,
                                          next_height);
                 } else {
-                    if (chaser_confirm_block(chaser, next_height, hash.bytes) !=
-                        CONFIRM_SUCCESS) {
+                    /* Pass preloaded block to avoid double-loading */
+                    confirm_result_t conf_result = confirm_block_internal(
+                        chaser, next_height, hash.bytes, &block, &hash);
+                    block_free(&block);
+                    if (conf_result != CONFIRM_SUCCESS) {
                         break; /* Confirmation failed */
                     }
                 }
