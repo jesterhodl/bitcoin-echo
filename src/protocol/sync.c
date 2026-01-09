@@ -88,6 +88,7 @@ struct sync_manager {
   uint64_t last_progress_time;
   uint64_t last_header_refresh_time; /* For periodic header refresh in blocks mode */
   uint64_t last_performance_check_time; /* For statistical deviation checks */
+  uint64_t last_slowest_eviction_time;  /* For periodic slowest 10% eviction */
 
   /* Stats */
   uint32_t headers_received_total;
@@ -1575,6 +1576,26 @@ void sync_tick(sync_manager_t *mgr) {
       if (dropped > 0) {
         log_info(LOG_COMP_SYNC,
                  "Performance check dropped %zu slow/stalled peers", dropped);
+      }
+    }
+
+    /* Aggressive percentile eviction: every 30 seconds, kick bottom 10%.
+     * This ensures we're constantly cycling through peers to find faster ones.
+     * Complements the absolute threshold check above with relative ranking.
+     *
+     * min_rate_to_keep: Peers above this rate are never evicted (they're "fast
+     * enough"). Set to 0.0 to disable and evict purely by percentile. We'll
+     * tune this threshold based on IBD testing - monitoring peer rate
+     * distributions will reveal the right cutoff. */
+#define SLOWEST_EVICTION_INTERVAL_MS 30000
+#define SLOWEST_EVICTION_MIN_RATE 0.0f  /* TODO: tune based on IBD monitoring */
+    if (now - mgr->last_slowest_eviction_time >= SLOWEST_EVICTION_INTERVAL_MS) {
+      mgr->last_slowest_eviction_time = now;
+      size_t evicted = download_mgr_evict_slowest_percent(
+          mgr->download_mgr, 10.0f, SLOWEST_EVICTION_MIN_RATE);
+      if (evicted > 0) {
+        log_info(LOG_COMP_SYNC,
+                 "Percentile eviction kicked %zu slowest peers", evicted);
       }
     }
 

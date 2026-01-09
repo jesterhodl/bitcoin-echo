@@ -760,9 +760,26 @@ bool download_mgr_check_stall(download_mgr_t *mgr, uint32_t validated_height) {
    *   - Whoever delivers first wins - we get redundancy without burning peers
    */
 
-  /* Find the blocking block in the blocker's batch */
-  size_t block_idx = next_height - blocker_height;
+  /* Find the blocking block in the blocker's batch.
+   * We must SEARCH for it - can't assume consecutive heights due to gaps
+   * from already-downloaded blocks. */
   batch_node_t *blocker_node = (batch_node_t *)(void *)blocker->batch;
+  size_t block_idx = SIZE_MAX;
+  for (size_t i = 0; i < blocker_node->batch.count; i++) {
+    if (blocker_node->batch.heights[i] == next_height) {
+      block_idx = i;
+      break;
+    }
+  }
+  if (block_idx == SIZE_MAX) {
+    /* Block not in batch - shouldn't happen given earlier range check,
+     * but could if batch has gaps. Log and reset stall timer. */
+    LOG_WARN("download_mgr: stalled at %u but block not found in blocker's batch "
+             "[%u-%u] (gaps?) - resetting stall timer",
+             validated_height, blocker_height, blocker_end);
+    mgr->last_progress_time = now;
+    return false;
+  }
 
   /* Check if blocker is actively delivering blocks.
    * Use DOWNLOAD_PERF_WINDOW_MS (10 sec) as threshold, not stall_timeout.
@@ -1150,6 +1167,143 @@ size_t download_mgr_check_performance(download_mgr_t *mgr) {
   }
 
   return dropped;
+}
+
+size_t download_mgr_evict_slowest_percent(download_mgr_t *mgr, float percent,
+                                          float min_rate_to_keep) {
+  if (mgr == NULL || percent <= 0.0f || percent > 100.0f) {
+    return 0;
+  }
+
+  uint64_t now = plat_time_ms();
+
+  /* Phase 1: Collect all active peers with valid rates.
+   * Only consider peers who:
+   * - Have a batch assigned (actively downloading)
+   * - Have reported a positive rate (proven they can deliver)
+   * - Are past the grace period (fair chance to warm up)
+   */
+  typedef struct {
+    peer_perf_t *perf;
+    float rate;
+  } peer_rate_t;
+
+  peer_rate_t candidates[DOWNLOAD_MAX_PEERS];
+  size_t candidate_count = 0;
+
+  for (size_t i = 0; i < mgr->peer_count; i++) {
+    peer_perf_t *perf = &mgr->peers[i];
+    if (perf->peer == NULL || perf->batch == NULL) {
+      continue;
+    }
+
+    /* Skip peers still in grace period */
+    if (perf->first_work_time == 0) {
+      continue;
+    }
+    uint64_t time_since_first_work = now - perf->first_work_time;
+    if (time_since_first_work < DOWNLOAD_SLOW_GRACE_PERIOD_MS) {
+      continue;
+    }
+
+    /* Skip peers who haven't proven they can deliver */
+    if (!perf->has_reported) {
+      continue;
+    }
+
+    /* Update window to get fresh rate */
+    update_peer_window(perf, now);
+
+    candidates[candidate_count].perf = perf;
+    candidates[candidate_count].rate = perf->bytes_per_second;
+    candidate_count++;
+  }
+
+  /* Need enough peers to make percentile meaningful */
+  if (candidate_count <= DOWNLOAD_MIN_PEERS_TO_KEEP) {
+    LOG_DEBUG("download_mgr: only %zu candidates, skipping percentile eviction",
+              candidate_count);
+    return 0;
+  }
+
+  /* Phase 2: Sort by rate (ascending - slowest first) */
+  for (size_t i = 0; i < candidate_count - 1; i++) {
+    for (size_t j = i + 1; j < candidate_count; j++) {
+      if (candidates[j].rate < candidates[i].rate) {
+        peer_rate_t tmp = candidates[i];
+        candidates[i] = candidates[j];
+        candidates[j] = tmp;
+      }
+    }
+  }
+
+  /* Phase 3: Calculate how many to evict (bottom N percent, at least 1) */
+  size_t evict_count = (size_t)((float)candidate_count * percent / 100.0f);
+  if (evict_count == 0) {
+    evict_count = 1; /* Always evict at least 1 if we have enough peers */
+  }
+
+  /* Cap eviction to maintain minimum peer count */
+  size_t max_evict = candidate_count - DOWNLOAD_MIN_PEERS_TO_KEEP;
+  if (evict_count > max_evict) {
+    evict_count = max_evict;
+  }
+
+  if (evict_count == 0) {
+    return 0;
+  }
+
+  /* Phase 4: Evict the slowest peers */
+  size_t evicted = 0;
+
+  for (size_t i = 0; i < evict_count; i++) {
+    peer_perf_t *perf = candidates[i].perf;
+    float rate = candidates[i].rate;
+
+    /* Skip peers above the minimum rate threshold - they're "fast enough" even
+     * if they're in the bottom percentile. Use 0.0 to disable this check. */
+    if (min_rate_to_keep > 0.0f && rate >= min_rate_to_keep) {
+      LOG_DEBUG("download_mgr: skipping peer (%.1f KB/s >= %.1f KB/s threshold)",
+                rate / 1024.0f, min_rate_to_keep / 1024.0f);
+      continue;
+    }
+
+    /* Return batch to queue before disconnecting */
+    if (perf->batch != NULL) {
+      batch_node_t *node = (batch_node_t *)(void *)perf->batch;
+      uint32_t batch_start = node->batch.heights[0];
+      uint32_t batch_end = batch_start + (uint32_t)node->batch.count - 1;
+
+      LOG_INFO("download_mgr: evicting bottom %zu%% peer (%.1f KB/s, rank %zu/%zu), "
+               "returning batch [%u-%u]",
+               (size_t)percent, rate / 1024.0f, i + 1, candidate_count,
+               batch_start, batch_end);
+
+      node->batch.assigned_time = 0;
+      queue_push_after_sticky(mgr, node);
+      perf->batch = NULL;
+    }
+
+    /* Disconnect the peer */
+    if (mgr->callbacks.disconnect_peer != NULL) {
+      mgr->callbacks.disconnect_peer(perf->peer, "bottom 10% eviction",
+                                     mgr->callbacks.ctx);
+    }
+    evicted++;
+  }
+
+  if (evicted > 0) {
+    /* Log the rate distribution for diagnostics */
+    float slowest = candidates[0].rate;
+    float fastest = candidates[candidate_count - 1].rate;
+    float median = candidates[candidate_count / 2].rate;
+    LOG_INFO("download_mgr: evicted %zu slowest peers (%.1f%%). "
+             "Rates: slowest=%.1f KB/s, median=%.1f KB/s, fastest=%.1f KB/s",
+             evicted, percent, slowest / 1024.0f, median / 1024.0f,
+             fastest / 1024.0f);
+  }
+
+  return evicted;
 }
 
 /* ============================================================================

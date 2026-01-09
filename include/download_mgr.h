@@ -280,6 +280,33 @@ bool download_mgr_peer_is_idle(const download_mgr_t *mgr, const peer_t *peer);
 size_t download_mgr_check_performance(download_mgr_t *mgr);
 
 /**
+ * Evict the slowest N percent of peers.
+ *
+ * Called periodically (e.g., every 30 seconds) to aggressively cull
+ * underperforming peers. This complements check_performance which uses
+ * absolute thresholds - this function uses relative ranking.
+ *
+ * Only considers peers who:
+ * - Have a batch assigned (actively downloading)
+ * - Have proven they can deliver (has_reported = true)
+ * - Are past the grace period
+ * - Are below min_rate_to_keep (peers above this are never evicted)
+ *
+ * Evicts bottom N% (at least 1) while maintaining DOWNLOAD_MIN_PEERS_TO_KEEP.
+ *
+ * Parameters:
+ *   mgr              - Download manager
+ *   percent          - Percentage of peers to evict (e.g., 10.0 for 10%)
+ *   min_rate_to_keep - Peers above this rate (bytes/sec) are never evicted.
+ *                      Use 0.0 to disable threshold (evict purely by percentile).
+ *
+ * Returns:
+ *   Number of peers evicted
+ */
+size_t download_mgr_evict_slowest_percent(download_mgr_t *mgr, float percent,
+                                          float min_rate_to_keep);
+
+/**
  * Check for validation stall and steal work if needed.
  *
  * Called periodically with current validated height. If a peer's batch
