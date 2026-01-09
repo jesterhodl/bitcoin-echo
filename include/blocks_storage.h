@@ -33,11 +33,19 @@ typedef struct {
 } block_file_pos_t;
 
 /*
+ * Read file cache size.
+ * During IBD, blocks arrive out of order, so sequential height confirmation
+ * jumps between files. Caching multiple file handles avoids open/close overhead.
+ */
+#define BLOCK_READ_CACHE_SIZE 8
+
+/*
  * Block file manager.
  * Manages writing and reading blocks to/from disk.
  *
  * IBD optimization: keeps current write file open to avoid
- * per-block fopen/fclose syscall overhead.
+ * per-block fopen/fclose syscall overhead. Also caches read file
+ * handles for faster block retrieval during confirmation.
  */
 typedef struct {
   char data_dir[256];           /* Data directory path */
@@ -46,6 +54,14 @@ typedef struct {
   void *current_file;           /* Current write file handle (FILE*) */
   uint32_t blocks_since_flush;  /* Blocks written since last flush */
   uint64_t cached_total_size;   /* Cached total disk usage (updated incrementally) */
+
+  /* Read file cache: avoids fopen/fclose per block during IBD confirmation */
+  struct {
+    uint32_t file_index;        /* File index, or UINT32_MAX if slot empty */
+    void *file_handle;          /* FILE* handle */
+    uint64_t last_access;       /* Access counter for LRU eviction */
+  } read_cache[BLOCK_READ_CACHE_SIZE];
+  uint64_t read_cache_access_counter; /* Monotonic counter for LRU */
 } block_file_manager_t;
 
 /*

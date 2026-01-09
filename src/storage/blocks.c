@@ -141,6 +141,14 @@ echo_result_t block_storage_init(block_file_manager_t *mgr,
     }
   }
 
+  /* Initialize read file cache (all slots empty) */
+  for (int i = 0; i < BLOCK_READ_CACHE_SIZE; i++) {
+    mgr->read_cache[i].file_index = UINT32_MAX;
+    mgr->read_cache[i].file_handle = NULL;
+    mgr->read_cache[i].last_access = 0;
+  }
+  mgr->read_cache_access_counter = 0;
+
   return ECHO_OK;
 }
 
@@ -245,10 +253,71 @@ echo_result_t block_storage_write(block_file_manager_t *mgr,
 }
 
 /*
+ * Get or create a cached file handle for reading.
+ * Uses LRU eviction when cache is full.
+ *
+ * Returns NULL on error (file doesn't exist or I/O error).
+ */
+static FILE *get_cached_read_handle(block_file_manager_t *mgr,
+                                    uint32_t file_index) {
+  /* Check if file is already in cache */
+  for (int i = 0; i < BLOCK_READ_CACHE_SIZE; i++) {
+    if (mgr->read_cache[i].file_index == file_index) {
+      /* Cache hit - update LRU counter and return handle */
+      mgr->read_cache[i].last_access = ++mgr->read_cache_access_counter;
+      return (FILE *)mgr->read_cache[i].file_handle;
+    }
+  }
+
+  /* Cache miss - find slot to use (empty or LRU) */
+  int slot = -1;
+  uint64_t oldest_access = UINT64_MAX;
+
+  for (int i = 0; i < BLOCK_READ_CACHE_SIZE; i++) {
+    if (mgr->read_cache[i].file_index == UINT32_MAX) {
+      /* Empty slot - use it */
+      slot = i;
+      break;
+    }
+    if (mgr->read_cache[i].last_access < oldest_access) {
+      oldest_access = mgr->read_cache[i].last_access;
+      slot = i;
+    }
+  }
+
+  /* Close old handle if slot was occupied */
+  if (mgr->read_cache[slot].file_handle != NULL) {
+    fclose((FILE *)mgr->read_cache[slot].file_handle);
+    mgr->read_cache[slot].file_handle = NULL;
+    mgr->read_cache[slot].file_index = UINT32_MAX;
+  }
+
+  /* Open the file */
+  char path[512];
+  block_storage_get_path(mgr, file_index, path);
+
+  FILE *f = fopen(path, "rb");
+  if (!f) {
+    return NULL;
+  }
+
+  /* Cache the handle */
+  mgr->read_cache[slot].file_index = file_index;
+  mgr->read_cache[slot].file_handle = f;
+  mgr->read_cache[slot].last_access = ++mgr->read_cache_access_counter;
+
+  return f;
+}
+
+/*
  * Read a block from disk.
  *
  * NOTE: If reading from the current write file, we must flush first
  * to ensure buffered writes are visible to the separate read handle.
+ *
+ * IBD optimization: uses cached file handles to avoid fopen/fclose overhead.
+ * During IBD, blocks arrive out of order so confirmation jumps between files.
+ * Caching multiple read handles avoids syscall overhead.
  */
 echo_result_t block_storage_read(block_file_manager_t *mgr,
                                  block_file_pos_t pos, uint8_t **block_out,
@@ -267,26 +336,29 @@ echo_result_t block_storage_read(block_file_manager_t *mgr,
     fflush((FILE *)mgr->current_file);
   }
 
-  /* Get path to file */
-  char path[512];
-  block_storage_get_path(mgr, pos.file_index, path);
-
-  /* Open file for reading */
-  FILE *f = fopen(path, "rb");
+  /* Get cached file handle (opens file if not cached) */
+  FILE *f = get_cached_read_handle(mgr, pos.file_index);
   if (!f) {
     return ECHO_ERR_NOT_FOUND;
   }
 
   /* Seek to position */
   if (fseek(f, pos.file_offset, SEEK_SET) != 0) {
-    fclose(f);
+    /* Don't close - it's cached. Invalidate on error. */
+    for (int i = 0; i < BLOCK_READ_CACHE_SIZE; i++) {
+      if (mgr->read_cache[i].file_index == pos.file_index) {
+        fclose(f);
+        mgr->read_cache[i].file_handle = NULL;
+        mgr->read_cache[i].file_index = UINT32_MAX;
+        break;
+      }
+    }
     return ECHO_ERR_PLATFORM_IO;
   }
 
   /* Read and verify magic bytes */
   uint8_t magic_bytes[4];
   if (fread(magic_bytes, 1, 4, f) != 4) {
-    fclose(f);
     return ECHO_ERR_TRUNCATED;
   }
 
@@ -295,14 +367,12 @@ echo_result_t block_storage_read(block_file_manager_t *mgr,
       ((uint32_t)magic_bytes[2] << 16) | ((uint32_t)magic_bytes[3] << 24);
 
   if (magic != ECHO_NETWORK_MAGIC) {
-    fclose(f);
     return ECHO_ERR_INVALID_FORMAT;
   }
 
   /* Read block size */
   uint8_t size_bytes[4];
   if (fread(size_bytes, 1, 4, f) != 4) {
-    fclose(f);
     return ECHO_ERR_TRUNCATED;
   }
 
@@ -312,25 +382,22 @@ echo_result_t block_storage_read(block_file_manager_t *mgr,
 
   /* Sanity check block size */
   if (block_size == 0 || block_size > ECHO_MAX_BLOCK_SIZE * 4) {
-    fclose(f);
     return ECHO_ERR_INVALID_FORMAT;
   }
 
   /* Allocate buffer for block */
   uint8_t *block = (uint8_t *)malloc(block_size);
   if (!block) {
-    fclose(f);
     return ECHO_ERR_OUT_OF_MEMORY;
   }
 
   /* Read block data */
   if (fread(block, 1, block_size, f) != block_size) {
     free(block);
-    fclose(f);
     return ECHO_ERR_TRUNCATED;
   }
 
-  fclose(f);
+  /* Note: don't close f - it's cached for reuse */
 
   /* Success */
   *block_out = block;
@@ -364,6 +431,18 @@ echo_result_t block_storage_delete_file(block_file_manager_t *mgr,
   /* Check if file exists */
   if (!plat_file_exists(path)) {
     return ECHO_ERR_NOT_FOUND;
+  }
+
+  /* Invalidate read cache entry for this file (must close handle before delete) */
+  for (int i = 0; i < BLOCK_READ_CACHE_SIZE; i++) {
+    if (mgr->read_cache[i].file_index == file_index) {
+      if (mgr->read_cache[i].file_handle != NULL) {
+        fclose((FILE *)mgr->read_cache[i].file_handle);
+        mgr->read_cache[i].file_handle = NULL;
+      }
+      mgr->read_cache[i].file_index = UINT32_MAX;
+      break;
+    }
   }
 
   /* Get file size before deletion (for cache update) */
@@ -530,11 +609,21 @@ void block_storage_close(block_file_manager_t *mgr) {
     return;
   }
 
+  /* Close write file handle */
   if (mgr->current_file != NULL) {
     FILE *f = (FILE *)mgr->current_file;
     fflush(f);
     fclose(f);
     mgr->current_file = NULL;
     mgr->blocks_since_flush = 0;
+  }
+
+  /* Close all cached read file handles */
+  for (int i = 0; i < BLOCK_READ_CACHE_SIZE; i++) {
+    if (mgr->read_cache[i].file_handle != NULL) {
+      fclose((FILE *)mgr->read_cache[i].file_handle);
+      mgr->read_cache[i].file_handle = NULL;
+      mgr->read_cache[i].file_index = UINT32_MAX;
+    }
   }
 }
