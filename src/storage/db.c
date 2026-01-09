@@ -11,6 +11,7 @@
 #include "../../lib/sqlite/sqlite3.h"
 #include "echo_assert.h"
 #include "echo_types.h"
+#include "log.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -78,9 +79,13 @@ echo_result_t db_set_ibd_mode(db_t *db, bool ibd_mode) {
   if (ibd_mode) {
     /* IBD mode: maximum speed, less safety (can re-sync if crash) */
     sqlite3_exec(db->handle, "PRAGMA synchronous=OFF", NULL, NULL, NULL);
+    /* Disable auto-checkpoint during IBD to prevent lock contention */
+    sqlite3_exec(db->handle, "PRAGMA wal_autocheckpoint=0", NULL, NULL, NULL);
   } else {
     /* Normal mode: balance of speed and safety */
     sqlite3_exec(db->handle, "PRAGMA synchronous=NORMAL", NULL, NULL, NULL);
+    /* Re-enable auto-checkpoint after IBD (default 1000 pages) */
+    sqlite3_exec(db->handle, "PRAGMA wal_autocheckpoint=1000", NULL, NULL, NULL);
   }
 
   return ECHO_OK;
@@ -95,6 +100,11 @@ void db_close(db_t *db) {
   if (db->in_transaction) {
     db_commit(db);
   }
+
+  /* Checkpoint WAL before closing to ensure data is written to main DB.
+   * Uses TRUNCATE mode to fully reset WAL since we're shutting down. */
+  sqlite3_wal_checkpoint_v2(db->handle, NULL, SQLITE_CHECKPOINT_TRUNCATE,
+                            NULL, NULL);
 
   /* Close database */
   sqlite3_close(db->handle);
@@ -359,4 +369,26 @@ const char *db_errmsg(db_t *db) {
   ECHO_ASSERT(db->handle != NULL);
 
   return sqlite3_errmsg(db->handle);
+}
+
+echo_result_t db_checkpoint(db_t *db) {
+  ECHO_ASSERT(db != NULL);
+  ECHO_ASSERT(db->handle != NULL);
+
+  /*
+   * FULL checkpoint: waits for readers to finish, then checkpoints all frames.
+   * Brief blocking during IBD but ensures WAL doesn't grow unboundedly.
+   */
+  int wal_frames = 0, checkpointed = 0;
+  int rc = sqlite3_wal_checkpoint_v2(db->handle, NULL, SQLITE_CHECKPOINT_FULL,
+                                     &wal_frames, &checkpointed);
+
+  log_info(LOG_COMP_STORE, "WAL checkpoint: rc=%d frames=%d checkpointed=%d",
+           rc, wal_frames, checkpointed);
+
+  if (rc != SQLITE_OK && rc != SQLITE_BUSY && rc != SQLITE_LOCKED) {
+    return ECHO_ERR_DB;
+  }
+
+  return ECHO_OK;
 }

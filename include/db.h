@@ -422,4 +422,20 @@ const char *db_errmsg(db_t *db);
  */
 echo_result_t db_set_ibd_mode(db_t *db, bool ibd_mode);
 
+/**
+ * Checkpoint the WAL (Write-Ahead Log) to prevent unbounded growth.
+ *
+ * Parameters:
+ *   db - Database handle
+ *
+ * Returns:
+ *   ECHO_OK on success, error code on failure
+ *
+ * Notes:
+ *   - Uses PASSIVE mode which doesn't block writers
+ *   - Should be called periodically during heavy write workloads (e.g., IBD)
+ *   - Without periodic checkpoints, WAL can grow to GB and slow reads
+ */
+echo_result_t db_checkpoint(db_t *db);
+
 #endif /* ECHO_DB_H */

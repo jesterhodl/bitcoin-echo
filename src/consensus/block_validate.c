@@ -1252,52 +1252,78 @@ void block_validation_result_init(block_validation_result_t *result) {
 }
 
 /*
+ * Indexed txid for sorting while preserving original position.
+ */
+typedef struct {
+  hash256_t txid;
+  size_t original_idx;
+} indexed_txid_t;
+
+/*
+ * Compare function for qsort - compares txid bytes.
+ */
+static int compare_indexed_txids(const void *a, const void *b) {
+  const indexed_txid_t *ta = (const indexed_txid_t *)a;
+  const indexed_txid_t *tb = (const indexed_txid_t *)b;
+  return memcmp(ta->txid.bytes, tb->txid.bytes, 32);
+}
+
+/*
  * Check if a block has any duplicate transaction IDs.
  *
- * Uses O(n^2) comparison which is acceptable for typical block sizes.
- * For very large blocks, a hash table would be more efficient.
+ * Uses O(n log n) sort + linear scan for efficiency on large blocks.
+ * A 2000-tx block does ~22k comparisons vs ~2M with O(n^2).
  */
 echo_bool_t block_has_duplicate_txids(const block_t *block, size_t *dup_idx) {
-  size_t i, j;
-  hash256_t *txids;
+  size_t i;
+  indexed_txid_t *indexed;
   echo_result_t result;
-  echo_bool_t found_dup = ECHO_FALSE;
 
   if (block == NULL || block->tx_count == 0) {
     return ECHO_FALSE;
   }
 
-  /* Allocate array for txids */
-  txids = malloc(block->tx_count * sizeof(hash256_t));
-  if (txids == NULL) {
+  /* Single tx can't have duplicates */
+  if (block->tx_count == 1) {
+    return ECHO_FALSE;
+  }
+
+  /* Allocate array for indexed txids */
+  indexed = malloc(block->tx_count * sizeof(indexed_txid_t));
+  if (indexed == NULL) {
     /* Can't check, assume no duplicates */
     return ECHO_FALSE;
   }
 
-  /* Compute all txids */
+  /* Compute all txids with original indices */
   for (i = 0; i < block->tx_count; i++) {
-    result = tx_compute_txid(&block->txs[i], &txids[i]);
+    result = tx_compute_txid(&block->txs[i], &indexed[i].txid);
     if (result != ECHO_OK) {
-      free(txids);
+      free(indexed);
       return ECHO_FALSE;
     }
+    indexed[i].original_idx = i;
   }
 
-  /* Check for duplicates */
-  for (i = 0; i < block->tx_count && !found_dup; i++) {
-    for (j = i + 1; j < block->tx_count; j++) {
-      if (memcmp(txids[i].bytes, txids[j].bytes, 32) == 0) {
-        found_dup = ECHO_TRUE;
-        if (dup_idx != NULL) {
-          *dup_idx = j;
-        }
-        break;
+  /* Sort by txid - O(n log n) */
+  qsort(indexed, block->tx_count, sizeof(indexed_txid_t), compare_indexed_txids);
+
+  /* Linear scan for adjacent duplicates - O(n) */
+  for (i = 0; i < block->tx_count - 1; i++) {
+    if (memcmp(indexed[i].txid.bytes, indexed[i + 1].txid.bytes, 32) == 0) {
+      /* Found duplicate - return the higher original index */
+      if (dup_idx != NULL) {
+        size_t idx_a = indexed[i].original_idx;
+        size_t idx_b = indexed[i + 1].original_idx;
+        *dup_idx = (idx_a > idx_b) ? idx_a : idx_b;
       }
+      free(indexed);
+      return ECHO_TRUE;
     }
   }
 
-  free(txids);
-  return found_dup;
+  free(indexed);
+  return ECHO_FALSE;
 }
 
 /*

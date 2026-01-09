@@ -619,6 +619,7 @@ echo_result_t block_index_db_insert(block_index_db_t *bdb,
 
   /* Execute insert */
   result = db_step(&bdb->insert_stmt);
+
   pthread_mutex_unlock(&bdb->mutex);
 
   if (result == ECHO_DONE) {
@@ -673,6 +674,7 @@ echo_result_t block_index_db_update_data_pos(block_index_db_t *bdb,
 
   /* Execute update */
   result = db_step(&bdb->update_data_pos_stmt);
+
   pthread_mutex_unlock(&bdb->mutex);
 
   if (result == ECHO_DONE) {
@@ -716,6 +718,7 @@ echo_result_t block_index_db_update_status(block_index_db_t *bdb,
     /* Check if any rows were updated */
     int changes = db_changes(&bdb->db);
     pthread_mutex_unlock(&bdb->mutex);
+
     if (changes == 0) {
       return ECHO_ERR_NOT_FOUND;
     }
