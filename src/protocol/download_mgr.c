@@ -64,6 +64,9 @@ struct download_mgr {
   /* Adaptive stall timeout (Bitcoin Core style backoff) */
   uint32_t stall_backoff_height;   /* Height we're stuck at */
   uint32_t stall_backoff_count;    /* Times we've stolen at this height */
+
+  /* Sticky batch alternation - alternate between priority and regular batches */
+  bool sticky_assign_toggle;       /* false=assign sticky, true=skip sticky */
 };
 
 /* ============================================================================
@@ -195,6 +198,45 @@ static batch_node_t *queue_pop_front(download_mgr_t *mgr) {
   mgr->queue_count--;
 
   return node;
+}
+
+/**
+ * Remove a specific node from the queue (for alternating assignment).
+ * Returns the removed node (caller takes ownership).
+ */
+static void queue_remove(download_mgr_t *mgr, batch_node_t *node) {
+  if (node->prev != NULL) {
+    node->prev->next = node->next;
+  } else {
+    mgr->queue_head = node->next;
+  }
+
+  if (node->next != NULL) {
+    node->next->prev = node->prev;
+  } else {
+    mgr->queue_tail = node->prev;
+  }
+
+  node->next = NULL;
+  node->prev = NULL;
+  mgr->queue_count--;
+}
+
+/**
+ * Pop the first non-sticky batch from the queue.
+ * Used for alternating assignment when skipping the sticky batch.
+ * Returns NULL if no non-sticky batch is available.
+ */
+static batch_node_t *queue_pop_first_non_sticky(download_mgr_t *mgr) {
+  batch_node_t *node = mgr->queue_head;
+  while (node != NULL) {
+    if (!node->batch.sticky) {
+      queue_remove(mgr, node);
+      return node;
+    }
+    node = node->next;
+  }
+  return NULL;
 }
 
 /* ============================================================================
@@ -472,16 +514,38 @@ bool download_mgr_peer_request_work(download_mgr_t *mgr, peer_t *peer) {
   bool is_sticky_clone = false;
 
   if (mgr->queue_head->batch.sticky) {
-    /* Sticky batch: clone it, leave original in queue for other peers */
-    node = batch_node_clone(mgr->queue_head);
-    if (node == NULL) {
-      LOG_WARN("download_mgr: failed to clone sticky batch");
-      return false;
+    /* Sticky batch at head - alternate between priority and regular batches.
+     * This keeps frontier moving while also racing on blocking blocks. */
+    if (!mgr->sticky_assign_toggle) {
+      /* Toggle OFF: assign sticky clone (PRIORITY batch) */
+      node = batch_node_clone(mgr->queue_head);
+      if (node == NULL) {
+        LOG_WARN("download_mgr: failed to clone sticky batch");
+        return false;
+      }
+      is_sticky_clone = true;
+      mgr->sticky_assign_toggle = true;
+    } else {
+      /* Toggle ON: skip sticky, assign regular batch from behind it */
+      node = queue_pop_first_non_sticky(mgr);
+      if (node == NULL) {
+        /* No regular batches available - fall back to sticky clone */
+        node = batch_node_clone(mgr->queue_head);
+        if (node == NULL) {
+          LOG_WARN("download_mgr: failed to clone sticky batch (fallback)");
+          return false;
+        }
+        is_sticky_clone = true;
+        LOG_DEBUG("download_mgr: no regular batches, falling back to sticky");
+      } else {
+        LOG_INFO("download_mgr: skipping sticky, assigning regular batch");
+      }
+      mgr->sticky_assign_toggle = false;
     }
-    is_sticky_clone = true;
   } else {
-    /* Normal batch: pop from queue */
+    /* Normal batch: pop from queue, reset toggle */
     node = queue_pop_front(mgr);
+    mgr->sticky_assign_toggle = false;
   }
 
   /* Assign batch to peer */
@@ -643,6 +707,7 @@ bool download_mgr_check_stall(download_mgr_t *mgr, uint32_t validated_height) {
                "validated, current height %u)",
                resolved->batch.sticky_height, validated_height);
       batch_node_destroy(resolved);
+      mgr->sticky_assign_toggle = false;  /* Reset alternation for next sticky */
     }
 
     return false;
