@@ -1332,13 +1332,20 @@ static void queue_blocks_from_headers(sync_manager_t *mgr) {
 
   uint32_t tip_height = chainstate_get_height(mgr->chainstate);
 
-  /* Calculate target range: from validated tip to best header */
+  /* Start from either validated tip or highest already-queued height,
+   * whichever is higher. This prevents re-queuing blocks that have already
+   * been downloaded but not yet validated. */
+  uint32_t highest_queued =
+      download_mgr_highest_queued_height(mgr->download_mgr);
   uint32_t start_height = tip_height + 1;
+  if (highest_queued >= start_height) {
+    start_height = highest_queued + 1;
+  }
   uint32_t end_height = mgr->best_header->height;
 
   log_info(LOG_COMP_SYNC,
-           "queue_blocks: tip=%u, start=%u, end=%u, best=%u",
-           tip_height, start_height, end_height, mgr->best_header->height);
+           "queue_blocks: tip=%u, highest_queued=%u, start=%u, end=%u",
+           tip_height, highest_queued, start_height, end_height);
 
   if (start_height > end_height) {
     /* Already fully synced */
@@ -1727,7 +1734,9 @@ void sync_tick(sync_manager_t *mgr) {
     size_t total_queued = pending + inflight;
     size_t queue_capacity = (size_t)DOWNLOAD_MAX_BATCHES * DOWNLOAD_BATCH_SIZE;
     if (total_queued < queue_capacity / 2) {
-      /* Below 50% capacity - queue more work */
+      /* Below 50% capacity - queue more work.
+       * Sticky clones are excluded from inflight count so this threshold
+       * accurately reflects real work in progress. */
       queue_blocks_from_headers(mgr);
     }
 

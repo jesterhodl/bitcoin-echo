@@ -382,6 +382,12 @@ size_t download_mgr_pending_count(const download_mgr_t *mgr);
 size_t download_mgr_inflight_count(const download_mgr_t *mgr);
 
 /**
+ * Get highest height that has been queued for download.
+ * Used by sync layer to avoid re-queuing already-queued heights.
+ */
+uint32_t download_mgr_highest_queued_height(const download_mgr_t *mgr);
+
+/**
  * Mark block as complete (validated).
  * NOTE: With batch model, blocks are implicitly complete when received.
  * This is kept for compatibility but is a no-op.

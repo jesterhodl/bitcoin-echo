@@ -98,9 +98,10 @@ static batch_node_t *batch_node_clone(const batch_node_t *src) {
   }
   /* Copy batch data */
   memcpy(&node->batch, &src->batch, sizeof(work_batch_t));
-  /* Clone is NOT sticky - only the original queue entry is sticky */
+  /* Clone is NOT sticky - only the original queue entry is sticky.
+   * Keep sticky_height to mark this as a sticky clone (for inflight counting). */
   node->batch.sticky = false;
-  node->batch.sticky_height = 0;
+  /* sticky_height preserved from source - non-zero marks this as a sticky clone */
   /* Reset link pointers */
   node->next = NULL;
   node->prev = NULL;
@@ -173,6 +174,28 @@ static void queue_push_after_sticky(download_mgr_t *mgr, batch_node_t *node) {
 
   /* No sticky batch at front - standard push front */
   queue_push_front(mgr, node);
+}
+
+/**
+ * Return batch to queue if still needed, or discard if stale.
+ * Batches where the highest height is at or below validated_height are
+ * already stored and would only produce duplicates if re-assigned.
+ */
+static void return_or_discard_batch(download_mgr_t *mgr, batch_node_t *node) {
+  uint32_t batch_end = node->batch.heights[0] + (uint32_t)node->batch.count - 1;
+
+  if (batch_end <= mgr->last_validated_height) {
+    /* Batch is fully validated - discard it */
+    uint32_t batch_start = node->batch.heights[0];
+    LOG_INFO("download_mgr: discarding stale batch [%u-%u] "
+             "(validated_height=%u)",
+             batch_start, batch_end, mgr->last_validated_height);
+    batch_node_destroy(node);
+    return;
+  }
+
+  /* Batch still has work to do - return to queue */
+  queue_push_after_sticky(mgr, node);
 }
 
 /**
@@ -397,13 +420,9 @@ void download_mgr_remove_peer(download_mgr_t *mgr, peer_t *peer) {
   if (perf->batch != NULL) {
     /* batch is first field in batch_node_t, so cast is direct */
     batch_node_t *node = (batch_node_t *)(void *)perf->batch;
-    uint32_t batch_start = node->batch.heights[0];
-    uint32_t batch_end = batch_start + (uint32_t)node->batch.count - 1;
     node->batch.assigned_time = 0;        /* Mark as unassigned */
-    queue_push_after_sticky(mgr, node);   /* Return to front, after any sticky */
     perf->batch = NULL;
-    LOG_INFO("download_mgr: returned batch [%u-%u] to queue from removed peer",
-             batch_start, batch_end);
+    return_or_discard_batch(mgr, node);   /* Return or discard if stale */
   }
 
   /* Mark slot as empty */
@@ -1263,16 +1282,9 @@ size_t download_mgr_check_performance(download_mgr_t *mgr) {
     }
 
     batch_node_t *node = (batch_node_t *)(void *)perf->batch;
-    uint32_t batch_start = node->batch.heights[0];
-    uint32_t batch_end = batch_start + (uint32_t)node->batch.count - 1;
-
-    LOG_INFO("download_mgr: peer truly stalled (0 B/s, last delivery %llu ms ago), "
-             "returning batch [%u-%u] to queue",
-             (unsigned long long)since_last_delivery, batch_start, batch_end);
-
     node->batch.assigned_time = 0;
-    queue_push_after_sticky(mgr, node);
     perf->batch = NULL;
+    return_or_discard_batch(mgr, node);
 
     if (mgr->callbacks.disconnect_peer != NULL) {
       mgr->callbacks.disconnect_peer(perf->peer, "stalled (0 B/s)",
@@ -1315,18 +1327,9 @@ size_t download_mgr_check_performance(download_mgr_t *mgr) {
     }
 
     batch_node_t *node = (batch_node_t *)(void *)perf->batch;
-    uint32_t batch_start = node->batch.heights[0];
-    uint32_t batch_end = batch_start + (uint32_t)node->batch.count - 1;
-
-    LOG_INFO("download_mgr: peer too slow (%.1f KB/s < %.1f KB/s minimum), "
-             "returning batch [%u-%u] to queue",
-             perf->bytes_per_second / 1024.0f,
-             (float)DOWNLOAD_MIN_RATE_BYTES_PER_SEC / 1024.0f,
-             batch_start, batch_end);
-
     node->batch.assigned_time = 0;
-    queue_push_after_sticky(mgr, node);
     perf->batch = NULL;
+    return_or_discard_batch(mgr, node);
 
     if (mgr->callbacks.disconnect_peer != NULL) {
       mgr->callbacks.disconnect_peer(perf->peer, "too slow",
@@ -1445,17 +1448,9 @@ size_t download_mgr_evict_slowest_percent(download_mgr_t *mgr, float percent,
     /* Return batch to queue before disconnecting */
     if (perf->batch != NULL) {
       batch_node_t *node = (batch_node_t *)(void *)perf->batch;
-      uint32_t batch_start = node->batch.heights[0];
-      uint32_t batch_end = batch_start + (uint32_t)node->batch.count - 1;
-
-      LOG_INFO("download_mgr: evicting bottom %zu%% peer (%.1f KB/s, rank %zu/%zu), "
-               "returning batch [%u-%u]",
-               (size_t)percent, rate / 1024.0f, i + 1, candidate_count,
-               batch_start, batch_end);
-
       node->batch.assigned_time = 0;
-      queue_push_after_sticky(mgr, node);
       perf->batch = NULL;
+      return_or_discard_batch(mgr, node);
     }
 
     /* Disconnect the peer */
@@ -1628,14 +1623,23 @@ size_t download_mgr_inflight_count(const download_mgr_t *mgr) {
     return 0;
   }
 
-  /* Inflight = blocks assigned to peers but not yet received */
+  /* Inflight = blocks assigned to peers but not yet received.
+   * Exclude sticky clones (sticky_height > 0) - they contain mostly duplicates
+   * and would inflate the count, preventing queue refill. */
   size_t total = 0;
   for (size_t i = 0; i < mgr->peer_count; i++) {
-    if (mgr->peers[i].batch != NULL) {
+    if (mgr->peers[i].batch != NULL && mgr->peers[i].batch->sticky_height == 0) {
       total += mgr->peers[i].batch->remaining;
     }
   }
   return total;
+}
+
+uint32_t download_mgr_highest_queued_height(const download_mgr_t *mgr) {
+  if (mgr == NULL) {
+    return 0;
+  }
+  return mgr->highest_queued_height;
 }
 
 void download_mgr_block_complete(download_mgr_t *mgr, const hash256_t *hash,
