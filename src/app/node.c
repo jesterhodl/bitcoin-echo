@@ -1863,6 +1863,23 @@ static void sync_cb_disconnect_peer(peer_t *peer, const char *reason,
 }
 
 /**
+ * Penalize a peer address for being useless during sync.
+ * This prevents us from reconnecting to pruned nodes, nodes behind our tip, etc.
+ */
+static void sync_cb_penalize_useless_peer(peer_t *peer, void *ctx) {
+  node_t *node = (node_t *)ctx;
+  if (node == NULL || peer == NULL) {
+    return;
+  }
+
+  /* Convert peer address string back to net_addr_t for penalty lookup */
+  net_addr_t addr;
+  if (discovery_parse_address(peer->address, peer->port, &addr) == ECHO_OK) {
+    discovery_mark_useless_for_sync(&node->addr_manager, &addr);
+  }
+}
+
+/**
  * Initialize sync manager with callbacks.
  */
 static echo_result_t node_init_sync(node_t *node) {
@@ -1894,6 +1911,7 @@ static echo_result_t node_init_sync(node_t *node) {
       .commit_header_batch = sync_cb_commit_header_batch,
       .flush_headers = NULL,
       .disconnect_peer = sync_cb_disconnect_peer,
+      .penalize_useless_peer = sync_cb_penalize_useless_peer,
       .ctx = node};
 
   /* Create sync manager */
@@ -2565,16 +2583,21 @@ static void node_handle_peer_message(node_t *node, peer_t *peer,
     break;
 
   case MSG_ADDR:
-    /* Update address manager with new addresses */
+    /* Update address manager with new addresses - but only from sync candidates.
+     * Pruned nodes and nodes behind our tip often advertise other useless peers,
+     * polluting our address pool and wasting peer slots during IBD. */
     if (msg->payload.addr.count > 0 && msg->payload.addr.addresses != NULL) {
-      size_t before = discovery_get_address_count(&node->addr_manager);
+      if (!sync_is_peer_candidate(node->sync_mgr, peer)) {
+        log_debug(LOG_COMP_NET, "Ignoring %zu addr from non-sync peer %s",
+                  (size_t)msg->payload.addr.count, peer->address);
+        break;
+      }
       size_t added = discovery_add_addresses(&node->addr_manager,
                               msg->payload.addr.addresses,
                               msg->payload.addr.count);
       log_info(LOG_COMP_NET, "Got %zu addr from %s, added %zu (total: %zu)",
                (size_t)msg->payload.addr.count, peer->address, added,
                discovery_get_address_count(&node->addr_manager));
-      (void)before; /* Suppress unused warning */
     }
     break;
 

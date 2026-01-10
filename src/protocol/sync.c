@@ -658,6 +658,25 @@ void sync_add_peer(sync_manager_t *mgr, peer_t *peer, int32_t height) {
                   peer->address);
       }
     }
+  } else if (mgr->mode == SYNC_MODE_HEADERS || mgr->mode == SYNC_MODE_BLOCKS) {
+    /* During IBD, immediately evict peers that can't help with sync.
+     * Don't waste 30 seconds - we know from the version handshake they're
+     * useless (pruned node or behind our tip). Every peer slot is valuable.
+     *
+     * Also penalize their address heavily - if they're useless, the addresses
+     * they advertised to us are likely from similar useless nodes. */
+    log_info(LOG_COMP_SYNC, "Immediately evicting non-sync peer %s: height=%d, "
+             "our_height=%u, services=0x%llx%s",
+             peer->address, height, our_height, (unsigned long long)peer->services,
+             !can_serve_full ? " (PRUNED)" : " (behind tip)");
+    if (mgr->callbacks.penalize_useless_peer) {
+      mgr->callbacks.penalize_useless_peer(peer, mgr->callbacks.ctx);
+    }
+    peer_disconnect(peer, PEER_DISCONNECT_RESOURCE_LIMIT,
+                    "Non-sync peer evicted during IBD");
+    /* Remove from our array since we just added them */
+    mgr->peer_count--;
+    return;
   }
 
   log_info(LOG_COMP_SYNC, "Added peer %s to sync_mgr: height=%d, our_height=%u, "
@@ -689,6 +708,19 @@ void sync_remove_peer(sync_manager_t *mgr, peer_t *peer) {
       return;
     }
   }
+}
+
+echo_bool_t sync_is_peer_candidate(sync_manager_t *mgr, peer_t *peer) {
+  if (!mgr || !peer) {
+    return ECHO_FALSE;
+  }
+
+  for (size_t i = 0; i < mgr->peer_count; i++) {
+    if (mgr->peers[i].peer == peer) {
+      return mgr->peers[i].sync_candidate;
+    }
+  }
+  return ECHO_FALSE;
 }
 
 echo_result_t sync_start(sync_manager_t *mgr) {
@@ -1253,33 +1285,8 @@ void sync_process_timeouts(sync_manager_t *mgr) {
       }
     }
 
-    /*
-     * IBD peer eviction: disconnect non-sync-candidates to free slots
-     *
-     * During IBD, every peer slot is valuable. Peers that can't help with
-     * sync (pruned nodes missing blocks we need, nodes behind our tip) take
-     * slots that could be used by peers who CAN help.
-     *
-     * We give peers a 30-second grace period after connection for:
-     * - Address relay (they may share good peer addresses)
-     * - State to settle (version exchange, sync_candidate determination)
-     *
-     * After grace period, evict unconditionally. No dead weight during IBD.
-     */
-    if (ps->peer && !ps->sync_candidate &&
-        (mgr->mode == SYNC_MODE_HEADERS || mgr->mode == SYNC_MODE_BLOCKS)) {
-      uint64_t connected_ms = now - ps->peer->connect_time;
-
-      /* 30 second grace period, then evict */
-      if (connected_ms >= 30000) {
-        log_info(LOG_COMP_SYNC,
-                 "Evicting non-sync peer after %llus",
-                 (unsigned long long)(connected_ms / 1000));
-        peer_disconnect(ps->peer, PEER_DISCONNECT_RESOURCE_LIMIT,
-                        "Non-sync peer evicted during IBD");
-        continue;
-      }
-    }
+    /* Note: Non-sync peers are now immediately evicted in sync_add_peer()
+     * rather than waiting 30 seconds. This maximizes useful peer slots. */
   }
 }
 

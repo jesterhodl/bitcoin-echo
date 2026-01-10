@@ -595,6 +595,21 @@ void discovery_mark_success(peer_addr_manager_t *manager,
   }
 }
 
+void discovery_mark_useless_for_sync(peer_addr_manager_t *manager,
+                                     const net_addr_t *addr) {
+  peer_addr_entry_t *entry = find_address(manager, addr);
+  if (entry != NULL) {
+    /* Apply heavy penalty: set attempts to 20 which gives -1,000,000 penalty
+     * (20 * 50000 for unreachable). This effectively blacklists the address
+     * for a very long time since even new addresses only get +1,000,000 score.
+     * Mark as unreachable to apply the heavy penalty multiplier. */
+    entry->reachable = ECHO_FALSE;
+    entry->attempts = 20;
+    entry->last_try = plat_time_ms();
+    entry->in_use = ECHO_FALSE;
+  }
+}
+
 echo_bool_t discovery_is_address_valid(const peer_addr_manager_t *manager,
                                        const net_addr_t *addr) {
   /* Check for unspecified address */

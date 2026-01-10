@@ -241,6 +241,20 @@ void discovery_mark_success(peer_addr_manager_t *manager,
                             const net_addr_t *addr);
 
 /**
+ * Mark address as useless for sync (pruned node, behind tip, etc).
+ *
+ * Applies a heavy penalty to prevent reconnecting to nodes that can connect
+ * but can't help with initial block download. These consume peer slots
+ * without contributing to sync progress.
+ *
+ * Parameters:
+ *   manager - Address manager
+ *   addr    - Address to penalize
+ */
+void discovery_mark_useless_for_sync(peer_addr_manager_t *manager,
+                                     const net_addr_t *addr);
+
+/**
  * Check if address is valid for connection.
  *
  * Validates that address is:

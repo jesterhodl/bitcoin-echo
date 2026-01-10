@@ -320,6 +320,19 @@ typedef struct {
    */
   void (*disconnect_peer)(peer_t *peer, const char *reason, void *ctx);
 
+  /**
+   * Penalize a peer address for being useless during sync.
+   *
+   * Called when a peer turns out to be useless for IBD (pruned node,
+   * behind our tip, etc). This heavily penalizes the address to prevent
+   * reconnecting and wasting peer slots.
+   *
+   * Parameters:
+   *   peer - Peer whose address should be penalized
+   *   ctx  - User context
+   */
+  void (*penalize_useless_peer)(peer_t *peer, void *ctx);
+
   /* Context pointer passed to all callbacks */
   void *ctx;
 } sync_callbacks_t;
@@ -399,6 +412,14 @@ void sync_add_peer(sync_manager_t *mgr, peer_t *peer, int32_t height);
  * Should be called when a peer disconnects.
  */
 void sync_remove_peer(sync_manager_t *mgr, peer_t *peer);
+
+/**
+ * Check if a peer is a sync candidate.
+ *
+ * Returns true if the peer is useful for syncing (not pruned, has blocks
+ * we need). Used to filter which peers we trust for address relay.
+ */
+echo_bool_t sync_is_peer_candidate(sync_manager_t *mgr, peer_t *peer);
 
 /**
  * Start initial block download.
