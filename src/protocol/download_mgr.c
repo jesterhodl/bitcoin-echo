@@ -767,9 +767,10 @@ bool download_mgr_check_stall(download_mgr_t *mgr, uint32_t validated_height) {
     return false;
   }
 
-  if (next_height > blocker_end) {
-    /* Batch is BEHIND what we need - it's stale (we've already validated these).
-     * Free this stale batch so we don't keep finding it. */
+  /* Free ALL stale batches (ones we've already validated past) in one go,
+   * then re-find the blocker. This avoids spending multiple seconds freeing
+   * stale batches one at a time. */
+  while (next_height > blocker_end) {
     LOG_INFO("download_mgr: stalled at %u but lowest batch [%u-%u] is stale "
              "(we already validated past it) - freeing",
              validated_height, blocker_height, blocker_end);
@@ -778,7 +779,59 @@ bool download_mgr_check_stall(download_mgr_t *mgr, uint32_t validated_height) {
     batch_node_destroy(stale);
     blocker->batch = NULL;
 
-    /* Reset stall timer and try again next tick */
+    /* Find next lowest batch */
+    blocker = find_peer_with_lowest_batch(mgr);
+    if (blocker == NULL) {
+      /* No more peers with work */
+      mgr->last_progress_time = now;
+      return false;
+    }
+    blocker_height = blocker->batch->heights[0];
+    blocker_end = blocker_height + (uint32_t)blocker->batch->count - 1;
+  }
+
+  /* After freeing stale batches, re-check if blocker is ahead of what we need */
+  if (next_height < blocker_height) {
+    /* Blocker is now ahead - check queue for our needed block */
+    uint32_t queue_lowest = UINT32_MAX;
+    for (batch_node_t *qnode = mgr->queue_head; qnode != NULL; qnode = qnode->next) {
+      if (qnode->batch.heights[0] < queue_lowest) {
+        queue_lowest = qnode->batch.heights[0];
+      }
+    }
+
+    if (queue_lowest <= next_height) {
+      /* Move needed batch to front (same logic as above) */
+      for (batch_node_t *qnode = mgr->queue_head; qnode != NULL; qnode = qnode->next) {
+        uint32_t qstart = qnode->batch.heights[0];
+        uint32_t qend = qstart + (uint32_t)qnode->batch.count - 1;
+        if (next_height >= qstart && next_height <= qend) {
+          if (qnode != mgr->queue_head) {
+            if (qnode->prev) qnode->prev->next = qnode->next;
+            if (qnode->next) qnode->next->prev = qnode->prev;
+            if (qnode == mgr->queue_tail) mgr->queue_tail = qnode->prev;
+            if (mgr->queue_head && mgr->queue_head->batch.sticky) {
+              batch_node_t *sticky = mgr->queue_head;
+              qnode->next = sticky->next;
+              qnode->prev = sticky;
+              if (sticky->next) sticky->next->prev = qnode;
+              sticky->next = qnode;
+              if (mgr->queue_tail == sticky) mgr->queue_tail = qnode;
+            } else {
+              qnode->next = mgr->queue_head;
+              qnode->prev = NULL;
+              if (mgr->queue_head) mgr->queue_head->prev = qnode;
+              mgr->queue_head = qnode;
+              if (mgr->queue_tail == NULL) mgr->queue_tail = qnode;
+            }
+            LOG_INFO("download_mgr: moved queued batch [%u-%u] to front "
+                     "(contains needed block %u)",
+                     qstart, qend, next_height);
+          }
+          break;
+        }
+      }
+    }
     mgr->last_progress_time = now;
     return false;
   }
