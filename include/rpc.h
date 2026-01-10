@@ -59,8 +59,9 @@
 
 /**
  * RPC server accept backlog.
+ * Set high enough to handle rapid GUI polling without connection failures.
  */
-#define RPC_BACKLOG 5
+#define RPC_BACKLOG 32
 
 /**
  * RPC request timeout in milliseconds.
@@ -345,19 +346,8 @@ rpc_server_t *rpc_server_create(const rpc_config_t *config, node_t *node);
  */
 echo_result_t rpc_server_start(rpc_server_t *server);
 
-/**
- * Process pending RPC requests (non-blocking).
- *
- * This should be called regularly from the main event loop.
- * It accepts new connections and processes pending requests.
- *
- * Parameters:
- *   server - Server to process
- *
- * Returns:
- *   ECHO_OK on success, error code on failure.
- */
-echo_result_t rpc_server_process(rpc_server_t *server);
+/* Note: RPC request processing is now handled by a dedicated thread started
+ * in rpc_server_start(). No manual process() call is needed. */
 
 /**
  * Stop the RPC server.

@@ -552,6 +552,13 @@ int plat_thread_join(plat_thread_t *thread) {
   return PLAT_OK;
 }
 
+plat_thread_t *plat_thread_alloc(void) {
+  plat_thread_t *thread = malloc(sizeof(plat_thread_t));
+  return thread;
+}
+
+void plat_thread_free(plat_thread_t *thread) { free(thread); }
+
 plat_mutex_t *plat_mutex_alloc(void) {
   plat_mutex_t *mutex = malloc(sizeof(plat_mutex_t));
   return mutex;

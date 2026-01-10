@@ -339,6 +339,28 @@ int plat_thread_create(plat_thread_t *thread, void *(*fn)(void *), void *arg);
 int plat_thread_join(plat_thread_t *thread);
 
 /*
+ * Allocate a thread structure.
+ *
+ * Returns:
+ *   Pointer to allocated thread, or NULL on failure
+ *
+ * Notes:
+ *   - Must call plat_thread_free() when done
+ */
+plat_thread_t *plat_thread_alloc(void);
+
+/*
+ * Free a thread structure.
+ *
+ * Parameters:
+ *   thread - Thread to free (may be NULL)
+ *
+ * Notes:
+ *   - Thread should already be joined before freeing
+ */
+void plat_thread_free(plat_thread_t *thread);
+
+/*
  * Allocate a mutex structure.
  *
  * Returns:

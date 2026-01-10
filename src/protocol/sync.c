@@ -142,6 +142,11 @@ struct sync_manager {
    * Eliminates 288 KB stack allocation on every queue_blocks_from_headers() call. */
   hash256_t *queue_work_hashes;   /* Block hashes to queue */
   uint32_t *queue_work_heights;   /* Corresponding heights */
+
+  /* Mutex for thread-safe metrics access.
+   * Protects: blocks_received_total, block_sync_start_time/height, mode.
+   * RPC thread reads these via sync_get_progress/sync_get_metrics. */
+  plat_mutex_t *metrics_mutex;
 };
 
 /* ============================================================================
@@ -588,6 +593,18 @@ sync_manager_t *sync_create(chainstate_t *chainstate,
            mgr->best_header ? mgr->best_header->height : 0,
            chainstate_get_height(chainstate));
 
+  /* Initialize metrics mutex for thread-safe RPC access */
+  mgr->metrics_mutex = plat_mutex_alloc();
+  if (mgr->metrics_mutex == NULL) {
+    log_error(LOG_COMP_SYNC, "Failed to allocate metrics mutex");
+    free(mgr->queue_work_hashes);
+    free(mgr->queue_work_heights);
+    download_mgr_destroy(mgr->download_mgr);
+    free(mgr);
+    return NULL;
+  }
+  plat_mutex_init(mgr->metrics_mutex);
+
   return mgr;
 }
 
@@ -606,6 +623,13 @@ void sync_destroy(sync_manager_t *mgr) {
   free(mgr->pending_headers);
   free(mgr->queue_work_hashes);
   free(mgr->queue_work_heights);
+
+  /* Clean up metrics mutex */
+  if (mgr->metrics_mutex != NULL) {
+    plat_mutex_destroy(mgr->metrics_mutex);
+    plat_mutex_free(mgr->metrics_mutex);
+  }
+
   free(mgr);
 }
 
@@ -1762,6 +1786,12 @@ void sync_get_progress(const sync_manager_t *mgr, sync_progress_t *progress) {
     return;
   }
 
+  /* Lock mutex for thread-safe access (cast away const for mutex ops) */
+  plat_mutex_t *mutex = ((sync_manager_t *)mgr)->metrics_mutex;
+  if (mutex != NULL) {
+    plat_mutex_lock(mutex);
+  }
+
   memset(progress, 0, sizeof(sync_progress_t));
 
   progress->mode = mgr->mode;
@@ -1807,6 +1837,10 @@ void sync_get_progress(const sync_manager_t *mgr, sync_progress_t *progress) {
   if (progress->best_header_height > 0) {
     progress->sync_percentage = (float)progress->tip_height /
                                 (float)progress->best_header_height * 100.0f;
+  }
+
+  if (mutex != NULL) {
+    plat_mutex_unlock(mutex);
   }
 }
 
@@ -1895,6 +1929,14 @@ void sync_get_metrics(sync_manager_t *mgr, sync_metrics_t *metrics) {
    * This is the rate we can advance the chainstate tip. */
   metrics->validation_rate = calc_blocks_per_second(mgr);
 
+  /* Lock mutex for thread-safe access to metrics fields.
+   * Note: sync_get_progress() above has its own locking, we lock here for
+   * the additional fields accessed below. */
+  plat_mutex_t *mutex = mgr->metrics_mutex;
+  if (mutex != NULL) {
+    plat_mutex_lock(mutex);
+  }
+
   /* DOWNLOAD RATE: Blocks received from network per second (any order)
    * This shows how fast we're getting data, regardless of ordering. */
   if (mgr->block_sync_start_time > 0) {
@@ -1939,4 +1981,8 @@ void sync_get_metrics(sync_manager_t *mgr, sync_metrics_t *metrics) {
     }
   }
   metrics->active_sync_peers = active;
+
+  if (mutex != NULL) {
+    plat_mutex_unlock(mutex);
+  }
 }

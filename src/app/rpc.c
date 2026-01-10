@@ -831,7 +831,33 @@ struct rpc_server {
   node_t *node;
   uint16_t port;
   bool running;
+  plat_thread_t *thread; /* RPC processing thread (handles requests independently) */
 };
+
+/* Forward declaration for thread function.
+ * Returns: 1 if a request was processed, 0 if no connection pending, <0 on error */
+static int rpc_server_process_internal(rpc_server_t *server);
+
+/* RPC thread function - runs independently from main loop */
+static void *rpc_thread_func(void *arg) {
+  rpc_server_t *server = (rpc_server_t *)arg;
+  log_info(LOG_COMP_RPC, "RPC thread started");
+
+  while (server->running) {
+    /* Process one RPC request (or return immediately if none pending) */
+    int processed = rpc_server_process_internal(server);
+
+    /* If no request was pending, sleep briefly to avoid CPU spinning.
+     * 10ms is imperceptible to users but saves CPU cycles. */
+    if (processed == 0) {
+      plat_sleep_ms(10);
+    }
+    /* If a request was processed (1) or error (<0), loop immediately */
+  }
+
+  log_info(LOG_COMP_RPC, "RPC thread exiting");
+  return NULL;
+}
 
 void rpc_config_init(rpc_config_t *config) {
   if (config == NULL) {
@@ -855,6 +881,7 @@ rpc_server_t *rpc_server_create(const rpc_config_t *config, node_t *node) {
   server->port = config ? config->port : RPC_DEFAULT_PORT;
   server->listen_sock = NULL;
   server->running = false;
+  server->thread = NULL;
 
   return server;
 }
@@ -890,7 +917,7 @@ echo_result_t rpc_server_start(rpc_server_t *server) {
     return ECHO_ERR_PLATFORM_IO;
   }
 
-  /* Set non-blocking mode so event loop doesn't block on accept() */
+  /* Set non-blocking mode so thread doesn't block indefinitely on accept() */
   res = plat_socket_set_nonblocking(server->listen_sock);
   if (res != PLAT_OK) {
     plat_socket_close(server->listen_sock);
@@ -900,6 +927,33 @@ echo_result_t rpc_server_start(rpc_server_t *server) {
   }
 
   server->running = true;
+
+  /* Create and start RPC thread.
+   * The thread handles all RPC requests independently from the main loop,
+   * preventing block validation from causing RPC timeouts. */
+  server->thread = plat_thread_alloc();
+  if (server->thread == NULL) {
+    plat_socket_close(server->listen_sock);
+    plat_socket_free(server->listen_sock);
+    server->listen_sock = NULL;
+    server->running = false;
+    return ECHO_ERR_OUT_OF_MEMORY;
+  }
+
+  res = plat_thread_create(server->thread, rpc_thread_func, server);
+  if (res != PLAT_OK) {
+    log_error(LOG_COMP_RPC, "Failed to create RPC thread");
+    plat_thread_free(server->thread);
+    server->thread = NULL;
+    plat_socket_close(server->listen_sock);
+    plat_socket_free(server->listen_sock);
+    server->listen_sock = NULL;
+    server->running = false;
+    return ECHO_ERR_PLATFORM_IO;
+  }
+
+  log_info(LOG_COMP_RPC, "RPC server started on port %u (threaded)",
+           server->port);
   return ECHO_OK;
 }
 
@@ -1252,29 +1306,25 @@ static void rpc_handle_request(rpc_server_t *server, plat_socket_t *client_sock,
   json_free(root);
 }
 
-echo_result_t rpc_server_process(rpc_server_t *server) {
-  static int call_count = 0;
-  if (++call_count % 1000 == 0) {
-    log_info(LOG_COMP_RPC, "rpc_server_process called %d times", call_count);
-  }
-
+/* Internal function called by RPC thread - processes one request.
+ * Returns: 1 if a request was processed, 0 if no connection pending, <0 on error */
+static int rpc_server_process_internal(rpc_server_t *server) {
   if (server == NULL || !server->running) {
-    log_warn(LOG_COMP_RPC, "rpc_server_process: server NULL or not running");
-    return ECHO_ERR_INVALID_STATE;
+    return -1;
   }
 
   /* Allocate client socket */
   plat_socket_t *client_sock = plat_socket_alloc();
   if (client_sock == NULL) {
     log_error(LOG_COMP_RPC, "Failed to allocate client socket");
-    return ECHO_ERR_OUT_OF_MEMORY;
+    return -1;
   }
 
-  /* Check for new connection (blocking, but will timeout) */
+  /* Check for new connection (non-blocking) */
   int res = plat_socket_accept(server->listen_sock, client_sock);
   if (res != PLAT_OK) {
     plat_socket_free(client_sock);
-    return ECHO_OK; /* No pending connection */
+    return 0; /* No pending connection */
   }
 
   log_info(LOG_COMP_RPC, "Accepted new RPC connection");
@@ -1303,7 +1353,7 @@ echo_result_t rpc_server_process(rpc_server_t *server) {
       log_warn(LOG_COMP_RPC, "Socket recv returned %d with no data, closing", n);
       plat_socket_close(client_sock);
       plat_socket_free(client_sock);
-      return ECHO_OK;
+      return 1; /* Connection was handled (even if unsuccessfully) */
     }
     if (n == 0) {
       /* Connection closed */
@@ -1383,7 +1433,7 @@ echo_result_t rpc_server_process(rpc_server_t *server) {
 
   plat_socket_close(client_sock);
   plat_socket_free(client_sock);
-  return ECHO_OK;
+  return 1; /* Request processed */
 }
 
 echo_result_t rpc_server_stop(rpc_server_t *server) {
@@ -1395,13 +1445,25 @@ echo_result_t rpc_server_stop(rpc_server_t *server) {
     return ECHO_OK;
   }
 
+  /* Signal thread to exit first */
+  server->running = false;
+
+  /* Wait for RPC thread to finish */
+  if (server->thread != NULL) {
+    log_info(LOG_COMP_RPC, "Waiting for RPC thread to exit...");
+    plat_thread_join(server->thread);
+    plat_thread_free(server->thread);
+    server->thread = NULL;
+    log_info(LOG_COMP_RPC, "RPC thread exited");
+  }
+
+  /* Now close the socket */
   if (server->listen_sock != NULL) {
     plat_socket_close(server->listen_sock);
     plat_socket_free(server->listen_sock);
     server->listen_sock = NULL;
   }
 
-  server->running = false;
   return ECHO_OK;
 }
 

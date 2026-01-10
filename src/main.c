@@ -260,6 +260,7 @@ static void signal_handler(int sig) {
  * until shutdown is requested.
  */
 static void run_event_loop(node_t *node, rpc_server_t *rpc) {
+  (void)rpc; /* RPC now runs on its own thread, parameter kept for API stability */
   uint64_t last_maintenance = plat_time_ms();
   const uint64_t maintenance_interval = 1000; /* 1 second */
 
@@ -269,10 +270,7 @@ static void run_event_loop(node_t *node, rpc_server_t *rpc) {
     /* Process peer connections and messages */
     node_process_peers(node);
 
-    /* Process RPC requests */
-    if (rpc != NULL) {
-      rpc_server_process(rpc);
-    }
+    /* RPC requests are handled by dedicated thread (see rpc_server_start) */
 
     /* Process received blocks (full node mode only) */
     if (!node_is_observer(node)) {
